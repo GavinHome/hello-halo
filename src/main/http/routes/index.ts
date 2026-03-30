@@ -33,7 +33,7 @@ import {
 import { getTempSpacePath, getSpacesDir, getConfig as getServiceConfig } from '../../services/config.service'
 import { getSpace, getAllSpacePaths } from '../../services/space.service'
 import { getAppManager } from '../../apps/manager'
-import { getAppRuntime, getWecomBotSource, sendAppChatMessage, stopAppChat, isAppChatGenerating, loadAppChatMessages, getAppChatSessionState, getAppChatConversationId } from '../../apps/runtime'
+import { getAppRuntime, getWecomBotSource, sendAppChatMessage, stopAppChat, isAppChatGenerating, loadAppChatMessages, loadImChatMessages, getAppChatSessionState, getAppChatConversationId } from '../../apps/runtime'
 import type { AppListFilter, UninstallOptions, InstalledApp } from '../../apps/manager'
 import type { ActivityQueryOptions, EscalationResponse, AppChatRequest } from '../../apps/runtime'
 import { readSessionMessages } from '../../apps/runtime/session-store'
@@ -1566,6 +1566,41 @@ export function registerApiRoutes(app: Express): void {
       }
       const state = getAppChatSessionState(appId)
       res.json({ success: true, data: state })
+    } catch (error) {
+      res.json({ success: false, error: (error as Error).message })
+    }
+  })
+
+  // GET /api/apps/:appId/im-chat/messages — load persisted IM chat messages
+  app.get('/api/apps/:appId/im-chat/messages', async (req: Request, res: Response) => {
+    try {
+      const { appId } = req.params
+      if (!appId) {
+        res.status(400).json({ success: false, error: 'Missing appId' })
+        return
+      }
+      const channel = typeof req.query.channel === 'string' ? req.query.channel : ''
+      const chatType = req.query.chatType === 'group' ? 'group' as const : 'direct' as const
+      const chatId = typeof req.query.chatId === 'string' ? req.query.chatId : ''
+      const spaceId = typeof req.query.spaceId === 'string' ? req.query.spaceId : ''
+      if (!channel || !chatId || !spaceId) {
+        res.status(400).json({ success: false, error: 'Missing required query params: channel, chatId, spaceId' })
+        return
+      }
+      const manager = getManagerOrFail(res)
+      if (!manager) return
+      const appData = manager.getApp(appId)
+      if (!appData) {
+        res.status(404).json({ success: false, error: 'App not found' })
+        return
+      }
+      const space = getSpace(appData.spaceId ?? spaceId)
+      if (!space?.path) {
+        res.json({ success: true, data: [] })
+        return
+      }
+      const messages = loadImChatMessages(space.path, appId, channel, chatType, chatId)
+      res.json({ success: true, data: messages })
     } catch (error) {
       res.json({ success: false, error: (error as Error).message })
     }

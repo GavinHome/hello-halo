@@ -1711,6 +1711,13 @@ export const api = {
     return httpRequest('POST', `/api/apps/${appId}/chat/clear`, { spaceId })
   },
 
+  appImChatMessages: async (appId: string, spaceId: string, channel: string, chatType: 'direct' | 'group', chatId: string): Promise<ApiResponse> => {
+    if (isElectron()) {
+      return window.halo.appImChatMessages({ appId, spaceId, channel, chatType, chatId })
+    }
+    return httpRequest('GET', `/api/apps/${appId}/im-chat/messages?spaceId=${spaceId}&channel=${encodeURIComponent(channel)}&chatType=${chatType}&chatId=${encodeURIComponent(chatId)}`)
+  },
+
   // App Event Listeners
   onAppStatusChanged: (callback: (data: unknown) => void) =>
     onEvent('app:status_changed', callback),
@@ -1723,6 +1730,9 @@ export const api = {
 
   onAppNavigate: (callback: (data: unknown) => void) =>
     onEvent('app:navigate', callback),
+
+  onImSessionUpdated: (callback: (data: unknown) => void) =>
+    onEvent('app:im-session-updated', callback),
 
   // ===== Store (App Registry) =====
   storeQuery: async (params: { search?: string; type?: string; category?: string; page?: number; pageSize?: number; locale?: string }): Promise<ApiResponse> => {

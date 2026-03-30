@@ -90,6 +90,7 @@ export {
   stopAppChat,
   isAppChatGenerating,
   loadAppChatMessages,
+  loadImChatMessages,
   getAppChatSessionState,
   getAppChatConversationId,
   buildImSessionKey,

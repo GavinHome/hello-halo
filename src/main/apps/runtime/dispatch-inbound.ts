@@ -21,6 +21,8 @@ import { getAppManager } from '../manager'
 import { getConfig } from '../../services/config.service'
 import { sendAppChatMessage, buildImSessionKey } from './app-chat'
 import { getImSessionRegistry } from './im-session-registry'
+import { sendToRenderer } from '../../services/window.service'
+import { broadcastToAll } from '../../http/websocket'
 
 // ============================================
 // Constants
@@ -146,6 +148,25 @@ export async function dispatchInboundMessage(
       displayName,
       lastSender: msg.fromName,
       lastMessage: msg.body.slice(0, 50),
+    })
+
+    // Notify renderer of session update for real-time panel refresh
+    sendToRenderer('app:im-session-updated', {
+      appId: app.id,
+      channel: msg.channel,
+      chatId: msg.chatId,
+      chatType: msg.chatType,
+      lastMessage: msg.body.slice(0, 50),
+      lastSender: msg.fromName,
+    })
+    // Also broadcast to remote/Capacitor clients
+    broadcastToAll('app:im-session-updated', {
+      appId: app.id,
+      channel: msg.channel,
+      chatId: msg.chatId,
+      chatType: msg.chatType,
+      lastMessage: msg.body.slice(0, 50),
+      lastSender: msg.fromName,
     })
   }
 

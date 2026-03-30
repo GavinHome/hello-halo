@@ -443,6 +443,7 @@ export function onEvent(channel: string, callback: (data: unknown) => void): () 
       'app:activity_entry:new': 'onAppActivityEntry',
       'app:escalation:new': 'onAppEscalation',
       'app:navigate': 'onAppNavigate',
+      'app:im-session-updated': 'onImSessionUpdated',
       'notification:toast': 'onNotificationToast'
     }
 

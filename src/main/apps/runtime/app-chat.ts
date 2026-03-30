@@ -425,6 +425,30 @@ export function loadAppChatMessages(spacePath: string, appId: string): any[] {
 }
 
 /**
+ * Load persisted chat messages for an IM session.
+ *
+ * Constructs the conversationId from IM session parameters, derives the
+ * corresponding JSONL runId, and reads the persisted messages.
+ *
+ * @param spacePath - Space directory path
+ * @param appId - App ID
+ * @param channel - IM channel identifier (e.g., 'wecom-bot')
+ * @param chatType - Conversation type ('direct' | 'group')
+ * @param chatId - Platform-side conversation ID
+ */
+export function loadImChatMessages(
+  spacePath: string,
+  appId: string,
+  channel: string,
+  chatType: 'direct' | 'group',
+  chatId: string
+): any[] {
+  const conversationId = buildImSessionKey(appId, channel, chatType, chatId)
+  const runId = deriveRunId(conversationId, appId)
+  return readSessionMessages(spacePath, appId, runId)
+}
+
+/**
  * Get session state for recovery after page refresh.
  *
  * @param appId - App ID

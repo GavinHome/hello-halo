@@ -428,11 +428,7 @@ async function handleOpenAIConversion(
     anthropicRequest.model = model
   }
 
-  if (debug) {
-    console.log('[RequestHandler] Backend:', backendUrl)
-    console.log('[RequestHandler] API Key:', apiKey.slice(0, 8) + '...')
-    console.log('[RequestHandler] ApiType:', apiType)
-  }
+  console.log(`[RequestHandler] model=${anthropicRequest.model} apiKey=${apiKey ? apiKey.slice(0, 8) + '...' : 'none'}`)
 
   // Use request queue to prevent concurrent requests
   const queueKey = generateQueueKey(backendUrl, apiKey)

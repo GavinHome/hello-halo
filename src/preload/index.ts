@@ -389,12 +389,14 @@ export interface HaloAPI {
   appChatMessages: (input: { appId: string; spaceId: string }) => Promise<IpcResponse>
   appChatSessionState: (appId: string) => Promise<IpcResponse>
   appChatClear: (input: { appId: string; spaceId: string }) => Promise<IpcResponse>
+  appImChatMessages: (input: { appId: string; spaceId: string; channel: string; chatType: 'direct' | 'group'; chatId: string }) => Promise<IpcResponse>
 
   // App Event Listeners
   onAppStatusChanged: (callback: (data: unknown) => void) => () => void
   onAppActivityEntry: (callback: (data: unknown) => void) => () => void
   onAppEscalation: (callback: (data: unknown) => void) => () => void
   onAppNavigate: (callback: (data: unknown) => void) => () => void
+  onImSessionUpdated: (callback: (data: unknown) => void) => () => void
 
   // Notification (in-app toast)
   onNotificationToast: (callback: (data: unknown) => void) => () => void
@@ -732,12 +734,14 @@ const api: HaloAPI = {
   appChatMessages: (input) => ipcRenderer.invoke('app:chat-messages', input),
   appChatSessionState: (appId) => ipcRenderer.invoke('app:chat-session-state', appId),
   appChatClear: (input) => ipcRenderer.invoke('app:chat-clear', input),
+  appImChatMessages: (input) => ipcRenderer.invoke('app:im-chat-messages', input),
 
   // App Event Listeners
   onAppStatusChanged: (callback) => createEventListener('app:status_changed', callback),
   onAppActivityEntry: (callback) => createEventListener('app:activity_entry:new', callback),
   onAppEscalation: (callback) => createEventListener('app:escalation:new', callback),
   onAppNavigate: (callback) => createEventListener('app:navigate', callback),
+  onImSessionUpdated: (callback) => createEventListener('app:im-session-updated', callback),
 
   // Store (App Registry)
   storeQuery: (params) => ipcRenderer.invoke('store:query', params),
