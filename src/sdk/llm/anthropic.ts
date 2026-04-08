@@ -21,6 +21,12 @@ import type {
   UsageInfo,
 } from '../types/provider.js';
 import { parseSSEStream } from './stream-parser.js';
+import {
+  DEFAULT_RETRY,
+  delayForAttempt,
+  isRetryableStatus,
+  parseRetryAfterMs,
+} from '../utils/retry.js';
 
 // ---------------------------------------------------------------------------
 // Configuration
@@ -39,34 +45,6 @@ export interface AnthropicProviderConfig {
   headers?: Record<string, string>;
   /** Default model to use when none is specified */
   defaultModel?: string;
-}
-
-// ---------------------------------------------------------------------------
-// Retry configuration
-// ---------------------------------------------------------------------------
-
-interface RetryConfig {
-  maxRetries: number;
-  initialDelayMs: number;
-  maxDelayMs: number;
-  backoffMultiplier: number;
-}
-
-const DEFAULT_RETRY: RetryConfig = {
-  maxRetries: 5,
-  initialDelayMs: 1000,
-  maxDelayMs: 60_000,
-  backoffMultiplier: 2.0,
-};
-
-function delayForAttempt(config: RetryConfig, attempt: number): number {
-  const base = config.initialDelayMs * Math.pow(config.backoffMultiplier, attempt);
-  const jitter = base * 0.1 * Math.random();
-  return Math.min(base + jitter, config.maxDelayMs);
-}
-
-function isRetryableStatus(status: number): boolean {
-  return status === 429 || status === 529 || (status >= 500 && status < 600);
 }
 
 // ---------------------------------------------------------------------------
@@ -260,13 +238,10 @@ export class AnthropicProvider implements LlmProvider {
         const errorBody = await response.text().catch(() => '');
 
         if (isRetryableStatus(status) && attempt < DEFAULT_RETRY.maxRetries) {
-          // Check for Retry-After header
-          const retryAfter = response.headers.get('retry-after');
-          if (retryAfter) {
-            const retryMs = parseInt(retryAfter, 10) * 1000;
-            if (!isNaN(retryMs) && retryMs > 0) {
-              await new Promise((r) => setTimeout(r, retryMs));
-            }
+          // Honour Retry-After header when present (supports both delta-seconds and HTTP-date)
+          const retryAfterMs = parseRetryAfterMs(response.headers);
+          if (retryAfterMs !== undefined) {
+            await new Promise((r) => setTimeout(r, retryAfterMs));
           }
           lastError = new Error(`HTTP ${status}: ${errorBody}`);
           continue;

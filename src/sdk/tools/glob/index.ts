@@ -85,10 +85,17 @@ async function walkAndMatch(
   pattern: string,
   results: Array<{ filePath: string; mtime: number }>,
 ): Promise<void> {
-  // Skip common non-interesting directories
+  // Skip large or system-level directories that are rarely useful for globbing.
+  // NOTE: Hidden directories are NOT universally skipped here so that patterns
+  // like ".claude/**" or ".halo/**" work correctly.  Only well-known heavy
+  // directories (VCS internals, caches, build artefacts) are excluded.
   const SKIP_DIRS = new Set([
-    'node_modules', '.git', '.hg', '.svn', '__pycache__',
+    'node_modules', '__pycache__',
     'target', 'dist', 'build', '.next', '.nuxt',
+    // VCS
+    '.git', '.hg', '.svn',
+    // Package / build caches
+    '.npm', '.yarn', '.cache', '.cargo', '.gradle',
   ]);
 
   const entries = await fs.readdir(dir, { withFileTypes: true });
@@ -97,8 +104,7 @@ async function walkAndMatch(
     const fullPath = path.join(dir, entry.name);
 
     if (entry.isDirectory()) {
-      // Skip hidden dirs and common large dirs
-      if (entry.name.startsWith('.') || SKIP_DIRS.has(entry.name)) {
+      if (SKIP_DIRS.has(entry.name)) {
         continue;
       }
       await walkAndMatch(fullPath, pattern, results);

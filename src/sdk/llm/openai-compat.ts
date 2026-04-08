@@ -26,6 +26,12 @@ import type {
 } from '../types/provider.js';
 import { parseSSEStream } from './stream-parser.js';
 import { applyModelQuirks, applyStreamQuirks, isQuirkyModel, isQwenThinkModel, ThinkTagParser } from './model-quirks.js';
+import {
+  DEFAULT_RETRY,
+  delayForAttempt,
+  isRetryableStatus,
+  parseRetryAfterMs,
+} from '../utils/retry.js';
 
 // ---------------------------------------------------------------------------
 // Configuration
@@ -62,34 +68,6 @@ export interface ProviderQuirks {
   fixToolUserSequence?: boolean;
   /** Name of the JSON field carrying extended reasoning text (e.g. "reasoning_content"). */
   reasoningField?: string;
-}
-
-// ---------------------------------------------------------------------------
-// Retry configuration (same as anthropic.ts)
-// ---------------------------------------------------------------------------
-
-interface RetryConfig {
-  maxRetries: number;
-  initialDelayMs: number;
-  maxDelayMs: number;
-  backoffMultiplier: number;
-}
-
-const DEFAULT_RETRY: RetryConfig = {
-  maxRetries: 5,
-  initialDelayMs: 1000,
-  maxDelayMs: 60_000,
-  backoffMultiplier: 2.0,
-};
-
-function delayForAttempt(config: RetryConfig, attempt: number): number {
-  const base = config.initialDelayMs * Math.pow(config.backoffMultiplier, attempt);
-  const jitter = base * 0.1 * Math.random();
-  return Math.min(base + jitter, config.maxDelayMs);
-}
-
-function isRetryableStatus(status: number): boolean {
-  return status === 429 || (status >= 500 && status < 600);
 }
 
 // ---------------------------------------------------------------------------
@@ -165,6 +143,10 @@ export class OpenAiCompatProvider implements LlmProvider {
         const status = response.status;
         const errorBody = await response.text().catch(() => '');
         if (isRetryableStatus(status) && attempt < DEFAULT_RETRY.maxRetries) {
+          const retryAfterMs = parseRetryAfterMs(response.headers);
+          if (retryAfterMs !== undefined) {
+            await new Promise((r) => setTimeout(r, retryAfterMs));
+          }
           lastError = new Error(`HTTP ${status}: ${errorBody}`);
           continue;
         }
@@ -217,6 +199,10 @@ export class OpenAiCompatProvider implements LlmProvider {
         const status = response.status;
         const errorBody = await response.text().catch(() => '');
         if (isRetryableStatus(status) && attempt < DEFAULT_RETRY.maxRetries) {
+          const retryAfterMs = parseRetryAfterMs(response.headers);
+          if (retryAfterMs !== undefined) {
+            await new Promise((r) => setTimeout(r, retryAfterMs));
+          }
           lastError = new Error(`HTTP ${status}: ${errorBody}`);
           continue;
         }

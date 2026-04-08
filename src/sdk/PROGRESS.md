@@ -9,7 +9,7 @@ Branch: `feature/sdk`
 
 ---
 
-## Completed (Run 1–10)
+## Completed (Run 1–13)
 
 ### Run 1 — Foundation
 - Created `index.ts` public API surface (query, createSession, tool, createSdkMcpServer, etc.)
@@ -102,6 +102,23 @@ Branch: `feature/sdk`
 - Consumer compatibility: stream-processor.ts `handleTaskStarted/Progress/Notification` + sub-agent timeline now work with our SDK
 - tsc --noEmit passes
 
+### Run 13 — Retry Dedup + GlobTool Hidden Directory Fix
+- **`utils/retry.ts`** — new shared retry utility module:
+  - `RetryConfig` interface + `DEFAULT_RETRY` constant (5 retries, 1 s → 60 s exponential backoff)
+  - `delayForAttempt(config, attempt)` — exponential backoff with ±10 % jitter
+  - `isRetryableStatus(status)` — 429, 529 (Anthropic overload), 5xx
+  - `parseRetryAfterMs(headers)` — parses both delta-seconds and HTTP-date `Retry-After` forms
+  - `sleep(ms, signal?)` — abort-aware sleep utility
+- **`llm/anthropic.ts`** — imports from `utils/retry.ts`, removed duplicate local definitions
+  - Upgraded `Retry-After` handling to use `parseRetryAfterMs` (supports HTTP-date form, not just integers)
+- **`llm/openai-compat.ts`** — imports from `utils/retry.ts`, removed 26-line duplicate block
+  - Added `Retry-After` header handling in both `createMessage` and `createMessageStream` retry loops
+  - `isRetryableStatus` now includes 529 (was missing in openai-compat, now consistent via shared fn)
+- **`tools/glob/index.ts`** — hidden directory traversal fixed:
+  - Removed blanket `entry.name.startsWith('.')` skip — patterns like `.claude/**`, `.halo/**`, `.github/**` now work
+  - Expanded `SKIP_DIRS` with `.npm`, `.yarn`, `.cache`, `.cargo`, `.gradle` for cache hygiene
+- tsc --noEmit passes
+
 ---
 
 ## Priority Queue (Next Runs)
@@ -115,5 +132,4 @@ Branch: `feature/sdk`
 - [ ] Agent progress summaries (agentProgressSummaries fork+summarize every 30s)
 
 ### P3 (Nice to have)
-- [ ] GlobTool hidden directory handling
 - [ ] TaskStopTool actual process termination
