@@ -506,6 +506,41 @@ Branch: `feature/sdk`
 
 ---
 
+### Run 26 — SDKMessage Type Fixes + Stream Event Wire Format
+
+**Bug fix: `rate_limit_event` and `prompt_suggestion` wrong message type**
+- CC SDK defines `SDKRateLimitEvent` as `{ type: 'rate_limit_event', ... }` (top-level type)
+- CC SDK defines `SDKPromptSuggestionMessage` as `{ type: 'prompt_suggestion', ... }` (top-level type)
+- Our SDK incorrectly defined both as `{ type: 'system', subtype: 'rate_limit_event'|'prompt_suggestion' }`
+- Fixed to match CC SDK contract — both are now top-level message types
+
+**Enhancement: `SDKRateLimitInfo` type matching CC SDK contract**
+- Added `SDKRateLimitInfo` interface with all CC SDK fields:
+  `status`, `resetsAt`, `rateLimitType`, `utilization`, `overageStatus`,
+  `overageResetsAt`, `overageDisabledReason`, `isUsingOverage`, `surpassedThreshold`
+- Previously used ad-hoc inline type with different field names (`requests_limit`, `tokens_remaining`, etc.)
+- Exported from index.ts for consumer use
+
+**Bug fix: `files_persisted` event missing CC SDK fields**
+- CC SDK `SDKFilesPersistedEvent` has `files: Array<{filename, file_id}>`, `failed: Array<{filename, error}>`, `processed_at: string`
+- Our SDK only had `files: string[]` — missing `failed`, `processed_at`, and wrong `files` shape
+- Fixed to match CC SDK contract
+
+**Bug fix: `toWireStreamEvent` non-delta events not matching Anthropic BetaRawMessageStreamEvent wire format**
+- `message_start`: internal format was flat `{ type, id, model, usage }` but Anthropic wire
+  format wraps in `{ type: 'message_start', message: { id, model, role, content, usage, stop_reason, ... } }`
+  — consumer's stream-processor.ts receives this via `(sdkMessage as any).event`
+- `message_delta`: internal format used `stopReason` (camelCase) but Anthropic wire format uses
+  `{ type: 'message_delta', delta: { stop_reason, type }, usage }` with snake_case inside a `delta` object
+- Added explicit cases for `message_start`, `message_delta`, `content_block_start`,
+  `content_block_stop`, `message_stop` instead of relying on the default pass-through
+- `content_block_start/stop` and `message_stop` already matched — documented with explicit cases
+  for clarity and to prevent future regressions
+
+- tsc --noEmit passes
+
+---
+
 ## Priority Queue (Next Runs)
 
 ### P1 (Critical)

@@ -340,34 +340,27 @@ export type SDKMessage =
       session_id: string;
       uuid: string;
     }
-  // Rate limit event
+  // Rate limit event — CC SDK SDKRateLimitEvent (top-level type, NOT system subtype)
   | {
-      type: 'system';
-      subtype: 'rate_limit_event';
-      rate_limit_info: {
-        requests_limit?: number;
-        requests_remaining?: number;
-        requests_reset?: string;
-        tokens_limit?: number;
-        tokens_remaining?: number;
-        tokens_reset?: string;
-      };
+      type: 'rate_limit_event';
+      rate_limit_info: SDKRateLimitInfo;
       session_id: string;
       uuid: string;
     }
-  // Prompt suggestion (after result)
+  // Prompt suggestion — CC SDK SDKPromptSuggestionMessage (top-level type, NOT system subtype)
   | {
-      type: 'system';
-      subtype: 'prompt_suggestion';
+      type: 'prompt_suggestion';
       suggestion: string;
       session_id: string;
       uuid: string;
     }
-  // Files persisted event
+  // Files persisted event — CC SDK SDKFilesPersistedEvent
   | {
       type: 'system';
       subtype: 'files_persisted';
-      files: string[];
+      files: Array<{ filename: string; file_id: string }>;
+      failed: Array<{ filename: string; error: string }>;
+      processed_at: string;
       session_id: string;
       uuid: string;
     }
@@ -385,6 +378,21 @@ export type SDKMessage =
 // ---------------------------------------------------------------------------
 
 type AssistantMessageError = 'authentication_failed' | 'billing_error' | 'rate_limit' | 'invalid_request' | 'server_error' | 'unknown' | 'max_output_tokens';
+
+/**
+ * Rate limit info matching CC SDK SDKRateLimitInfo.
+ */
+export interface SDKRateLimitInfo {
+  status: 'allowed' | 'allowed_warning' | 'rejected';
+  resetsAt?: number;
+  rateLimitType?: 'five_hour' | 'seven_day' | 'seven_day_opus' | 'seven_day_sonnet' | 'overage';
+  utilization?: number;
+  overageStatus?: 'allowed' | 'allowed_warning' | 'rejected';
+  overageResetsAt?: number;
+  overageDisabledReason?: string;
+  isUsingOverage?: boolean;
+  surpassedThreshold?: number;
+}
 
 /** Classify an HTTP status code into the CC SDK error category string. */
 function classifyApiError(statusCode: number | undefined): AssistantMessageError {
@@ -529,9 +537,44 @@ function toWireStreamEvent(event: StreamEvent): Record<string, unknown> {
         index: event.index,
         delta: { type: 'thinking_delta', thinking: event.reasoning },
       };
+    case 'message_start':
+      // Anthropic wire format wraps the message metadata inside a `message` object:
+      // { type: 'message_start', message: { id, model, role, content, type, usage, ... } }
+      return {
+        type: 'message_start',
+        message: {
+          id: event.id,
+          type: 'message',
+          role: 'assistant',
+          model: event.model,
+          content: [],
+          usage: event.usage,
+          stop_reason: null,
+          stop_sequence: null,
+        },
+      };
+    case 'message_delta':
+      // Anthropic wire format: { type: 'message_delta', delta: { stop_reason, type }, usage }
+      return {
+        type: 'message_delta',
+        delta: {
+          type: 'message_delta',
+          stop_reason: event.stopReason ?? null,
+          stop_sequence: null,
+        },
+        usage: event.usage ?? { output_tokens: 0 },
+      };
+    case 'content_block_start':
+      // Already wire-compatible: { type, index, content_block }
+      return event as unknown as Record<string, unknown>;
+    case 'content_block_stop':
+      // Already wire-compatible: { type, index }
+      return event as unknown as Record<string, unknown>;
+    case 'message_stop':
+      // Already wire-compatible: { type: 'message_stop' }
+      return event as unknown as Record<string, unknown>;
     default:
-      // message_start, content_block_start, content_block_stop, message_stop,
-      // message_delta, error — pass through as-is (already wire-compatible)
+      // error and any future events — pass through as-is
       return event as unknown as Record<string, unknown>;
   }
 }

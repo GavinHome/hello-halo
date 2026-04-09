@@ -16,7 +16,7 @@
 export { createSession } from './core/session.js';
 export type { SDKSession } from './core/session.js';
 export { queryLoop } from './core/query-loop.js';
-export type { SDKMessage, QueryLoopOptions } from './core/query-loop.js';
+export type { SDKMessage, SDKRateLimitInfo, QueryLoopOptions } from './core/query-loop.js';
 export { CostTracker } from './core/cost.js';
 export type { ModelUsageEntry } from './core/cost.js';
 export { TokenBudget } from './core/token-budget.js';
