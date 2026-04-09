@@ -467,6 +467,14 @@ async function* accumulateAndStream(
         }
         break;
 
+      case 'reasoning_delta':
+        // OpenAI-compat reasoning (Qwen/DeepSeek via ThinkTagParser).
+        // No content_block_start precedes these, so thinkingIndex is -1.
+        // Accumulate directly — the ThinkingBlock is assembled from these
+        // chunks at the end of the stream regardless of index matching.
+        thinkingChunks.push(event.reasoning);
+        break;
+
       case 'input_json_delta': {
         const tc = toolCallBlocks.get(event.index);
         if (tc) {
@@ -622,7 +630,7 @@ export async function* queryLoop(
       modelUsage: costTracker.getModelUsage(),
       session_id: sessionId,
       duration_ms: Date.now() - startTime,
-      duration_api_ms: Date.now() - startTime,
+      duration_api_ms: totalApiTimeMs,
       permission_denials: [],
       uuid: randomUUID(),
     };
@@ -633,6 +641,9 @@ export async function* queryLoop(
   let effectiveModel = config.model;
   let usedFallback = false;
   let retryAttempt = 0;
+  // Track cumulative time spent waiting for LLM API calls (excludes tool execution).
+  // Used for duration_api_ms in result messages.
+  let totalApiTimeMs = 0;
 
   while (true) {
     turn++;
@@ -716,6 +727,7 @@ export async function* queryLoop(
 
       // Delegate to the streaming accumulator — yields stream_events in real-time,
       // returns AccumulatedResponse when done.
+      const apiCallStart = Date.now();
       accumulated = yield* accumulateAndStream(
         stream,
         config.abortSignal,
@@ -723,6 +735,7 @@ export async function* queryLoop(
         config.includePartialMessages,
         options?.onProgress,
       );
+      totalApiTimeMs += Date.now() - apiCallStart;
 
       // Reset retry counter on success
       retryAttempt = 0;
@@ -909,7 +922,7 @@ export async function* queryLoop(
         session_id: sessionId,
         stop_reason: accumulated.stopReason,
         duration_ms: Date.now() - startTime,
-        duration_api_ms: Date.now() - startTime,
+        duration_api_ms: totalApiTimeMs,
         permission_denials: [],
         uuid: randomUUID(),
       };

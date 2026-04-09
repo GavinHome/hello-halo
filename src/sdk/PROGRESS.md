@@ -163,6 +163,30 @@ Branch: `feature/sdk`
 
 - tsc --noEmit passes
 
+### Run 16 — Bug Fixes: reasoning_delta accumulation + slashCommands/skills propagation + duration_api_ms
+
+**Bug fix: reasoning_delta not accumulated (`core/query-loop.ts`)**
+- Qwen/DeepSeek models emit `reasoning_delta` events (via `ThinkTagParser`); there was no case for them in `accumulateAndStream`'s accumulation switch — thinking content was silently dropped from the conversation history (it streamed to the consumer but was never stored)
+- Added `case 'reasoning_delta'` that pushes `event.reasoning` directly to `thinkingChunks` (no index check needed since these events have no `content_block_start` predecessor)
+- Final `ThinkingBlock` is now correctly built for OpenAI-compat thinking models
+
+**Bug fix: slashCommands / skills not passed to init message (`core/session.ts`, `index.ts`)**
+- `session.stream()` was building `queryOpts` without `slashCommands` / `skills`, so the `system:init` message emitted to the consumer had empty slash command and skill lists regardless of what the host passed in `Options`
+- Added `skills: string[]` field to `SessionState`; populated from `options.skills` in `createSession()`
+- `stream()` now passes `slashCommands` (mapped to name strings) and `skills` in `queryOpts`
+- `query()` in `index.ts` was missing the same — added slash command name extraction + `queryOpts` population
+
+**Enhancement: accurate `duration_api_ms` tracking (`core/query-loop.ts`)**
+- Previously both `duration_ms` and `duration_api_ms` in result messages were set to `Date.now() - startTime` (total wall-clock time including tool execution)
+- Added `totalApiTimeMs` counter; each `createMessageStream` / `accumulateAndStream` call now wraps the API call with `Date.now()` bookmarks and accumulates elapsed time across turns
+- `duration_api_ms` in success and error result messages now reports pure LLM API wait time (tool execution time excluded)
+
+**Fix: `content_block_start` event field naming (`types/provider.ts`)**
+- `StreamEvent` for `content_block_start` had `contentBlock` (camelCase) but all usages in `anthropic.ts`, `openai-compat.ts`, and `query-loop.ts` used `content_block` (snake_case)
+- Corrected field name to `content_block` — matches the Anthropic wire format and the consumer's CC SDK type expectations
+
+- tsc --noEmit passes
+
 ---
 
 ## Priority Queue (Next Runs)

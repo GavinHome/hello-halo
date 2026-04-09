@@ -183,10 +183,17 @@ export interface ProviderResponse {
 // StreamEvent
 // ---------------------------------------------------------------------------
 
-/** Events emitted by the provider-agnostic streaming layer. */
+/**
+ * Events emitted by the provider-agnostic streaming layer.
+ *
+ * Field names use the Anthropic wire-format convention (snake_case) so that
+ * `stream_event` SDKMessages forwarded to the consumer are compatible with the
+ * CC SDK's `BetaRawMessageStreamEvent` format.  Consumer code reads
+ * `event.content_block?.type`, `event.content_block?.text`, etc.
+ */
 export type StreamEvent =
   | { type: 'message_start'; id: string; model: string; usage: UsageInfo }
-  | { type: 'content_block_start'; index: number; contentBlock: ContentBlock }
+  | { type: 'content_block_start'; index: number; content_block: ContentBlock }
   | { type: 'text_delta'; index: number; text: string }
   | { type: 'thinking_delta'; index: number; thinking: string }
   | { type: 'input_json_delta'; index: number; partialJson: string }

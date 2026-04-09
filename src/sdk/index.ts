@@ -193,8 +193,18 @@ export function query(params: {
       tools,
     });
 
+    // Build slash command names for the init message
+    const slashCommandNames: string[] = [];
+    if (options.slashCommands) {
+      for (const cmd of options.slashCommands) {
+        slashCommandNames.push(typeof cmd === 'string' ? cmd : cmd.name);
+      }
+    }
+
     const queryOpts: QueryLoopOptions = {
       mcpServerStatuses: mcpStatuses.length > 0 ? mcpStatuses : undefined,
+      slashCommands: slashCommandNames.length > 0 ? slashCommandNames : undefined,
+      skills: options.skills && options.skills.length > 0 ? options.skills : undefined,
     };
 
     try {

@@ -92,6 +92,8 @@ interface SessionState {
   orchestrator: OrchestratorHandle | null;
   /** Slash commands for supportedCommands() (from config). */
   slashCommands: SlashCommand[];
+  /** Skill names for the init message (from config). */
+  skills: string[];
   /** Exit listeners for the transport shim. */
   exitListeners: Set<(error: Error | undefined) => void>;
   /** Transcript writer for session persistence (null if disabled). */
@@ -246,6 +248,7 @@ export async function createSession(options: Options): Promise<SDKSession> {
     mcpServerStatuses,
     orchestrator,
     slashCommands,
+    skills: options.skills ?? [],
     exitListeners: new Set(),
     transcriptWriter,
     initEmitted: false,
@@ -439,6 +442,12 @@ function createSessionProxy(state: SessionState): SDKSession {
         mcpServerStatuses: state.mcpServerStatuses.length > 0
           ? state.mcpServerStatuses
           : undefined,
+        slashCommands: state.slashCommands.length > 0
+          ? state.slashCommands.map((c) => c.name)
+          : undefined,
+        skills: state.skills.length > 0
+          ? state.skills
+          : undefined,
       };
       const gen = queryLoop(
         state.config,
@@ -454,9 +463,15 @@ function createSessionProxy(state: SessionState): SDKSession {
           return;
         }
 
-        // Track messages for session continuity and persist to transcript
+        // Track messages for session continuity and persist to transcript.
+        // Strip `usage` from the message object before storing in history — the
+        // Anthropic API message format is { role, content } and extra fields like
+        // `usage` would be forwarded back to the API on subsequent turns.
         if (msg.type === 'assistant') {
-          state.messages.push(msg.message);
+          // eslint-disable-next-line @typescript-eslint/no-unused-vars
+          const { usage: _usage, ...cleanAssistantMsg } =
+            msg.message as typeof msg.message & { usage?: unknown };
+          state.messages.push(cleanAssistantMsg as typeof msg.message);
           void state.transcriptWriter?.writeAssistantMessage(msg.message);
         } else if (msg.type === 'user') {
           // Tool result messages from the query loop — persist for full context on resume
