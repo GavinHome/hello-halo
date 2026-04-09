@@ -99,7 +99,15 @@ export const TASK_OUTPUT_INPUT_SCHEMA = {
   type: 'object',
   properties: {
     task_id: { type: 'string', description: 'Task ID to get output for' },
-    block: { type: 'boolean', description: 'Wait for task to complete (default true)' },
+    block: {
+      type: 'boolean',
+      description: 'Whether to wait for completion (default true)',
+    },
+    timeout: {
+      type: 'number',
+      description:
+        'Max wait time in ms when block=true (default: 30000). Returns not_ready if exceeded.',
+    },
   },
   required: ['task_id'],
 } as const;

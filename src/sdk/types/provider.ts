@@ -29,6 +29,12 @@ export interface TextBlock {
 export interface ThinkingBlock {
   type: 'thinking';
   thinking: string;
+  /**
+   * Cryptographic signature issued by the Anthropic API.
+   * Must be preserved and sent back in subsequent turns when using
+   * extended thinking — the API verifies it to prevent tampering.
+   */
+  signature?: string;
 }
 
 export interface ToolUseBlock {

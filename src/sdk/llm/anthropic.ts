@@ -99,7 +99,7 @@ export class AnthropicProvider implements LlmProvider {
     let model = request.model || this.defaultModel;
     const contentBlocks: ContentBlock[] = [];
     const textParts: Map<number, string> = new Map();
-    const thinkingParts: Map<number, string> = new Map();
+    const thinkingParts: Map<number, { thinking: string; signature: string }> = new Map();
     const toolBuffers: Map<number, { id: string; name: string; jsonBuf: string }> = new Map();
     let stopReason: StopReason = 'end_turn';
     let usage: UsageInfo = { input_tokens: 0, output_tokens: 0 };
@@ -117,7 +117,10 @@ export class AnthropicProvider implements LlmProvider {
           if (cb.type === 'text') {
             textParts.set(event.index, (cb as TextBlock).text);
           } else if (cb.type === 'thinking') {
-            thinkingParts.set(event.index, (cb as ThinkingBlock).thinking);
+            thinkingParts.set(event.index, {
+              thinking: (cb as ThinkingBlock).thinking,
+              signature: (cb as ThinkingBlock).signature ?? '',
+            });
           } else if (cb.type === 'tool_use') {
             const tu = cb as ToolUseBlock;
             toolBuffers.set(event.index, { id: tu.id, name: tu.name, jsonBuf: '' });
@@ -131,12 +134,23 @@ export class AnthropicProvider implements LlmProvider {
           textParts.set(event.index, (textParts.get(event.index) ?? '') + event.text);
           break;
 
-        case 'thinking_delta':
-          thinkingParts.set(
-            event.index,
-            (thinkingParts.get(event.index) ?? '') + event.thinking,
-          );
+        case 'thinking_delta': {
+          const existing = thinkingParts.get(event.index) ?? { thinking: '', signature: '' };
+          thinkingParts.set(event.index, {
+            thinking: existing.thinking + event.thinking,
+            signature: existing.signature,
+          });
           break;
+        }
+
+        case 'signature_delta': {
+          const existing = thinkingParts.get(event.index) ?? { thinking: '', signature: '' };
+          thinkingParts.set(event.index, {
+            thinking: existing.thinking,
+            signature: existing.signature + event.signature,
+          });
+          break;
+        }
 
         case 'input_json_delta': {
           const buf = toolBuffers.get(event.index);
@@ -186,10 +200,14 @@ export class AnthropicProvider implements LlmProvider {
     // Assemble final content: thinking blocks first, then text blocks, then tool blocks
     const allBlocks: ContentBlock[] = [];
 
-    // Thinking blocks by index order
+    // Thinking blocks by index order (with signature preserved for subsequent turns)
     const thinkingEntries = Array.from(thinkingParts.entries()).sort((a, b) => a[0] - b[0]);
-    for (const [, thinking] of thinkingEntries) {
-      if (thinking) allBlocks.push({ type: 'thinking', thinking });
+    for (const [, { thinking, signature }] of thinkingEntries) {
+      if (thinking) {
+        const thinkingBlock: ThinkingBlock = { type: 'thinking', thinking };
+        if (signature) thinkingBlock.signature = signature;
+        allBlocks.push(thinkingBlock);
+      }
     }
 
     // Text blocks by index order
@@ -400,8 +418,14 @@ export class AnthropicProvider implements LlmProvider {
         switch (block.type) {
           case 'text':
             return { type: 'text', text: (block as TextBlock).text };
-          case 'thinking':
-            return { type: 'thinking', thinking: (block as ThinkingBlock).thinking };
+          case 'thinking': {
+            const tb = block as ThinkingBlock;
+            return {
+              type: 'thinking',
+              thinking: tb.thinking,
+              ...(tb.signature ? { signature: tb.signature } : {}),
+            };
+          }
           case 'tool_use': {
             const tu = block as ToolUseBlock;
             return { type: 'tool_use', id: tu.id, name: tu.name, input: tu.input };
@@ -550,8 +574,14 @@ export class AnthropicProvider implements LlmProvider {
     switch (raw.type as string) {
       case 'text':
         return { type: 'text', text: (raw.text as string) ?? '' };
-      case 'thinking':
-        return { type: 'thinking', thinking: (raw.thinking as string) ?? '' };
+      case 'thinking': {
+        const block: ThinkingBlock = {
+          type: 'thinking',
+          thinking: (raw.thinking as string) ?? '',
+        };
+        if (raw.signature) block.signature = raw.signature as string;
+        return block;
+      }
       case 'tool_use':
         return {
           type: 'tool_use',

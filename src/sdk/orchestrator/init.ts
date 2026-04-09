@@ -13,6 +13,7 @@ import { toolSuccess } from '../types/tool.js';
 import type { QueryConfig } from '../types/config.js';
 import { setSpawner } from '../tools/agent/index.js';
 import { setMessageRouter } from '../tools/send-message/index.js';
+import { setAgentRegistry } from '../tools/task/list.js';
 import { AgentRegistry } from './registry.js';
 import { createSpawner } from './spawner.js';
 
@@ -46,6 +47,10 @@ export function initOrchestrator(deps: {
 }): OrchestratorHandle {
   const { provider, config, tools } = deps;
   const registry = new AgentRegistry();
+
+  // Wire AgentRegistry into task tools so TaskOutputTool / TaskStopTool can
+  // query and abort background agents registered by the spawner.
+  setAgentRegistry(registry);
 
   // Create and register the spawner
   const spawner = createSpawner({
@@ -88,6 +93,7 @@ export function initOrchestrator(deps: {
       // Reset stubs so subsequent sessions don't inherit stale state
       setSpawner(null as unknown as Parameters<typeof setSpawner>[0]);
       setMessageRouter(null as unknown as Parameters<typeof setMessageRouter>[0]);
+      setAgentRegistry(null);
     },
   };
 }

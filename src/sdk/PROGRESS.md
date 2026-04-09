@@ -189,6 +189,47 @@ Branch: `feature/sdk`
 
 ---
 
+### Run 17 — Background Agent Lifecycle + ThinkingBlock Signature Fix
+
+**Bug fix: TaskStopTool / TaskOutputTool disconnected from AgentRegistry (`tools/task/list.ts`, `orchestrator/init.ts`)**
+- Background agents were registered in `AgentRegistry` (per-session, per-spawner) but
+  `TaskStopTool` / `TaskOutputTool` / `TaskListTool` / `TaskGetTool` all used `taskStore`
+  (a separate global store for todo-style tasks). Using `TaskOutput` with a background
+  agent's ID returned "Task not found" — making background agents completely unqueryable.
+- Added `setAgentRegistry(registry: AgentRegistry | null)` to `tools/task/list.ts`
+- `TaskOutputTool`: checks `_agentRegistry.get(taskId)` as fallback when not found in `taskStore`;
+  when `block=true` and agent is still running, awaits `entry.done` with a configurable timeout
+- `TaskStopTool`: checks `_agentRegistry.get(taskId)` and calls `_agentRegistry.stop()` to abort the agent
+- `TaskListTool` / `TaskGetTool`: also surface running agents from the registry
+- `orchestrator/init.ts`: calls `setAgentRegistry(registry)` after creating the registry,
+  and `setAgentRegistry(null)` in `dispose()` to prevent cross-session leaks
+
+**Enhancement: `TaskOutput` timeout parameter (`tools/task/schema.ts`, `tools/task/list.ts`)**
+- Added `timeout` field (number, ms) to `TASK_OUTPUT_INPUT_SCHEMA`
+- When `block=true` and a background agent is still running, uses `Promise.race(entry.done, timeout)`
+  instead of blocking indefinitely (default: 30 000 ms)
+- Returns `retrieval_status: 'not_ready'` when timeout is exceeded
+
+**Bug fix: ThinkingBlock signature not preserved across turns (`types/provider.ts`, `core/query-loop.ts`, `llm/anthropic.ts`)**
+- Anthropic extended thinking blocks carry a cryptographic `signature` field that MUST
+  be sent back unchanged in subsequent turns — the API verifies it. Without the signature,
+  multi-turn conversations with extended thinking fail.
+- Added `signature?: string` to `ThinkingBlock` interface
+- `accumulateAndStream` now:
+  - Resets `thinkingSignature = ''` on each `content_block_start` (thinking)
+  - Accumulates `signature_delta` events into `thinkingSignature`
+  - Includes `signature` in the final assembled `ThinkingBlock`
+- `anthropic.ts` `mapContentBlock()`: includes `raw.signature` when building ThinkingBlock
+- `anthropic.ts` `createMessage()`: `thinkingParts` Map changed from `Map<number, string>` to
+  `Map<number, {thinking, signature}>`; `signature_delta` events are now tracked; final
+  ThinkingBlock assembly includes `signature`
+- `anthropic.ts` `normalizeMessages()`: includes `signature` when serializing ThinkingBlock
+  for API request body (was silently dropping it)
+
+- tsc --noEmit passes
+
+---
+
 ## Priority Queue (Next Runs)
 
 ### P1 (Critical)
@@ -197,6 +238,3 @@ Branch: `feature/sdk`
 ### P2 (Important)
 - [ ] WebSearchTool real implementation
 - [ ] Agent progress summaries (agentProgressSummaries fork+summarize every 30s)
-
-### P3 (Nice to have)
-- [ ] TaskStopTool actual process termination

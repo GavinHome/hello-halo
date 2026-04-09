@@ -8,6 +8,7 @@ import { randomUUID } from 'node:crypto';
 import type {
   Message,
   ContentBlock,
+  ThinkingBlock,
   ToolUseBlock,
   StreamEvent,
   UsageInfo,
@@ -411,6 +412,7 @@ async function* accumulateAndStream(
   const toolCallBlocks = new Map<number, { id: string; name: string; jsonParts: string[] }>();
   let thinkingChunks: string[] = [];
   let thinkingIndex = -1;
+  let thinkingSignature = '';
   const usage: UsageInfo = { input_tokens: 0, output_tokens: 0 };
   let stopReason = 'end_turn';
   let msgId = '';
@@ -454,6 +456,7 @@ async function* accumulateAndStream(
         } else if (event.content_block.type === 'thinking') {
           thinkingIndex = event.index;
           thinkingChunks = [];
+          thinkingSignature = '';
         }
         break;
 
@@ -464,6 +467,15 @@ async function* accumulateAndStream(
       case 'thinking_delta':
         if (event.index === thinkingIndex) {
           thinkingChunks.push(event.thinking);
+        }
+        break;
+
+      case 'signature_delta':
+        // Anthropic extended thinking: signature is part of the thinking block.
+        // Accumulate and include it when building the final ThinkingBlock so it
+        // can be sent back to the API unchanged in subsequent turns.
+        if (event.index === thinkingIndex) {
+          thinkingSignature += event.signature;
         }
         break;
 
@@ -507,7 +519,12 @@ async function* accumulateAndStream(
   const content: ContentBlock[] = [];
 
   if (thinkingChunks.length > 0) {
-    content.push({ type: 'thinking', thinking: thinkingChunks.join('') });
+    const thinkingBlock: ThinkingBlock = {
+      type: 'thinking',
+      thinking: thinkingChunks.join(''),
+      ...(thinkingSignature ? { signature: thinkingSignature } : {}),
+    };
+    content.push(thinkingBlock);
   }
 
   const combinedText = textChunks.join('');

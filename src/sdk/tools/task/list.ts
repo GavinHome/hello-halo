@@ -21,6 +21,27 @@ import {
   TASK_OUTPUT_INPUT_SCHEMA,
 } from './schema.js';
 import { taskStore, taskToSummary, taskToFull } from './store.js';
+import type { AgentRegistry } from '../../orchestrator/registry.js';
+
+// ---------------------------------------------------------------------------
+// AgentRegistry bridge
+// ---------------------------------------------------------------------------
+
+/**
+ * Per-session AgentRegistry injected by the orchestrator.
+ * Allows TaskOutputTool and TaskStopTool to query and abort background agents
+ * that are registered in AgentRegistry (not in taskStore).
+ */
+let _agentRegistry: AgentRegistry | null = null;
+
+/**
+ * Register (or clear) the AgentRegistry for this session.
+ * Called by initOrchestrator() during session setup.
+ * Pass null during dispose to avoid cross-session state leaks.
+ */
+export function setAgentRegistry(registry: AgentRegistry | null): void {
+  _agentRegistry = registry;
+}
 
 // ---------------------------------------------------------------------------
 // TaskListTool
@@ -46,7 +67,23 @@ export const TaskListTool: Tool = {
       })
       .map(taskToSummary);
 
-    return toolSuccess(JSON.stringify(tasks, null, 2));
+    // Also include background agents from the registry
+    const agentEntries = _agentRegistry
+      ? _agentRegistry.list().filter((a) => {
+          if (a.status === 'completed') return includeCompleted;
+          return true;
+        })
+      : [];
+    const agentSummaries = agentEntries.map((a) => ({
+      id: a.id,
+      subject: a.description,
+      status: a.status,
+      owner: null,
+      blocked_by: [],
+      type: 'agent',
+    }));
+
+    return toolSuccess(JSON.stringify([...tasks, ...agentSummaries], null, 2));
   },
 };
 
@@ -69,12 +106,37 @@ export const TaskGetTool: Tool = {
       return toolError('Missing required parameter: task_id');
     }
 
+    // Check taskStore first
     const task = taskStore.get(taskId);
-    if (!task) {
-      return toolSuccess(JSON.stringify(null, null, 2));
+    if (task) {
+      return toolSuccess(JSON.stringify(taskToFull(task), null, 2));
     }
 
-    return toolSuccess(JSON.stringify(taskToFull(task), null, 2));
+    // Fallback: check the agent registry for background agents
+    const agentEntry = _agentRegistry?.get(taskId);
+    if (agentEntry) {
+      return toolSuccess(
+        JSON.stringify(
+          {
+            id: agentEntry.id,
+            subject: agentEntry.description,
+            description: agentEntry.description,
+            status: agentEntry.status,
+            type: 'agent',
+            result: agentEntry.result ?? null,
+            error: agentEntry.error ?? null,
+            started_at: new Date(agentEntry.startedAt).toISOString(),
+            ended_at: agentEntry.endedAt
+              ? new Date(agentEntry.endedAt).toISOString()
+              : null,
+          },
+          null,
+          2,
+        ),
+      );
+    }
+
+    return toolSuccess(JSON.stringify(null, null, 2));
   },
 };
 
@@ -97,6 +159,30 @@ export const TaskStopTool: Tool = {
       return toolError('Missing required parameter: task_id');
     }
 
+    // Check the agent registry first (background agents)
+    if (_agentRegistry) {
+      const agentEntry = _agentRegistry.get(taskId);
+      if (agentEntry) {
+        if (agentEntry.status !== 'running') {
+          return toolError(
+            `Agent '${taskId}' is not running (status: ${agentEntry.status})`,
+          );
+        }
+        const stopped = _agentRegistry.stop(taskId);
+        if (stopped) {
+          return toolSuccess(
+            JSON.stringify(
+              { message: 'Agent stopped', task_id: taskId },
+              null,
+              2,
+            ),
+          );
+        }
+        return toolError(`Failed to stop agent '${taskId}'`);
+      }
+    }
+
+    // Fallback: check taskStore
     const task = taskStore.get(taskId);
     if (!task) {
       return toolError(`Task '${taskId}' not found`);
@@ -136,12 +222,63 @@ export const TaskOutputTool: Tool = {
       return toolError('Missing required parameter: task_id');
     }
 
+    const block = input.block !== false; // default true
+    const timeoutMs =
+      typeof input.timeout === 'number' && input.timeout > 0
+        ? input.timeout
+        : 30_000;
+
+    // Check the agent registry first (background agents spawned by AgentTool)
+    if (_agentRegistry) {
+      const agentEntry = _agentRegistry.get(taskId);
+      if (agentEntry) {
+        // If blocking mode and agent is still running, wait for completion (with timeout)
+        if (block && agentEntry.status === 'running') {
+          try {
+            await Promise.race([
+              agentEntry.done,
+              new Promise<void>((_, reject) =>
+                setTimeout(() => reject(new Error('timeout')), timeoutMs),
+              ),
+            ]);
+          } catch {
+            // Timed out or agent failed — continue to read current status below
+          }
+        }
+
+        // Re-read entry after potential wait (status/result/error may have changed)
+        const entry = _agentRegistry.get(taskId) ?? agentEntry;
+        const retrievalStatus = entry.status === 'running' ? 'not_ready' : 'success';
+
+        return toolSuccess(
+          JSON.stringify(
+            {
+              retrieval_status: retrievalStatus,
+              task: {
+                task_id: entry.id,
+                description: entry.description,
+                status: entry.status,
+                result: entry.result ?? null,
+                error: entry.error ?? null,
+                started_at: new Date(entry.startedAt).toISOString(),
+                ended_at: entry.endedAt
+                  ? new Date(entry.endedAt).toISOString()
+                  : null,
+              },
+            },
+            null,
+            2,
+          ),
+        );
+      }
+    }
+
+    // Fallback: check taskStore (for non-agent background tasks)
     const task = taskStore.get(taskId);
     if (!task) {
       return toolError(`Task '${taskId}' not found`);
     }
 
-    const block = input.block !== false; // default true
     let retrievalStatus: string;
 
     if (task.status === 'completed' || task.status === 'failed') {
