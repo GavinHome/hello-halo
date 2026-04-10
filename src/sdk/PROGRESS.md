@@ -255,6 +255,22 @@ In-process execution, OpenAI-compat providers, Worker Thread multi-agent isolati
   - Edge cases: maxChars=1, unicode content, content with newlines
 - **595 tests total** (23 test files)
 
+### Run 43 — Compact + Retry Unit Test Expansion
+- **`core/compact.test.ts`** — 21 new tests:
+  - `microCompact` (array content): budget counting for `ContentBlock[]` tool results,
+    placeholder replacement on truncation, within-budget passthrough, oldest-first order
+  - `formatCompactSummary`: `<analysis>` stripping, `<summary>`→`"Summary:\n"` conversion,
+    both tags combined, blank-line collapsing, no-tag passthrough, prefix/suffix preservation
+  - `fullCompact` (mock `LlmProvider`): ≤11-msg bypass, `createMessage` called + output shape,
+    compact notice role/content, `tokensFreed ≥ 0`, empty-summary throws
+  - `autoCompactIfNeeded`: below-threshold null, above-threshold success + `onSuccess()`,
+    provider error null + `onFailure()`, open-circuit null
+- **`utils/retry.test.ts`** — 5 new tests:
+  - Jitter bounds (Math.random mocked): non-negative, ≤10% of base, scales with attempt,
+    `maxDelayMs` caps post-jitter value
+  - `sleep` without signal resolves cleanly
+- **620 tests total** (23 test files)
+
 ---
 
 ## Priority Queue (Next Runs)
