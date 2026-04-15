@@ -1,0 +1,406 @@
+{
+  "version": 1,
+  "updatedAt": "2026-04-13",
+  "models": {
+    "deepseek-chat": {
+      "displayName": "DeepSeek V3",
+      "provider": "deepseek",
+      "contextWindow": 65536,
+      "maxOutputTokens": 8192,
+      "vision": false,
+      "thinking": false
+    },
+    "deepseek-reasoner": {
+      "displayName": "DeepSeek R1",
+      "provider": "deepseek",
+      "contextWindow": 65536,
+      "maxOutputTokens": 8192,
+      "vision": false,
+      "thinking": true
+    },
+    "qwen3-max": {
+      "displayName": "Qwen3 Max",
+      "provider": "qwen",
+      "contextWindow": 131072,
+      "maxOutputTokens": 16384,
+      "vision": false,
+      "thinking": true
+    },
+    "qwen3-coder": {
+      "displayName": "Qwen3 Coder",
+      "provider": "qwen",
+      "contextWindow": 131072,
+      "maxOutputTokens": 16384,
+      "vision": false,
+      "thinking": true
+    },
+    "qwen3-235b-a22b": {
+      "displayName": "Qwen3 235B",
+      "provider": "qwen",
+      "contextWindow": 131072,
+      "maxOutputTokens": 16384,
+      "vision": false,
+      "thinking": true
+    },
+    "qwen3-72b": {
+      "displayName": "Qwen3 72B",
+      "provider": "qwen",
+      "contextWindow": 131072,
+      "maxOutputTokens": 16384,
+      "vision": false,
+      "thinking": true
+    },
+    "qwen3-32b": {
+      "displayName": "Qwen3 32B",
+      "provider": "qwen",
+      "contextWindow": 131072,
+      "maxOutputTokens": 16384,
+      "vision": false,
+      "thinking": true
+    },
+    "qwen3-14b": {
+      "displayName": "Qwen3 14B",
+      "provider": "qwen",
+      "contextWindow": 131072,
+      "maxOutputTokens": 16384,
+      "vision": false,
+      "thinking": true
+    },
+    "qwen3-8b": {
+      "displayName": "Qwen3 8B",
+      "provider": "qwen",
+      "contextWindow": 131072,
+      "maxOutputTokens": 16384,
+      "vision": false,
+      "thinking": true
+    },
+    "qwen-plus": {
+      "displayName": "Qwen Plus",
+      "provider": "qwen",
+      "contextWindow": 131072,
+      "maxOutputTokens": 16384,
+      "vision": false,
+      "thinking": false
+    },
+    "qwen-turbo": {
+      "displayName": "Qwen Turbo",
+      "provider": "qwen",
+      "contextWindow": 131072,
+      "maxOutputTokens": 8192,
+      "vision": false,
+      "thinking": false
+    },
+    "qwen-max": {
+      "displayName": "Qwen Max",
+      "provider": "qwen",
+      "contextWindow": 32768,
+      "maxOutputTokens": 8192,
+      "vision": false,
+      "thinking": false
+    },
+    "qwen-vl-plus": {
+      "displayName": "Qwen VL Plus",
+      "provider": "qwen",
+      "contextWindow": 131072,
+      "maxOutputTokens": 8192,
+      "vision": true,
+      "thinking": false
+    },
+    "qwen-vl-max": {
+      "displayName": "Qwen VL Max",
+      "provider": "qwen",
+      "contextWindow": 131072,
+      "maxOutputTokens": 8192,
+      "vision": true,
+      "thinking": false
+    },
+    "glm-4.7": {
+      "displayName": "GLM-4.7",
+      "provider": "zhipu",
+      "contextWindow": 131072,
+      "maxOutputTokens": 16384,
+      "vision": false,
+      "thinking": true
+    },
+    "glm-4.7-flash": {
+      "displayName": "GLM-4.7 Flash",
+      "provider": "zhipu",
+      "contextWindow": 131072,
+      "maxOutputTokens": 16384,
+      "vision": false,
+      "thinking": false
+    },
+    "glm-4-plus": {
+      "displayName": "GLM-4 Plus",
+      "provider": "zhipu",
+      "contextWindow": 131072,
+      "maxOutputTokens": 16384,
+      "vision": false,
+      "thinking": false
+    },
+    "glm-4-long": {
+      "displayName": "GLM-4 Long",
+      "provider": "zhipu",
+      "contextWindow": 1000000,
+      "maxOutputTokens": 16384,
+      "vision": false,
+      "thinking": false
+    },
+    "glm-z1-plus": {
+      "displayName": "GLM-Z1 Plus",
+      "provider": "zhipu",
+      "contextWindow": 131072,
+      "maxOutputTokens": 16384,
+      "vision": false,
+      "thinking": true
+    },
+    "glm-z1": {
+      "displayName": "GLM-Z1",
+      "provider": "zhipu",
+      "contextWindow": 131072,
+      "maxOutputTokens": 16384,
+      "vision": false,
+      "thinking": true
+    },
+    "glm-4v-plus": {
+      "displayName": "GLM-4V Plus",
+      "provider": "zhipu",
+      "contextWindow": 131072,
+      "maxOutputTokens": 8192,
+      "vision": true,
+      "thinking": false
+    },
+    "MiniMax-M2.7": {
+      "displayName": "MiniMax M2.7",
+      "provider": "minimax",
+      "contextWindow": 1000000,
+      "maxOutputTokens": 16384,
+      "vision": false,
+      "thinking": true
+    },
+    "MiniMax-M2.1": {
+      "displayName": "MiniMax M2.1",
+      "provider": "minimax",
+      "contextWindow": 1000000,
+      "maxOutputTokens": 16384,
+      "vision": false,
+      "thinking": false
+    },
+    "MiniMax-M1": {
+      "displayName": "MiniMax M1",
+      "provider": "minimax",
+      "contextWindow": 1000000,
+      "maxOutputTokens": 40960,
+      "vision": false,
+      "thinking": true
+    },
+    "minimax-text-01": {
+      "displayName": "MiniMax Text 01",
+      "provider": "minimax",
+      "contextWindow": 1000000,
+      "maxOutputTokens": 16384,
+      "vision": false,
+      "thinking": true
+    },
+    "kimi-k2.5": {
+      "displayName": "Kimi K2.5",
+      "provider": "moonshot",
+      "contextWindow": 131072,
+      "maxOutputTokens": 16384,
+      "vision": true,
+      "thinking": true
+    },
+    "kimi-k2": {
+      "displayName": "Kimi K2",
+      "provider": "moonshot",
+      "contextWindow": 131072,
+      "maxOutputTokens": 16384,
+      "vision": false,
+      "thinking": true
+    },
+    "moonshot-v1-8k": {
+      "displayName": "Moonshot V1 8K",
+      "provider": "moonshot",
+      "contextWindow": 8192,
+      "maxOutputTokens": 4096,
+      "vision": false,
+      "thinking": false
+    },
+    "moonshot-v1-32k": {
+      "displayName": "Moonshot V1 32K",
+      "provider": "moonshot",
+      "contextWindow": 32768,
+      "maxOutputTokens": 8192,
+      "vision": false,
+      "thinking": false
+    },
+    "moonshot-v1-128k": {
+      "displayName": "Moonshot V1 128K",
+      "provider": "moonshot",
+      "contextWindow": 131072,
+      "maxOutputTokens": 16384,
+      "vision": false,
+      "thinking": false
+    },
+    "claude-opus-4-6": {
+      "displayName": "Claude Opus 4.6",
+      "provider": "anthropic",
+      "contextWindow": 200000,
+      "maxOutputTokens": 32000,
+      "vision": true,
+      "thinking": true
+    },
+    "claude-opus-4-5-20251101": {
+      "displayName": "Claude Opus 4.5",
+      "provider": "anthropic",
+      "contextWindow": 200000,
+      "maxOutputTokens": 32000,
+      "vision": true,
+      "thinking": true
+    },
+    "claude-sonnet-4-6": {
+      "displayName": "Claude Sonnet 4.6",
+      "provider": "anthropic",
+      "contextWindow": 200000,
+      "maxOutputTokens": 16000,
+      "vision": true,
+      "thinking": true
+    },
+    "claude-sonnet-4-5-20250929": {
+      "displayName": "Claude Sonnet 4.5",
+      "provider": "anthropic",
+      "contextWindow": 200000,
+      "maxOutputTokens": 16000,
+      "vision": true,
+      "thinking": true
+    },
+    "claude-haiku-4-5-20251001": {
+      "displayName": "Claude Haiku 4.5",
+      "provider": "anthropic",
+      "contextWindow": 200000,
+      "maxOutputTokens": 8192,
+      "vision": true,
+      "thinking": false
+    },
+    "gpt-4o": {
+      "displayName": "GPT-4o",
+      "provider": "openai",
+      "contextWindow": 128000,
+      "maxOutputTokens": 16384,
+      "vision": true,
+      "thinking": false
+    },
+    "gpt-4o-mini": {
+      "displayName": "GPT-4o Mini",
+      "provider": "openai",
+      "contextWindow": 128000,
+      "maxOutputTokens": 16384,
+      "vision": true,
+      "thinking": false
+    },
+    "gpt-4.1": {
+      "displayName": "GPT-4.1",
+      "provider": "openai",
+      "contextWindow": 1000000,
+      "maxOutputTokens": 32768,
+      "vision": true,
+      "thinking": false
+    },
+    "gpt-4.1-mini": {
+      "displayName": "GPT-4.1 Mini",
+      "provider": "openai",
+      "contextWindow": 1000000,
+      "maxOutputTokens": 32768,
+      "vision": true,
+      "thinking": false
+    },
+    "o3": {
+      "displayName": "o3",
+      "provider": "openai",
+      "contextWindow": 200000,
+      "maxOutputTokens": 100000,
+      "vision": true,
+      "thinking": true
+    },
+    "o4-mini": {
+      "displayName": "o4-mini",
+      "provider": "openai",
+      "contextWindow": 200000,
+      "maxOutputTokens": 100000,
+      "vision": true,
+      "thinking": true
+    },
+    "gemini-2.5-pro": {
+      "displayName": "Gemini 2.5 Pro",
+      "provider": "google",
+      "contextWindow": 1000000,
+      "maxOutputTokens": 65536,
+      "vision": true,
+      "thinking": true
+    },
+    "gemini-2.5-flash": {
+      "displayName": "Gemini 2.5 Flash",
+      "provider": "google",
+      "contextWindow": 1000000,
+      "maxOutputTokens": 65536,
+      "vision": true,
+      "thinking": true
+    },
+    "gemini-2.0-flash": {
+      "displayName": "Gemini 2.0 Flash",
+      "provider": "google",
+      "contextWindow": 1000000,
+      "maxOutputTokens": 8192,
+      "vision": true,
+      "thinking": false
+    },
+    "grok-3": {
+      "displayName": "Grok 3",
+      "provider": "xai",
+      "contextWindow": 131072,
+      "maxOutputTokens": 16384,
+      "vision": false,
+      "thinking": false
+    },
+    "grok-3-mini": {
+      "displayName": "Grok 3 Mini",
+      "provider": "xai",
+      "contextWindow": 131072,
+      "maxOutputTokens": 16384,
+      "vision": false,
+      "thinking": true
+    },
+    "mistral-large-latest": {
+      "displayName": "Mistral Large",
+      "provider": "mistral",
+      "contextWindow": 131072,
+      "maxOutputTokens": 8192,
+      "vision": false,
+      "thinking": false
+    },
+    "mistral-small-latest": {
+      "displayName": "Mistral Small",
+      "provider": "mistral",
+      "contextWindow": 32768,
+      "maxOutputTokens": 8192,
+      "vision": false,
+      "thinking": false
+    },
+    "llama-3.3-70b-versatile": {
+      "displayName": "Llama 3.3 70B",
+      "provider": "groq",
+      "contextWindow": 128000,
+      "maxOutputTokens": 32768,
+      "vision": false,
+      "thinking": false
+    },
+    "llama-3.1-8b-instant": {
+      "displayName": "Llama 3.1 8B",
+      "provider": "groq",
+      "contextWindow": 128000,
+      "maxOutputTokens": 8192,
+      "vision": false,
+      "thinking": false
+    }
+  }
+}

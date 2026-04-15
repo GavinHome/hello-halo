@@ -52,6 +52,7 @@ import { registerImChannelHandlers } from '../ipc/im-channels'
 import { registerImSessionHandlers } from '../ipc/im-sessions'
 import { registerStoreHandlers } from '../ipc/store'
 import { registerCliConfigHandlers } from '../ipc/cli-config'
+import { registerModelCapabilitiesHandlers } from '../ipc/model-capabilities'
 import { initRegistryService, shutdownRegistryService } from '../store'
 import { cleanupImChannelTempFiles } from '../apps/runtime/im-channels'
 
@@ -196,6 +197,9 @@ export function initializeExtendedServices(): void {
 
   // CLI Config: IPC handlers for Claude CLI config dir + migration
   registerCliConfigHandlers()
+
+  // Model Capabilities: IPC handlers for model capability lookups (preset + user overrides)
+  registerModelCapabilitiesHandlers()
 
   // Windows-specific: Initialize Git Bash in background
   if (process.platform === 'win32') {

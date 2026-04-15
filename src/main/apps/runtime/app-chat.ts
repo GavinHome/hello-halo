@@ -57,6 +57,7 @@ import { createReportToolServer, type ReportToolContext } from './report-tool'
 import { createNotifyToolServer } from './notify-tool'
 import { createHaloAppsMcpServer } from '../conversation-mcp'
 import { createWebSearchMcpServer } from '../../services/web-search'
+import { createEmailMcpServer } from '../../services/email-mcp'
 import { getSpace } from '../../services/space.service'
 import { openSessionWriter, readSessionMessages, saveChatSessionId, loadChatSessionId, deleteChatSessionId } from './session-store'
 import { getAppMemoryService, getActivityStore } from './index'
@@ -200,6 +201,7 @@ export async function sendAppChatMessage(
   // ── 3. Build system prompt for interactive chat ──────
   const memoryInstructions = memory.getPromptInstructions()
   const usesAIBrowser = resolvePermission(app, 'ai-browser')
+  const usesEmail = resolvePermission(app, 'email', false) // default false — higher trust
 
   // ── Merge config_schema defaults into userConfig ────
   const mergedConfig = mergeConfigWithDefaults(app.userConfig, app.spec.config_schema)
@@ -256,12 +258,15 @@ export async function sendAppChatMessage(
     'halo-apps': createHaloAppsMcpServer(spaceId),
     'web-search': createWebSearchMcpServer(),
     ...(usesAIBrowser ? { 'ai-browser': createAIBrowserMcpServer(scopedBrowserCtx, workDir) } : {}),
+    ...(usesEmail && config.notificationChannels?.email?.enabled
+      ? { 'halo-email': createEmailMcpServer(config.notificationChannels.email) }
+      : {}),
     // Inject file-send tool when the originating IM channel supports file delivery
     ...(imFileSend ? { 'im-file-send': createFileSendMcpServer(imFileSend) } : {}),
   }
   console.log(
     `[AppChat][${appId}] MCP servers: [${Object.keys(mcpServers).join(', ')}], ` +
-    `aiBrowser=${usesAIBrowser}, fileSend=${imFileSend ? 'yes' : 'no'}`
+    `aiBrowser=${usesAIBrowser}, email=${usesEmail}, fileSend=${imFileSend ? 'yes' : 'no'}`
   )
 
   // ── 5. Build SDK options ─────────────────────────────

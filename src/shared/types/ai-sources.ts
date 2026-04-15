@@ -16,6 +16,7 @@
  */
 
 import { v4 as uuidv4 } from 'uuid'
+import type { ModelCapabilityOverride } from './model-capabilities'
 
 // ============================================================================
 // Localization Utilities
@@ -203,6 +204,17 @@ export interface AISource {
   createdAt: string
   /** Last update timestamp (ISO 8601) */
   updatedAt: string
+
+  // ===== Model Capability Overrides (Optional) =====
+  /**
+   * Per-model capability overrides for this source.
+   * Keys are model IDs; values are partial capability overrides.
+   * Takes precedence over the preset data in model-capabilities.json.
+   *
+   * Example: override context window for a local Ollama model:
+   *   { "llama3": { "contextWindow": 8192 } }
+   */
+  modelOverrides?: Record<string, ModelCapabilityOverride>
 }
 
 /**

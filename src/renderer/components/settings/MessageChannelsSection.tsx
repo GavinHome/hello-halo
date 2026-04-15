@@ -55,6 +55,8 @@ interface FieldDef {
   required?: boolean
   options?: { value: string; label: string }[]
   nested?: string
+  /** Optional group for collapsible sections (e.g. 'advanced') */
+  group?: string
 }
 
 /** Notification channel descriptor */
@@ -87,6 +89,8 @@ function buildNotifyChannelDefs(): NotifyChannelDef[] {
         { key: 'smtp.user', label: 'Username', type: 'text', placeholder: 'user@example.com', required: true, nested: 'smtp.user' },
         { key: 'smtp.password', label: 'Password', type: 'password', placeholder: 'App password', required: true, nested: 'smtp.password' },
         { key: 'defaultTo', label: 'Default Recipient', type: 'text', placeholder: 'recipient@example.com', required: true },
+        { key: 'caldavUrl', label: 'CalDAV URL', type: 'text', placeholder: 'https://{host}/dav/users/{email}/calendars/default/', group: 'advanced' },
+        { key: 'tlsCiphers', label: 'TLS Ciphers', type: 'text', placeholder: 'Auto (system default)', group: 'advanced' },
       ],
       defaults: { enabled: false, smtp: { host: '', port: 465, secure: true, user: '', password: '' }, defaultTo: '' },
     },
@@ -618,6 +622,7 @@ function NotifyChannelCard({
   const { t } = useTranslation()
   const Icon = def.icon
   const isEnabled = Boolean(channelConfig?.enabled)
+  const [showAdvanced, setShowAdvanced] = useState(false)
 
   const [draft, setDraft] = useState<Record<string, unknown> | null>(null)
   const saveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
@@ -696,7 +701,7 @@ function NotifyChannelCard({
           </div>
 
           <div className="space-y-3">
-            {def.fields.map((field) => (
+            {def.fields.filter(f => !f.group).map((field) => (
               <ChannelField
                 key={field.key}
                 field={field}
@@ -705,6 +710,35 @@ function NotifyChannelCard({
               />
             ))}
           </div>
+
+          {/* Advanced fields (collapsible) */}
+          {def.fields.some(f => f.group === 'advanced') && (
+            <div className="border-t border-border/60 pt-3">
+              <button
+                type="button"
+                onClick={() => setShowAdvanced(!showAdvanced)}
+                className="flex items-center gap-1.5 text-xs text-muted-foreground hover:text-foreground transition-colors"
+              >
+                <ChevronDown className={`w-3.5 h-3.5 transition-transform duration-200 ${showAdvanced ? 'rotate-180' : ''}`} />
+                {t('Advanced')}
+              </button>
+              {showAdvanced && (
+                <div className="mt-3 space-y-3 animate-in slide-in-from-top-1 duration-150">
+                  {def.fields.filter(f => f.group === 'advanced').map((field) => (
+                    <ChannelField
+                      key={field.key}
+                      field={field}
+                      value={getFieldValue(field)}
+                      onChange={(value) => handleFieldChange(field.key, value, field.nested)}
+                    />
+                  ))}
+                  <p className="text-[11px] text-muted-foreground leading-relaxed">
+                    {t('CalDAV URL enables calendar tools. Supports {host} and {email} placeholders.')}
+                  </p>
+                </div>
+              )}
+            </div>
+          )}
 
           <div className="flex items-center gap-3 pt-2 flex-wrap">
             <button

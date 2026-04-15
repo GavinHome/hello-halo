@@ -15,6 +15,7 @@
  */
 
 import { is } from '@electron-toolkit/utils'
+import { jsonrepair } from 'jsonrepair'
 import type {
   Thought,
   ToolCall,
@@ -515,7 +516,13 @@ export async function processStream(params: ProcessStreamParams): Promise<Stream
                 toolInput = JSON.parse(blockState.content)
               }
             } catch (e) {
-              console.error(`[Agent][${conversationId}] Failed to parse tool input JSON:`, e)
+              // Attempt repair for malformed JSON from LLMs (e.g. missing closing braces)
+              try {
+                toolInput = JSON.parse(jsonrepair(blockState.content))
+                console.warn(`[Agent][${conversationId}] Repaired malformed tool input JSON for ${blockState.toolName} (${blockState.content.length} chars)`)
+              } catch {
+                console.error(`[Agent][${conversationId}] Failed to parse tool input JSON (${blockState.content.length} chars), raw: ${blockState.content}`, e)
+              }
             }
 
             // Record mapping for merging tool_result later

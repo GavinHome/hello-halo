@@ -1894,6 +1894,43 @@ export const api = {
     }
     return onEvent('store:sync-status-changed', callback)
   },
+
+  // ===== Model Capabilities =====
+
+  /**
+   * Resolve the effective capability for a model.
+   * Merges preset data with the supplied user overrides.
+   */
+  modelCapabilitiesResolve: async (
+    modelId: string,
+    overrides?: Record<string, Record<string, unknown>>
+  ): Promise<ApiResponse> => {
+    if (isElectron()) {
+      return window.halo.modelCapabilitiesResolve(modelId, overrides)
+    }
+    return httpRequest('POST', '/api/model-capabilities/resolve', { modelId, overrides })
+  },
+
+  /**
+   * Get the raw preset for a model (no user overrides applied).
+   * Returns null data when no preset exists.
+   */
+  modelCapabilitiesGetPreset: async (modelId: string): Promise<ApiResponse> => {
+    if (isElectron()) {
+      return window.halo.modelCapabilitiesGetPreset(modelId)
+    }
+    return httpRequest('GET', `/api/model-capabilities/preset/${encodeURIComponent(modelId)}`)
+  },
+
+  /**
+   * Get all preset model capability entries as a flat map.
+   */
+  modelCapabilitiesAll: async (): Promise<ApiResponse> => {
+    if (isElectron()) {
+      return window.halo.modelCapabilitiesAll()
+    }
+    return httpRequest('GET', '/api/model-capabilities/all')
+  },
 }
 
 // Export type for the API

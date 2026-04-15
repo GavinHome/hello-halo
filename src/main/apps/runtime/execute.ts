@@ -36,6 +36,7 @@ import { resolveCredentialsForSdk, buildBaseSdkOptions } from '../../services/ag
 import { getOrCreateV2Session } from '../../services/agent/session-manager'
 import { createAIBrowserMcpServer, createScopedBrowserContext } from '../../services/ai-browser'
 import { createWebSearchMcpServer } from '../../services/web-search'
+import { createEmailMcpServer } from '../../services/email-mcp'
 import { getConfig } from '../../services/config.service'
 import { getSpace } from '../../services/space.service'
 import { openSessionWriter, type SessionWriter } from './session-store'
@@ -198,6 +199,7 @@ export async function executeRun(options: ExecuteRunOptions): Promise<AppRunResu
     // ── 2. Build system prompt ─────────────────────────────
     const memoryInstructions = memory.getPromptInstructions()
     const usesAIBrowser = resolvePermission(app, 'ai-browser')
+    const usesEmail = resolvePermission(app, 'email', false) // default false — higher trust
 
     // ── Merge config_schema defaults into userConfig ─────
     //    Ensures defaults are available even if the user never opened the config panel.
@@ -330,6 +332,9 @@ export async function executeRun(options: ExecuteRunOptions): Promise<AppRunResu
         'halo-notify': notifyMcpServer,     // built-in: user notification
         'web-search': createWebSearchMcpServer(), // built-in: web search
         ...(usesAIBrowser ? { 'ai-browser': createAIBrowserMcpServer(scopedBrowserCtx, workDir) } : {}),
+        ...(usesEmail && config.notificationChannels?.email?.enabled
+          ? { 'halo-email': createEmailMcpServer(config.notificationChannels.email) }
+          : {}),
       },
     })
 
@@ -345,7 +350,7 @@ export async function executeRun(options: ExecuteRunOptions): Promise<AppRunResu
     console.log(
       `[Runtime][${runTag}] Creating V2 session: workDir=${workDir}, ` +
       `promptLen=${systemPrompt.length}, maxTurns=${MAX_TURNS}, ` +
-      `mcpServers=[${mcpServerNames.join(', ')}], aiBrowser=${usesAIBrowser}`
+      `mcpServers=[${mcpServerNames.join(', ')}], aiBrowser=${usesAIBrowser}, email=${usesEmail}`
     )
 
     // Escalation followup: restore previous session via getOrCreateV2Session

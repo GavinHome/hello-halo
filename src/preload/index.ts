@@ -427,6 +427,14 @@ export interface HaloAPI {
   storeToggleRegistry: (input: { registryId: string; enabled: boolean }) => Promise<IpcResponse>
   storeUpdateRegistryAdapterConfig: (input: { registryId: string; adapterConfig: Record<string, unknown> }) => Promise<IpcResponse>
   onStoreSyncStatusChanged: (callback: (data: { registryId: string; status: string; appCount: number; error?: string }) => void) => () => void
+
+  // Model Capabilities
+  /** Resolve the final capability for a model (preset merged with user overrides) */
+  modelCapabilitiesResolve: (modelId: string, overrides?: Record<string, Record<string, unknown>>) => Promise<IpcResponse>
+  /** Get the raw preset for a model (no overrides applied), or null if not in preset */
+  modelCapabilitiesGetPreset: (modelId: string) => Promise<IpcResponse>
+  /** Get all preset model capabilities as a flat map */
+  modelCapabilitiesAll: () => Promise<IpcResponse>
 }
 
 interface IpcResponse<T = unknown> {
@@ -794,6 +802,14 @@ const api: HaloAPI = {
 
   // Notification (in-app toast)
   onNotificationToast: (callback) => createEventListener('notification:toast', callback),
+
+  // Model Capabilities
+  modelCapabilitiesResolve: (modelId, overrides) =>
+    ipcRenderer.invoke('model-capabilities:resolve', modelId, overrides),
+  modelCapabilitiesGetPreset: (modelId) =>
+    ipcRenderer.invoke('model-capabilities:preset', modelId),
+  modelCapabilitiesAll: () =>
+    ipcRenderer.invoke('model-capabilities:all'),
 }
 
 contextBridge.exposeInMainWorld('halo', api)

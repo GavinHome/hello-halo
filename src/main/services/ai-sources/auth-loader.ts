@@ -98,6 +98,18 @@ export interface RegistryOverride {
 }
 
 /**
+ * Enterprise service defaults — pre-populated configuration for internal services.
+ *
+ * Each key maps to a service's config type with optional fields.
+ * At runtime, these defaults are merged under user config (user values take precedence).
+ * Open-source builds omit this entirely; enterprise builds set values in product.json.
+ */
+export interface ServiceDefaults {
+  /** Default email channel configuration (partial — user config wins) */
+  email?: Partial<import('../../../shared/types/notification-channels').EmailChannelConfig>
+}
+
+/**
  * Product configuration from product.json
  */
 export interface ProductConfig {
@@ -114,6 +126,12 @@ export interface ProductConfig {
   updateConfig?: UpdateConfig
   /** Browser network access policy (optional, unrestricted when omitted) */
   browserPolicy?: BrowserPolicy
+  /**
+   * Enterprise service defaults (optional).
+   * Pre-populates service configurations so internal users don't need manual setup.
+   * Open-source builds omit this field entirely.
+   */
+  serviceDefaults?: ServiceDefaults
   /**
    * Built-in registry overrides (optional, enterprise/custom builds only).
    *
@@ -210,6 +228,14 @@ export const DEFAULT_DATA_FOLDER_NAME = 'halo'
  */
 export function getDataFolderName(): string {
   return loadProductConfig().dataFolderName || DEFAULT_DATA_FOLDER_NAME
+}
+
+/**
+ * Get enterprise service defaults from product.json.
+ * Returns undefined when no defaults are configured (open-source builds).
+ */
+export function getServiceDefaults(): ServiceDefaults | undefined {
+  return loadProductConfig().serviceDefaults
 }
 
 /**

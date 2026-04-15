@@ -14,9 +14,10 @@
  */
 
 import { useState, useEffect, useCallback, lazy, Suspense } from 'react'
-import { Save, RotateCcw, Unplug, Loader2, FileCode, Settings, Code, AlertTriangle, Globe, Bell, Download, ExternalLink, FolderOpen, Wrench, Send, Trash2 } from 'lucide-react'
+import { Save, RotateCcw, Unplug, Loader2, FileCode, Settings, Code, AlertTriangle, Globe, Bell, Download, ExternalLink, FolderOpen, Wrench, Send, Trash2, Mail } from 'lucide-react'
 import { stringify as stringifyYaml, parse as parseYaml } from 'yaml'
 import { useAppsStore } from '../../stores/apps.store'
+import { useAppStore } from '../../stores/app.store'
 import { useTranslation, getCurrentLanguage } from '../../i18n'
 import type { InputDef, SubscriptionDef, AppSpec } from '../../../shared/apps/spec-types'
 import type { InstalledApp } from '../../../shared/apps/app-types'
@@ -304,6 +305,17 @@ interface SettingsTabProps {
 
 function SettingsTab({ app, appId, t }: SettingsTabProps) {
   const { updateAppConfig, updateAppFrequency, updateAppSpec, updateAppOverrides, grantPermission, revokePermission } = useAppsStore()
+  const { setView } = useAppStore()
+
+  // Check if email notification channel is configured
+  const [emailConfigured, setEmailConfigured] = useState(false)
+  useEffect(() => {
+    api.getConfig().then((res: any) => {
+      if (res.success && res.data) {
+        setEmailConfigured(Boolean(res.data.notificationChannels?.email?.enabled))
+      }
+    }).catch(() => {})
+  }, [])
 
   // Type-narrowed helpers for automation-specific fields
   const isAutomation = app.spec.type === 'automation'
@@ -514,6 +526,68 @@ function SettingsTab({ app, appId, t }: SettingsTabProps) {
           <p className="text-xs text-amber-500 flex items-center gap-1 -mt-2">
             <AlertTriangle className="w-3 h-3 flex-shrink-0" />
             {t('This app may require AI Browser to work properly')}
+          </p>
+        )}
+
+        {/* Email MCP toggle */}
+        <div className="flex items-center justify-between gap-3">
+          <div className="min-w-0">
+            <div className="flex items-center gap-1.5">
+              <Mail className={`w-3.5 h-3.5 ${emailConfigured ? 'text-muted-foreground' : 'text-muted-foreground/50'}`} />
+              <span className={`text-sm ${emailConfigured ? 'text-foreground' : 'text-muted-foreground'}`}>{t('Email')}</span>
+            </div>
+            <p className="text-xs text-muted-foreground mt-0.5">
+              {t('Allow this app to read, send, and manage emails and calendar')}
+            </p>
+          </div>
+          <button
+            type="button"
+            role="switch"
+            disabled={!emailConfigured}
+            aria-checked={emailConfigured && resolvePermission(app, 'email', false)}
+            onClick={async () => {
+              if (!emailConfigured) return
+              const isEnabled = resolvePermission(app, 'email', false)
+              if (isEnabled) {
+                await revokePermission(appId, 'email')
+              } else {
+                await grantPermission(appId, 'email')
+              }
+            }}
+            className={`relative inline-flex h-5 w-9 flex-shrink-0 rounded-full transition-colors ${
+              !emailConfigured
+                ? 'bg-muted/50 cursor-not-allowed'
+                : resolvePermission(app, 'email', false) ? 'bg-primary' : 'bg-muted'
+            }`}
+          >
+            <span
+              className={`pointer-events-none inline-block h-4 w-4 rounded-full bg-background shadow transform transition-transform mt-0.5 ${
+                emailConfigured && resolvePermission(app, 'email', false) ? 'translate-x-[18px]' : 'translate-x-0.5'
+              }`}
+            />
+          </button>
+        </div>
+        {/* Not configured: show hint with link to settings */}
+        {!emailConfigured && (
+          <button
+            onClick={() => {
+              setView('settings')
+              setTimeout(() => {
+                const el = document.getElementById('message-channels')
+                el?.scrollIntoView({ behavior: 'smooth', block: 'start' })
+              }, 100)
+            }}
+            className="text-xs text-amber-500 flex items-center gap-1 -mt-2 hover:text-amber-400 transition-colors"
+          >
+            <AlertTriangle className="w-3 h-3 flex-shrink-0" />
+            {t('Email not configured. Go to Settings > Notification Channels to set up.')}
+          </button>
+        )}
+        {/* Warn when user disabled a permission the spec declares */}
+        {emailConfigured && !resolvePermission(app, 'email', false) && app.spec.permissions?.includes('email') && (
+          <p className="text-xs text-amber-500 flex items-center gap-1 -mt-2">
+            <AlertTriangle className="w-3 h-3 flex-shrink-0" />
+            {t('This app may require Email to work properly')}
           </p>
         )}
 
