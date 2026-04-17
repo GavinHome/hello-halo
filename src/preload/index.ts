@@ -362,6 +362,12 @@ export interface HaloAPI {
   imSessionsRemove: (input: { appId: string; channel: string; chatId: string }) => Promise<IpcResponse>
   imSessionsSetCustomName: (input: { appId: string; channel: string; chatId: string; name: string }) => Promise<IpcResponse>
 
+  // WeChat Personal Bot via iLink API
+  weixinIlinkRequestQrcode: () => Promise<IpcResponse<{ qrcode: string; qrcodeImgContent: string; baseUrl: string }>>
+  weixinIlinkPollAuthStatus: (qrcode: string) => Promise<IpcResponse<{ status: 'wait' | 'scaned' | 'confirmed' | 'expired'; botToken?: string; accountId?: string; baseUrl?: string; userId?: string }>>
+  weixinIlinkSaveToken: (instanceId: string, botToken: string, baseUrl?: string, accountId?: string) => Promise<IpcResponse>
+  weixinIlinkDisconnect: (instanceId: string) => Promise<IpcResponse>
+
   // Apps Management
   appList: (filter?: { spaceId?: string; status?: string; type?: string }) => Promise<IpcResponse>
   appGet: (appId: string) => Promise<IpcResponse>
@@ -726,6 +732,12 @@ const api: HaloAPI = {
   imSessionsSetProactive: (input) => ipcRenderer.invoke('im-sessions:set-proactive', input),
   imSessionsRemove: (input) => ipcRenderer.invoke('im-sessions:remove', input),
   imSessionsSetCustomName: (input) => ipcRenderer.invoke('im-sessions:set-custom-name', input),
+
+  // WeChat Personal Bot via iLink API
+  weixinIlinkRequestQrcode: () => ipcRenderer.invoke('weixin-ilink:request-qrcode'),
+  weixinIlinkPollAuthStatus: (qrcode) => ipcRenderer.invoke('weixin-ilink:poll-auth-status', qrcode),
+  weixinIlinkSaveToken: (instanceId, botToken, baseUrl?, accountId?) => ipcRenderer.invoke('weixin-ilink:save-token', instanceId, botToken, baseUrl, accountId),
+  weixinIlinkDisconnect: (instanceId) => ipcRenderer.invoke('weixin-ilink:disconnect', instanceId),
 
   // Apps Management
   appList: (filter) => ipcRenderer.invoke('app:list', filter),

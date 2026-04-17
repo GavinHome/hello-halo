@@ -53,6 +53,7 @@ import { registerImSessionHandlers } from '../ipc/im-sessions'
 import { registerStoreHandlers } from '../ipc/store'
 import { registerCliConfigHandlers } from '../ipc/cli-config'
 import { registerModelCapabilitiesHandlers } from '../ipc/model-capabilities'
+import { registerWeixinIlinkHandlers } from '../ipc/weixin-ilink'
 import { initRegistryService, shutdownRegistryService } from '../store'
 import { cleanupImChannelTempFiles } from '../apps/runtime/im-channels'
 
@@ -200,6 +201,9 @@ export function initializeExtendedServices(): void {
 
   // Model Capabilities: IPC handlers for model capability lookups (preset + user overrides)
   registerModelCapabilitiesHandlers()
+
+  // WeChat iLink Bot: QR code login + token management IPC handlers
+  registerWeixinIlinkHandlers()
 
   // Windows-specific: Initialize Git Bash in background
   if (process.platform === 'win32') {

@@ -12,6 +12,7 @@
 
 export { ImChannelManager } from './manager'
 export { WecomBotProvider } from './wecom-bot.provider'
+export { WeixinIlinkBotProvider } from './weixin-ilink.provider'
 
 import { cleanupWecomTempFiles } from './wecom-bot.provider'
 import type { ImChannelManager } from './manager'

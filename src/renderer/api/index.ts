@@ -972,6 +972,35 @@ export const api = {
     return httpRequest('GET', '/api/im-channels/permission-defaults')
   },
 
+  // ===== WeChat Personal Bot via iLink API =====
+  weixinIlinkRequestQrcode: async (): Promise<ApiResponse<{ qrcode: string; qrcodeImgContent: string; baseUrl: string }>> => {
+    if (isElectron()) {
+      return window.halo.weixinIlinkRequestQrcode()
+    }
+    return httpRequest('POST', '/api/weixin-ilink/request-qrcode')
+  },
+
+  weixinIlinkPollAuthStatus: async (qrcode: string): Promise<ApiResponse<{ status: 'wait' | 'scaned' | 'confirmed' | 'expired'; botToken?: string; accountId?: string; baseUrl?: string; userId?: string }>> => {
+    if (isElectron()) {
+      return window.halo.weixinIlinkPollAuthStatus(qrcode)
+    }
+    return httpRequest('POST', '/api/weixin-ilink/poll-auth-status', { qrcode })
+  },
+
+  weixinIlinkSaveToken: async (instanceId: string, botToken: string, baseUrl?: string, accountId?: string): Promise<ApiResponse> => {
+    if (isElectron()) {
+      return window.halo.weixinIlinkSaveToken(instanceId, botToken, baseUrl, accountId)
+    }
+    return httpRequest('POST', '/api/weixin-ilink/save-token', { instanceId, botToken, baseUrl, accountId })
+  },
+
+  weixinIlinkDisconnect: async (instanceId: string): Promise<ApiResponse> => {
+    if (isElectron()) {
+      return window.halo.weixinIlinkDisconnect(instanceId)
+    }
+    return httpRequest('POST', '/api/weixin-ilink/disconnect', { instanceId })
+  },
+
   // ===== IM Sessions (会话管理) =====
   imSessionsList: async (appId?: string): Promise<ApiResponse> => {
     if (isElectron()) {
