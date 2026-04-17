@@ -47,7 +47,7 @@ import { MIGRATION_NAMESPACE, migrations } from './migrations'
 import { createEventRouter, type EventRouter } from './event-router'
 import { FileWatcherSource } from './sources/file-watcher.source'
 import { WebhookSource, type WebhookSecretResolver } from './sources/webhook.source'
-import { ImChannelManager, WecomBotProvider } from './im-channels'
+import { ImChannelManager, WecomBotProvider, WeixinIlinkBotProvider } from './im-channels'
 import { ImSessionRegistry, setImSessionRegistry } from './im-session-registry'
 import { dispatchInboundMessage } from './dispatch-inbound'
 import { getConfig } from '../../services/config.service'
@@ -231,6 +231,7 @@ export async function initAppRuntime(
 
   // Register built-in providers
   imChannelManager.registerProvider(new WecomBotProvider())
+  imChannelManager.registerProvider(new WeixinIlinkBotProvider())
   // Future: imChannelManager.registerProvider(new FeishuBotProvider())
   // Future: imChannelManager.registerProvider(new DingTalkBotProvider())
 

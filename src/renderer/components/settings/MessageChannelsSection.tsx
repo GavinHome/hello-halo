@@ -16,7 +16,7 @@ import { useState, useCallback, useRef, useEffect } from 'react'
 import {
   Mail, MessageSquare, Bell, Webhook, Loader2,
   CheckCircle, XCircle, ChevronDown, RefreshCw, Bot,
-  Plus, Trash2, MoreVertical,
+  Plus, Trash2, MoreVertical, Smartphone,
 } from 'lucide-react'
 import { useTranslation } from '../../i18n'
 import { api } from '../../api'
@@ -31,6 +31,7 @@ import type {
   ImChannelInstanceConfig,
   ImChannelInstanceStatus,
 } from '../../../shared/types/im-channel'
+import { WeixinIlinkInstanceCard } from './WeixinIlinkInstanceCard'
 
 // ============================================
 // Types
@@ -866,22 +867,52 @@ export function MessageChannelsSection({ config, setConfig }: MessageChannelsSec
     return raw ? (raw as unknown as Record<string, unknown>) : {}
   }
 
-  // Summary for the IM channel card header
-  const wecomInstances = instances.filter(i => i.type === 'wecom-bot')
-  const connectedCount = imStatuses.filter(s => s.connected).length
-  const imStatusSummary = wecomInstances.length === 0
+  // Summary helpers for IM channel card headers
+  const wecomInstances = (instances as ImChannelInstanceConfig[]).filter(i => i.type === 'wecom-bot')
+  const weixinIlinkInstances = (instances as ImChannelInstanceConfig[]).filter(i => i.type === 'weixin-ilink-bot')
+
+  const wecomConnectedCount = imStatuses.filter(s => s.type === 'wecom-bot' && s.connected).length
+  const weixinConnectedCount = imStatuses.filter(s => s.type === 'weixin-ilink-bot' && s.connected).length
+
+  const wecomStatusSummary = wecomInstances.length === 0
     ? t('Not configured')
-    : connectedCount > 0
-      ? `${connectedCount} ${t('connected')}`
+    : wecomConnectedCount > 0
+      ? `${wecomConnectedCount} ${t('connected')}`
       : t('Disconnected')
 
-  const imStatusColor = wecomInstances.length === 0
+  const wecomStatusColor = wecomInstances.length === 0
     ? 'bg-muted-foreground/30'
-    : connectedCount > 0
+    : wecomConnectedCount > 0
+      ? 'bg-green-500'
+      : 'bg-amber-500'
+
+  const weixinStatusSummary = weixinIlinkInstances.length === 0
+    ? t('Not configured')
+    : weixinConnectedCount > 0
+      ? `${weixinConnectedCount} ${t('connected')}`
+      : t('Disconnected')
+
+  const weixinStatusColor = weixinIlinkInstances.length === 0
+    ? 'bg-muted-foreground/30'
+    : weixinConnectedCount > 0
       ? 'bg-green-500'
       : 'bg-amber-500'
 
   const isImExpanded = expandedChannels.has('im-wecom-bot')
+  const isWeixinExpanded = expandedChannels.has('im-weixin-ilink-bot')
+
+  const handleAddWeixinInstance = useCallback(() => {
+    const newInstance: ImChannelInstanceConfig = {
+      id: generateId(),
+      type: 'weixin-ilink-bot',
+      enabled: false,
+      appId: '',
+      config: { botToken: '', baseUrl: '', accountId: '' },
+    }
+    const newInstances = [...instances, newInstance]
+    saveInstances(newInstances)
+    setExpandedInstances(prev => new Set(prev).add(newInstance.id))
+  }, [instances, saveInstances])
 
   return (
     <section id="message-channels" className="bg-card rounded-xl border border-border p-4 sm:p-6">
@@ -893,6 +924,70 @@ export function MessageChannelsSection({ config, setConfig }: MessageChannelsSec
       </div>
 
       <div className="space-y-3">
+        {/* ── WeChat Personal Bot via iLink (multi-instance) ─────────── */}
+        <div className="border border-border rounded-lg overflow-hidden">
+          {/* Provider card header */}
+          <button
+            type="button"
+            onClick={() => toggleExpanded('im-weixin-ilink-bot')}
+            className="w-full flex items-center justify-between px-4 py-3 hover:bg-muted/30 transition-colors"
+          >
+            <div className="flex items-center gap-3 min-w-0">
+              <Smartphone className="w-5 h-5 text-muted-foreground flex-shrink-0" />
+              <div className="text-left min-w-0">
+                <div className="flex items-center gap-2 flex-wrap">
+                  <p className="font-medium text-sm">{t('WeChat Bot')}</p>
+                  <span className="text-[10px] px-1.5 py-0.5 rounded-full font-medium bg-primary/10 text-primary">
+                    {t('Bidirectional')}
+                  </span>
+                </div>
+                <p className="text-xs text-muted-foreground mt-0.5 hidden sm:block">
+                  {t('Bidirectional messaging via WeChat personal account (iLink)')}
+                </p>
+              </div>
+            </div>
+            <div className="flex items-center gap-2 sm:gap-3 flex-shrink-0">
+              <span className="text-xs text-muted-foreground hidden sm:inline">{weixinStatusSummary}</span>
+              <div className={`w-2 h-2 rounded-full ${weixinStatusColor}`} />
+              <ChevronDown className={`w-4 h-4 text-muted-foreground transition-transform duration-200 ${isWeixinExpanded ? 'rotate-180' : ''}`} />
+            </div>
+          </button>
+
+          {/* Instance list */}
+          {isWeixinExpanded && (
+            <div className="px-4 pb-4 pt-2 border-t border-border space-y-2.5 animate-in slide-in-from-top-1 duration-150">
+              {weixinIlinkInstances.length === 0 && (
+                <p className="text-sm text-muted-foreground py-2 text-center">
+                  {t('No Bot instances configured. Click the button below to add one.')}
+                </p>
+              )}
+
+              {weixinIlinkInstances.map(inst => (
+                <WeixinIlinkInstanceCard
+                  key={inst.id}
+                  instance={inst}
+                  status={imStatuses.find(s => s.id === inst.id)}
+                  automationApps={automationApps}
+                  isExpanded={expandedInstances.has(inst.id)}
+                  onToggle={() => toggleInstanceExpanded(inst.id)}
+                  onChange={handleInstanceChange}
+                  onDelete={() => handleDeleteInstance(inst.id)}
+                />
+              ))}
+
+              {/* Add instance button */}
+              <button
+                type="button"
+                onClick={handleAddWeixinInstance}
+                className="w-full flex items-center justify-center gap-2 px-3 py-2 text-sm border border-dashed border-border rounded-lg text-muted-foreground hover:text-foreground hover:border-primary/50 hover:bg-muted/30 transition-colors"
+              >
+                <Plus className="w-4 h-4" />
+                {t('Add Bot')}
+              </button>
+            </div>
+          )}
+        </div>
+
         {/* ── WeCom Intelligent Bot (multi-instance) ─────────────────── */}
         <div className="border border-border rounded-lg overflow-hidden">
           {/* Provider card header */}
@@ -916,8 +1011,8 @@ export function MessageChannelsSection({ config, setConfig }: MessageChannelsSec
               </div>
             </div>
             <div className="flex items-center gap-2 sm:gap-3 flex-shrink-0">
-              <span className="text-xs text-muted-foreground hidden sm:inline">{imStatusSummary}</span>
-              <div className={`w-2 h-2 rounded-full ${imStatusColor}`} />
+              <span className="text-xs text-muted-foreground hidden sm:inline">{wecomStatusSummary}</span>
+              <div className={`w-2 h-2 rounded-full ${wecomStatusColor}`} />
               <ChevronDown className={`w-4 h-4 text-muted-foreground transition-transform duration-200 ${isImExpanded ? 'rotate-180' : ''}`} />
             </div>
           </button>

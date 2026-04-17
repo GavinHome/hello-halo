@@ -30,7 +30,7 @@ import type { InboundMessage, ReplyHandle } from './inbound-message'
 // ============================================
 
 /** Supported IM channel provider types */
-export type ImChannelType = 'wecom-bot' | 'feishu-bot' | 'dingtalk-bot'
+export type ImChannelType = 'wecom-bot' | 'feishu-bot' | 'dingtalk-bot' | 'weixin-ilink-bot'
 
 /**
  * Persisted configuration for a single IM channel instance.
@@ -39,7 +39,7 @@ export type ImChannelType = 'wecom-bot' | 'feishu-bot' | 'dingtalk-bot'
 export interface ImChannelInstanceConfig {
   /** Auto-generated UUID for this instance */
   id: string
-  /** Provider type: 'wecom-bot' | 'feishu-bot' | 'dingtalk-bot' */
+  /** Provider type — see ImChannelType for the full union */
   type: ImChannelType
   /** Whether this instance is enabled */
   enabled: boolean

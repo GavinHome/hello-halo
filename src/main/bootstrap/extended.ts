@@ -52,6 +52,7 @@ import { registerImChannelHandlers } from '../ipc/im-channels'
 import { registerImSessionHandlers } from '../ipc/im-sessions'
 import { registerStoreHandlers } from '../ipc/store'
 import { registerCliConfigHandlers } from '../ipc/cli-config'
+import { registerWeixinIlinkHandlers } from '../ipc/weixin-ilink'
 import { initRegistryService, shutdownRegistryService } from '../store'
 
 // Module-level reference to db for cleanup
@@ -191,6 +192,9 @@ export function initializeExtendedServices(): void {
 
   // CLI Config: IPC handlers for Claude CLI config dir + migration
   registerCliConfigHandlers()
+
+  // WeChat iLink Bot: QR code login + token management IPC handlers
+  registerWeixinIlinkHandlers()
 
   // Windows-specific: Initialize Git Bash in background
   if (process.platform === 'win32') {

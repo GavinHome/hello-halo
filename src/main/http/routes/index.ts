@@ -30,7 +30,7 @@ import {
   renameArtifact,
   moveArtifact
 } from '../../services/artifact.service'
-import { getTempSpacePath, getSpacesDir, getConfig as getServiceConfig } from '../../services/config.service'
+import { getTempSpacePath, getSpacesDir, getConfig as getServiceConfig, saveConfig } from '../../services/config.service'
 import { getSpace, getAllSpacePaths } from '../../services/space.service'
 import { getAppManager } from '../../apps/manager'
 import { getAppRuntime, getImChannelManager, sendAppChatMessage, stopAppChat, isAppChatGenerating, loadAppChatMessages, loadImChatMessages, getAppChatSessionState, getAppChatConversationId, clearAppChat, clearImSession, dispatchInboundMessage } from '../../apps/runtime'
@@ -42,6 +42,8 @@ import { broadcastToAll } from '../websocket'
 import * as appController from '../../controllers/app.controller'
 import type { AppErrorCode } from '../../controllers/app.controller'
 import * as storeController from '../../controllers/store.controller'
+import { fetchJson, ILINK_BASE_URL } from '../../apps/runtime/im-channels/ilink-api'
+import { saveIlinkToken, disconnectIlink } from '../../controllers/weixin-ilink.controller'
 
 // Helper: get working directory for a space
 function getWorkingDir(spaceId: string): string {
@@ -866,6 +868,103 @@ export function registerApiRoutes(app: Express): void {
         defaultConfig: p.defaultConfig,
       })) ?? []
       res.json({ success: true, data: providers })
+    } catch (error) {
+      res.json({ success: false, error: (error as Error).message })
+    }
+  })
+
+  // ===== WeChat iLink QR Auth Routes =====
+
+  // POST /api/weixin-ilink/request-qrcode
+  app.post('/api/weixin-ilink/request-qrcode', async (_req: Request, res: Response) => {
+    try {
+      // GET requests do NOT use auth headers (per iLink protocol)
+      interface QrCodeResponse { qrcode?: string; qrcode_img_content?: string }
+      const data = await fetchJson<QrCodeResponse>(
+        'GET',
+        `${ILINK_BASE_URL}/ilink/bot/get_bot_qrcode?bot_type=3`,
+        {}
+      )
+      if (!data.qrcode) {
+        res.json({ success: false, error: 'iLink API returned no qrcode token' })
+        return
+      }
+      res.json({
+        success: true,
+        data: {
+          qrcode: data.qrcode,
+          qrcodeImgContent: data.qrcode_img_content ?? '',
+          baseUrl: ILINK_BASE_URL,
+        },
+      })
+    } catch (error) {
+      res.json({ success: false, error: (error as Error).message })
+    }
+  })
+
+  // POST /api/weixin-ilink/poll-auth-status
+  app.post('/api/weixin-ilink/poll-auth-status', async (req: Request, res: Response) => {
+    try {
+      const { qrcode } = req.body as { qrcode?: string }
+      if (!qrcode) {
+        res.status(400).json({ success: false, error: 'qrcode is required' })
+        return
+      }
+      // get_qrcode_status requires iLink-App-ClientVersion: 1 header (per protocol)
+      interface QrStatusResponse {
+        status?: 'wait' | 'scaned' | 'confirmed' | 'expired'
+        bot_token?: string
+        ilink_bot_id?: string
+        baseurl?: string
+        ilink_user_id?: string
+      }
+      const data = await fetchJson<QrStatusResponse>(
+        'GET',
+        `${ILINK_BASE_URL}/ilink/bot/get_qrcode_status?qrcode=${encodeURIComponent(qrcode)}`,
+        { 'iLink-App-ClientVersion': '1' }
+      )
+      res.json({
+        success: true,
+        data: {
+          status: data.status ?? 'wait',
+          botToken: data.bot_token,
+          accountId: data.ilink_bot_id,
+          baseUrl: data.baseurl,
+          userId: data.ilink_user_id,
+        },
+      })
+    } catch (error) {
+      res.json({ success: false, error: (error as Error).message })
+    }
+  })
+
+  // POST /api/weixin-ilink/save-token
+  app.post('/api/weixin-ilink/save-token', async (req: Request, res: Response) => {
+    try {
+      const { instanceId, botToken, baseUrl, accountId } = req.body as {
+        instanceId?: string; botToken?: string; baseUrl?: string; accountId?: string
+      }
+      const result = await saveIlinkToken(instanceId ?? '', botToken ?? '', baseUrl, accountId)
+      if (!result.success) {
+        res.status(400).json(result)
+        return
+      }
+      res.json(result)
+    } catch (error) {
+      res.json({ success: false, error: (error as Error).message })
+    }
+  })
+
+  // POST /api/weixin-ilink/disconnect
+  app.post('/api/weixin-ilink/disconnect', async (req: Request, res: Response) => {
+    try {
+      const { instanceId } = req.body as { instanceId?: string }
+      const result = await disconnectIlink(instanceId ?? '')
+      if (!result.success) {
+        res.status(400).json(result)
+        return
+      }
+      res.json(result)
     } catch (error) {
       res.json({ success: false, error: (error as Error).message })
     }
