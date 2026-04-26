@@ -349,7 +349,7 @@ export default function App() {
       for (const [conversationId, session] of sessions) {
         if (!session.isGenerating) continue
 
-        // Find spaceId for this conversation
+        // Find spaceId for this conversation (virtual IDs like "app-chat:*" won't match)
         let spaceId: string | null = null
         for (const [sid, ss] of chatState.spaceStates) {
           if (ss.conversations.some(c => c.id === conversationId)) {
@@ -358,16 +358,22 @@ export default function App() {
           }
         }
 
-        if (!spaceId) continue
-
         // Ask the backend if this session is actually still active
         api.getSessionState(conversationId).then(res => {
           if (res.success && res.data) {
             const backendState = res.data as { isActive: boolean }
             if (!backendState.isActive) {
-              // Backend says done, but frontend is stuck on isGenerating=true
               console.log(`[App] Session ${conversationId} completed while backgrounded — recovering`)
-              chatState.handleAgentComplete({ spaceId: spaceId!, conversationId } as AgentEventBase)
+
+              if (spaceId) {
+                // Normal conversation — full reload via handleAgentComplete
+                chatState.handleAgentComplete({ spaceId, conversationId } as AgentEventBase)
+              } else {
+                // Virtual conversationId (app-chat:*, im-session, etc.) — no space conversation
+                // to reload. Clear session state directly to unblock the UI; the owning component
+                // (AppChatView / ImChatView) will reload messages via its own isGenerating effect.
+                chatState.resetSession(conversationId)
+              }
             }
           }
         }).catch(err => {

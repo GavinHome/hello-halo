@@ -32,6 +32,7 @@ import { initializeSearchHandlers, cleanupSearchHandlers } from '../ipc/search'
 import { registerPerfHandlers } from '../ipc/perf'
 import { registerGitBashHandlers, initializeGitBashOnStartup } from '../ipc/git-bash'
 import { cleanupAllCaches } from '../services/artifact-cache.service'
+import { flushSpaceActivity } from '../services/space.service'
 import { disposeSearchContext } from '../services/web-search'
 import { markExtendedServicesReady } from './state'
 import { getMainWindow, sendToRenderer } from '../services/window.service'
@@ -286,6 +287,9 @@ export function initializeExtendedServices(): void {
  * Called during window-all-closed to properly release resources.
  */
 export async function cleanupExtendedServices(): Promise<void> {
+  // Space: Flush any throttled activity timestamps to disk before teardown
+  flushSpaceActivity()
+
   // Store: Shutdown registry service (before app manager)
   shutdownRegistryService()
 

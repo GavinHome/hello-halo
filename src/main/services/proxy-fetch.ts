@@ -176,8 +176,55 @@ function getOrCreateAgent(proxyUrl: string): ProxyAgent {
  */
 let _appProxy: string | null | undefined = undefined
 
+// ============================================================================
+// AI Browser session proxy sync
+//
+// The AI Browser uses a dedicated Electron session ('persist:browser')
+// separate from the default session. session.setProxy() must be called
+// explicitly so that user-configured proxy in Settings also applies to
+// browser page loads, not just Node.js-level proxyFetch() calls.
+// ============================================================================
+
+const BROWSER_PARTITION = 'persist:browser'
+const PROXY_BYPASS_RULES = 'localhost,127.0.0.1,[::1]'
+
+/**
+ * Apply the app-level proxy setting to the AI Browser's Electron session.
+ *
+ * - When a proxy URL is provided, sets `proxyRules` on the session.
+ * - When null/empty, resets the session to follow system proxy (`mode: 'system'`).
+ * - localhost/loopback always bypasses proxy via `proxyBypassRules`.
+ *
+ * This is fire-and-forget: session.setProxy() returns a Promise but
+ * Chromium queues the config change internally, so subsequent requests
+ * pick it up without awaiting.
+ */
+function applyProxyToBrowserSession(proxy: string | null): void {
+  try {
+    const sess = session.fromPartition(BROWSER_PARTITION)
+    const config = proxy
+      ? { proxyRules: proxy, proxyBypassRules: PROXY_BYPASS_RULES }
+      : { mode: 'system' as const }
+
+    sess.setProxy(config)
+      .then(() => {
+        console.log(
+          `[ProxyFetch] Browser session (${BROWSER_PARTITION}) proxy: ${proxy || 'system'}`
+        )
+      })
+      .catch((err) => {
+        console.error(`[ProxyFetch] Failed to set browser session proxy:`, err)
+      })
+  } catch (err) {
+    // session.fromPartition may throw if called before app.whenReady()
+    // — safe to ignore during very early module loading.
+    console.warn('[ProxyFetch] Could not access browser session for proxy setup:', err)
+  }
+}
+
 onNetworkConfigChange((proxy) => {
   _appProxy = proxy?.trim() || null
+  applyProxyToBrowserSession(_appProxy)
   console.log(`[ProxyFetch] App proxy updated: ${_appProxy || 'none (auto-detect from system)'}`)
 })
 
@@ -185,6 +232,8 @@ function getAppProxy(): string | null {
   if (_appProxy === undefined) {
     // First call: initialize from disk once, then never again
     _appProxy = getConfig().network?.proxy?.trim() || null
+    // Sync to the AI Browser session so it is correct from the first page load
+    applyProxyToBrowserSession(_appProxy)
   }
   return _appProxy
 }

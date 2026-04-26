@@ -290,6 +290,7 @@ export interface Space {
   isTemp: boolean;
   createdAt: string;
   updatedAt: string;
+  lastActiveAt?: string;  // Last user activity time (conversations/messages)
   preferences?: SpacePreferences;  // User preferences for this space
   workingDir?: string;  // Project directory for custom spaces (agent cwd, artifacts, file explorer)
 }

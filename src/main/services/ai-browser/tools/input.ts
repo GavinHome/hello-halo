@@ -5,6 +5,7 @@
  * key press, file upload.
  */
 
+import fs from 'node:fs'
 import { z } from 'zod'
 import { tool } from '../../agent/resolved-sdk'
 import type { BrowserContext } from '../context'
@@ -180,10 +181,11 @@ const browser_press_key = tool(
 
 const browser_upload_file = tool(
   'browser_upload_file',
-  'Upload a file through a provided element.',
+  'Upload one or multiple files to a file input element. Supports a single file path or an array of paths for batch upload (e.g., uploading multiple images at once).',
   {
     uid: z.string().describe('The uid of the file input element or an element that will open file chooser on the page from the page content snapshot'),
-    filePath: z.string().describe('The local path of the file to upload')
+    filePath: z.union([z.string(), z.array(z.string()).min(1)])
+      .describe('Local file path (string) or array of paths (string[]) to upload')
   },
   async (args) => {
     if (!ctx.getActiveViewId()) {
@@ -191,6 +193,15 @@ const browser_upload_file = tool(
     }
 
     try {
+      // Normalize to array for uniform handling
+      const filePaths = Array.isArray(args.filePath) ? args.filePath : [args.filePath]
+
+      // Validate all files exist before attempting upload
+      const missing = filePaths.filter(p => !fs.existsSync(p))
+      if (missing.length > 0) {
+        throw new Error(`File(s) not found: ${missing.join(', ')}`)
+      }
+
       const element = ctx.getElementByUid(args.uid)
       if (!element) {
         throw new Error(`Element not found: ${args.uid}`)
@@ -199,13 +210,15 @@ const browser_upload_file = tool(
       await withTimeout(
         ctx.sendCDPCommand('DOM.setFileInputFiles', {
           backendNodeId: element.backendNodeId,
-          files: [args.filePath]
+          files: filePaths
         }),
         TOOL_TIMEOUT,
         'browser_upload_file'
       )
 
-      return textResult(`File uploaded from ${args.filePath}.`)
+      return filePaths.length === 1
+        ? textResult(`Uploaded 1 file: ${filePaths[0]}`)
+        : textResult(`Uploaded ${filePaths.length} files: ${filePaths.join(', ')}`)
     } catch (error) {
       return textResult(`Failed to upload file: ${(error as Error).message}`, true)
     }

@@ -15,7 +15,7 @@
 
 import { join } from 'path'
 import { existsSync, mkdirSync, readFileSync, writeFileSync, readdirSync, rmSync, renameSync } from 'fs'
-import { getSpace } from './space.service'
+import { getSpace, touchSpaceActivity } from './space.service'
 import { v4 as uuidv4 } from 'uuid'
 import type { FileChangesSummary } from '../../shared/file-changes'
 
@@ -661,6 +661,9 @@ export function createConversation(spaceId: string, title?: string): Conversatio
 
   updateIndexEntry(conversationsDir, spaceId, id, toMeta(conversation))
 
+  // Update space activity timestamp for home page sorting
+  touchSpaceActivity(spaceId)
+
   return conversation
 }
 
@@ -733,6 +736,9 @@ export function addMessage(spaceId: string, conversationId: string, message: Omi
 
   cachedWrite(conversationId, conversation, filePath, conversationsDir, spaceId)
   debouncedUpdateIndexEntry(conversationsDir, spaceId, conversationId, toMeta(conversation))
+
+  // Update space activity timestamp (throttled — safe to call per message)
+  touchSpaceActivity(spaceId)
 
   return newMessage
 }

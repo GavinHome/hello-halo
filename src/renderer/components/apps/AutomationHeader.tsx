@@ -9,7 +9,7 @@
  */
 
 import { useState, useRef, useEffect, useCallback, useMemo } from 'react'
-import { Play, Pause, RotateCcw, Globe, ExternalLink, MessageSquare, Activity, Cog, FolderOpen } from 'lucide-react'
+import { Play, Pause, RotateCcw, Globe, ExternalLink, MessageSquare, Activity, Cog, ChevronRight } from 'lucide-react'
 import Avatar from 'boring-avatars'
 import { useAppsStore } from '../../stores/apps.store'
 import { useAppsPageStore } from '../../stores/apps-page.store'
@@ -19,6 +19,7 @@ import { resolveSpecI18n } from '../../utils/spec-i18n'
 import { resolvePermission } from '../../../shared/apps/app-types'
 import { api } from '../../api'
 import { useSpaceStore } from '../../stores/space.store'
+import { useAppStore } from '../../stores/app.store'
 import type { BrowserLoginEntry } from '../../../shared/apps/spec-types'
 
 // Brand-aligned palette for boring-avatars
@@ -176,15 +177,22 @@ export function AutomationHeader({ appId, spaceName }: AutomationHeaderProps) {
               {lastRunLabel && <span>{t('Last run')} {lastRunLabel}</span>}
               {lastRunLabel && nextRunLabel && <span className="mx-1">·</span>}
               {nextRunLabel && <span>{nextRunLabel}</span>}
-              {spaceName && app.spaceId && (lastRunLabel || nextRunLabel) && <span className="mx-1">·</span>}
               {spaceName && app.spaceId && (
                 <button
-                  onClick={(e) => { e.stopPropagation(); useSpaceStore.getState().openSpaceFolder(app.spaceId!) }}
-                  className="inline-flex items-center gap-0.5 hover:text-primary transition-colors group"
-                  title={t('Open space folder')}
+                  onClick={(e) => {
+                    e.stopPropagation()
+                    const spaceStore = useSpaceStore.getState()
+                    const target = spaceStore.spaces.find(s => s.id === app.spaceId) ?? spaceStore.haloSpace
+                    if (target) {
+                      spaceStore.setCurrentSpace(target)
+                      useAppStore.getState().setView('space')
+                    }
+                  }}
+                  className="inline-flex items-center gap-1 ml-1.5 px-1.5 py-0.5 rounded-sm bg-secondary/50 text-muted-foreground hover:bg-secondary hover:text-primary transition-colors text-[11px] leading-tight"
+                  title={t('Go to workspace')}
                 >
-                  <FolderOpen className="w-3 h-3" />
-                  <span className="group-hover:underline decoration-dotted underline-offset-2">{t('Workspace')}: {spaceName}</span>
+                  <span className="truncate max-w-[120px]">{t('Workspace')}: {spaceName}</span>
+                  <ChevronRight className="w-3 h-3 flex-shrink-0 opacity-60" />
                 </button>
               )}
             </p>

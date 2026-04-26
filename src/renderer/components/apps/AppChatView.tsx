@@ -27,6 +27,7 @@ import { InterruptedBubble } from '../chat/InterruptedBubble'
 import { CompactNotice } from '../chat/CompactNotice'
 import { InputArea } from '../chat/InputArea'
 import { useRemoteSubscription } from '../../hooks/useRemoteSubscription'
+import { useWsRecovery } from '../../hooks/useWsRecovery'
 import { useTranslation } from '../../i18n'
 import type { Message, ImageAttachment } from '../../types'
 import { getAppChatConversationId } from '../../../shared/apps/im-keys'
@@ -131,6 +132,35 @@ export function AppChatView({ appId, spaceId }: AppChatViewProps) {
     prevIsGeneratingRef.current = isGenerating
     return () => { cancelled = true }
   }, [isGenerating, appId, spaceId])
+
+  // ── WebSocket reconnect recovery (remote/Capacitor only) ──
+  // When the WebSocket drops and reconnects, events during the gap are lost.
+  // Reload messages and reconcile session state to ensure the UI is up-to-date.
+  useWsRecovery(useCallback(() => {
+    console.log(`[AppChatView] WS reconnected — reloading messages for ${conversationId}`)
+    api.appChatMessages(appId, spaceId).then(res => {
+      if (res.success && res.data) {
+        const msgs = (res.data as Message[]) ?? []
+        setMessages(msgs)
+        setLoadState(msgs.length > 0 ? 'loaded' : 'empty')
+      }
+    }).catch(err => {
+      console.error('[AppChatView] WS recovery reload failed:', err)
+    })
+
+    // If frontend thinks we're still generating, verify with backend
+    if (useChatStore.getState().getSession(conversationId).isGenerating) {
+      api.getSessionState(conversationId).then(res => {
+        if (res.success && res.data) {
+          const { isActive } = res.data as { isActive: boolean }
+          if (!isActive) {
+            console.log(`[AppChatView] Backend session inactive — clearing stale generating state`)
+            useChatStore.getState().resetSession(conversationId)
+          }
+        }
+      }).catch(() => {})
+    }
+  }, [appId, spaceId, conversationId]))
 
   // ── Clear chat (with confirmation) ──
   const [showClearConfirm, setShowClearConfirm] = useState(false)

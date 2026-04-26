@@ -68,8 +68,15 @@ function summarizeBrowserAction(action: string, input: Record<string, unknown>):
     case 'browser_press_key':
       return `Key: ${input.key ?? '?'}`
 
-    case 'browser_upload_file':
-      return truncatePath(input.filePath as string) || 'Upload file'
+    case 'browser_upload_file': {
+      const fp = input.filePath
+      if (Array.isArray(fp)) {
+        return fp.length === 1
+          ? truncatePath(fp[0] as string) || 'Upload file'
+          : `Upload ${fp.length} files`
+      }
+      return truncatePath(fp as string) || 'Upload file'
+    }
 
     case 'browser_handle_dialog':
       return `Dialog: ${input.action ?? '?'}`

@@ -9,7 +9,7 @@
 import path from 'path'
 import { mkdirSync, readFileSync, writeFileSync, existsSync } from 'fs'
 import { app } from 'electron'
-import { resolveClaudeConfigDir } from '../config.service'
+import { resolveClaudeConfigDir, getConfig } from '../config.service'
 import { ensureOpenAICompatRouter, encodeBackendConfig } from '../../openai-compat-router'
 import type { ApiCredentials } from './types'
 import { inferOpenAIWireApi, credentialsToBackendConfig } from './helpers'
@@ -356,6 +356,23 @@ export function buildSdkEnv(params: SdkEnvParams): Record<string, string | numbe
     // debug flag to claude code sdk
     // DEBUG: '1',
     // DEBUG_CLAUDE_AGENT_SDK: '1',
+  }
+
+  // Propagate Halo app-level proxy (Settings > General > Network Proxy) to the
+  // CC subprocess. Without this, the SDK's built-in WebFetch tool (and any other
+  // network calls in the subprocess) bypass the proxy configured in Halo.
+  // Only inject when the user has an explicit Halo proxy AND the OS environment
+  // doesn't already provide the corresponding variable — OS-level vars take priority.
+  // See: https://github.com/openkursar/hello-halo/issues/69
+  const appProxy = getConfig().network?.proxy?.trim()
+  if (appProxy) {
+    const proxyKeys = ['HTTP_PROXY', 'HTTPS_PROXY', 'http_proxy', 'https_proxy'] as const
+    for (const key of proxyKeys) {
+      if (!env[key]) {
+        env[key] = appProxy
+      }
+    }
+    console.log(`[SDK Config] Injected app proxy into subprocess env: ${appProxy}`)
   }
 
   // Normalize proxy env vars: add http:// if protocol is missing.

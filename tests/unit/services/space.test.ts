@@ -16,7 +16,10 @@ import {
   getSpace,
   deleteSpace,
   getAllSpacePaths,
-  _resetSpaceRegistry
+  touchSpaceActivity,
+  flushSpaceActivity,
+  _resetSpaceRegistry,
+  _resetActivityState
 } from '../../../src/main/services/space.service'
 import { initializeApp, getSpacesDir, getTempSpacePath } from '../../../src/main/services/config.service'
 
@@ -24,6 +27,7 @@ describe('Space Service', () => {
   beforeEach(async () => {
     // Reset the module-level registry so each test gets a fresh load from the new testDir
     _resetSpaceRegistry()
+    _resetActivityState()
     await initializeApp()
   })
 
@@ -199,6 +203,79 @@ describe('Space Service', () => {
       const paths = getAllSpacePaths()
 
       expect(paths).toContain(space.path)
+    })
+  })
+
+  describe('touchSpaceActivity', () => {
+    it('should set lastActiveAt on the space', () => {
+      const space = createSpace({ name: 'Activity Test', icon: 'folder' })
+      const before = new Date().toISOString()
+
+      touchSpaceActivity(space.id)
+
+      const updated = getSpace(space.id)
+      expect(updated).toBeDefined()
+      expect(updated!.lastActiveAt).toBeDefined()
+      expect(new Date(updated!.lastActiveAt!).getTime()).toBeGreaterThanOrEqual(new Date(before).getTime())
+    })
+
+    it('should update lastActiveAt on subsequent calls', () => {
+      const space = createSpace({ name: 'Multi Touch', icon: 'folder' })
+
+      touchSpaceActivity(space.id)
+      const first = getSpace(space.id)!.lastActiveAt!
+
+      // Second touch within throttle window — memory should still update
+      touchSpaceActivity(space.id)
+      const second = getSpace(space.id)!.lastActiveAt!
+
+      expect(new Date(second).getTime()).toBeGreaterThanOrEqual(new Date(first).getTime())
+    })
+
+    it('should be a no-op for non-existent space', () => {
+      // Should not throw
+      expect(() => touchSpaceActivity('non-existent-id')).not.toThrow()
+    })
+
+    it('should affect listSpaces sort order', () => {
+      const spaceA = createSpace({ name: 'Space A', icon: 'folder' })
+      const spaceB = createSpace({ name: 'Space B', icon: 'folder' })
+
+      // Reset activity state to avoid throttle interference
+      _resetActivityState()
+
+      // Touch A after B was created — A should appear first in the list
+      touchSpaceActivity(spaceA.id)
+
+      const spaces = listSpaces()
+      expect(spaces.length).toBe(2)
+      expect(spaces[0].id).toBe(spaceA.id)
+    })
+  })
+
+  describe('flushSpaceActivity', () => {
+    it('should persist dirty activity to disk', () => {
+      const space = createSpace({ name: 'Flush Test', icon: 'folder' })
+
+      // First touch persists immediately + starts throttle timer
+      touchSpaceActivity(space.id)
+      // Second touch within throttle window marks dirty but doesn't persist
+      touchSpaceActivity(space.id)
+
+      // Flush forces persist of dirty state
+      flushSpaceActivity()
+
+      // Reload from disk to verify persistence
+      _resetSpaceRegistry()
+      _resetActivityState()
+
+      const reloaded = getSpace(space.id)
+      expect(reloaded).toBeDefined()
+      expect(reloaded!.lastActiveAt).toBeDefined()
+    })
+
+    it('should be safe to call with no pending activity', () => {
+      expect(() => flushSpaceActivity()).not.toThrow()
     })
   })
 })

@@ -20,6 +20,7 @@ import { useBrowserToolCalls } from '../chat/useBrowserToolCalls'
 import { InterruptedBubble } from '../chat/InterruptedBubble'
 import { CompactNotice } from '../chat/CompactNotice'
 import { useRemoteSubscription } from '../../hooks/useRemoteSubscription'
+import { useWsRecovery } from '../../hooks/useWsRecovery'
 import { useTranslation } from '../../i18n'
 import type { Message } from '../../types'
 import type { ImSessionRecord } from '../../../shared/types/im-channel'
@@ -120,6 +121,37 @@ export function ImChatView({ appId, spaceId, session, clearKey }: ImChatViewProp
     }
     return () => { cancelled = true }
   }, [isGenerating, appId, spaceId, session.channel, session.chatType, session.chatId])
+
+  // ── WebSocket reconnect recovery (remote/Capacitor only) ──
+  // Same pattern as AppChatView — reload messages and reconcile session state
+  // after a WebSocket reconnect to recover any events lost during the gap.
+  useWsRecovery(useCallback(() => {
+    console.log(`[ImChatView] WS reconnected — reloading messages for ${conversationId}`)
+    api.appImChatMessages(appId, spaceId, session.channel, session.chatType, session.chatId)
+      .then(res => {
+        if (res.success && res.data) {
+          const msgs = (res.data as Message[]) ?? []
+          setMessages(msgs)
+          setLoadState(msgs.length > 0 ? 'loaded' : 'empty')
+        }
+      })
+      .catch(err => {
+        console.error('[ImChatView] WS recovery reload failed:', err)
+      })
+
+    // If frontend thinks we're still generating, verify with backend
+    if (useChatStore.getState().getSession(conversationId).isGenerating) {
+      api.getSessionState(conversationId).then(res => {
+        if (res.success && res.data) {
+          const { isActive } = res.data as { isActive: boolean }
+          if (!isActive) {
+            console.log(`[ImChatView] Backend session inactive — clearing stale generating state`)
+            useChatStore.getState().resetSession(conversationId)
+          }
+        }
+      }).catch(() => {})
+    }
+  }, [appId, spaceId, conversationId, session.channel, session.chatType, session.chatId]))
 
   // ── Clear session (with confirmation) ──
   const resetSession = useChatStore(s => s.resetSession)

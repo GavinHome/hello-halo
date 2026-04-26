@@ -272,7 +272,7 @@ export function HomePage() {
                   </div>
                 </div>
                 <p className="text-xs text-muted-foreground mt-2">
-                  {formatTimeAgo(space.updatedAt)}{t('active')}
+                  {formatTimeAgo(space.lastActiveAt || space.updatedAt)}{t('active')}
                 </p>
               </div>
             ))}

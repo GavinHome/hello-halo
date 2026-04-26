@@ -59,7 +59,7 @@ You can now control Halo's embedded real browser. All browser tools are provided
 - \`browser_hover\` - Hover over element
 - \`browser_drag\` - Drag element
 - \`browser_press_key\` - Press key (e.g., Enter, Tab)
-- \`browser_upload_file\` - Upload file
+- \`browser_upload_file\` - Upload file(s). Supports single path or array of paths for multi-file upload
 - \`browser_handle_dialog\` - Handle dialog
 
 **View:**

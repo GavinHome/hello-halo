@@ -36,6 +36,7 @@ interface Space {
   isTemp: boolean
   createdAt: string
   updatedAt: string
+  lastActiveAt?: string  // Last user activity time (cached, used for sorting/display)
   preferences?: SpacePreferences
   workingDir?: string  // Project directory for custom spaces (agent cwd, artifacts, file explorer)
 }
@@ -69,6 +70,7 @@ interface SpaceIndexEntry {
   icon: string
   createdAt: string
   updatedAt: string
+  lastActiveAt?: string  // Last user activity time (cached, derivable from conversation data)
   workingDir?: string
   isTemp?: boolean  // true only for halo-temp (not persisted to disk)
 }
@@ -284,6 +286,7 @@ function entryToSpace(id: string, entry: SpaceIndexEntry): Space {
     isTemp: !!entry.isTemp,
     createdAt: entry.createdAt,
     updatedAt: entry.updatedAt,
+    lastActiveAt: entry.lastActiveAt,
     workingDir: entry.workingDir
   }
 }
@@ -355,7 +358,14 @@ export function listSpaces(): Space[] {
     persistIndex(getRegistry())
   }
 
-  spaces.sort((a, b) => new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime())
+  // Sort by most recent activity. lastActiveAt reflects actual user activity
+  // (conversations/messages); fall back to updatedAt (metadata edits) for
+  // spaces that have never been actively used since this field was introduced.
+  spaces.sort((a, b) => {
+    const aTime = new Date(a.lastActiveAt || a.updatedAt).getTime()
+    const bTime = new Date(b.lastActiveAt || b.updatedAt).getTime()
+    return bTime - aTime
+  })
   console.log('[Space] listSpaces: count=%d', spaces.length)
   return spaces
 }
@@ -599,6 +609,93 @@ export function getSpacePreferences(spaceId: string): SpacePreferences | null {
 
   const meta = tryReadMeta(entry.path)
   return meta?.preferences || null
+}
+
+// ============================================================================
+// Space Activity Tracking
+// ============================================================================
+
+// Throttle state: per-space timers to coalesce disk writes.
+// When touchSpaceActivity is called, memory is updated immediately.
+// Disk persist is throttled: first touch writes immediately, subsequent
+// touches within ACTIVITY_THROTTLE_MS only update memory. A trailing
+// timer ensures the final value is always persisted.
+const ACTIVITY_THROTTLE_MS = 60_000
+const activityTimers = new Map<string, NodeJS.Timeout>()
+const activityDirty = new Set<string>()  // Spaces with in-memory updates not yet persisted
+
+/**
+ * Record user activity in a space.
+ *
+ * Called from conversation.service when a user creates a conversation or
+ * sends a message. Updates lastActiveAt in the in-memory registry immediately;
+ * disk writes are throttled to at most once per ACTIVITY_THROTTLE_MS per space.
+ *
+ * Safe to call at high frequency (e.g. during streaming) — only the first
+ * call within the throttle window triggers a disk write; a trailing timer
+ * guarantees the final value is persisted.
+ */
+export function touchSpaceActivity(spaceId: string): void {
+  const entry = getRegistry().get(spaceId)
+  if (!entry || entry.isTemp) return
+
+  const now = new Date().toISOString()
+  entry.lastActiveAt = now
+
+  // If there's already a pending trailing timer, the space is within the
+  // throttle window — just mark dirty and let the timer handle persist.
+  if (activityTimers.has(spaceId)) {
+    activityDirty.add(spaceId)
+    return
+  }
+
+  // First touch in this window: persist immediately and start trailing timer.
+  persistIndex(getRegistry())
+  console.log(`[Space] Activity recorded for ${spaceId}`)
+
+  // Set trailing timer: when it fires, persist if any new touches arrived.
+  const timer = setTimeout(() => {
+    activityTimers.delete(spaceId)
+    if (activityDirty.has(spaceId)) {
+      activityDirty.delete(spaceId)
+      persistIndex(getRegistry())
+      console.log(`[Space] Activity flushed (trailing) for ${spaceId}`)
+    }
+  }, ACTIVITY_THROTTLE_MS)
+
+  // Prevent timer from keeping the process alive during shutdown
+  timer.unref()
+  activityTimers.set(spaceId, timer)
+}
+
+/**
+ * Flush all pending activity timestamps to disk.
+ *
+ * Called during graceful shutdown (cleanupExtendedServices) to ensure
+ * in-memory lastActiveAt values are not lost. Clears all throttle timers.
+ */
+export function flushSpaceActivity(): void {
+  // Clear all pending timers
+  for (const [spaceId, timer] of activityTimers) {
+    clearTimeout(timer)
+    activityTimers.delete(spaceId)
+  }
+
+  // If any spaces have dirty (un-persisted) activity, write once
+  if (activityDirty.size > 0) {
+    activityDirty.clear()
+    persistIndex(getRegistry())
+    console.log('[Space] Activity flushed on shutdown')
+  }
+}
+
+/** For testing only — reset activity throttle state */
+export function _resetActivityState(): void {
+  for (const timer of activityTimers.values()) {
+    clearTimeout(timer)
+  }
+  activityTimers.clear()
+  activityDirty.clear()
 }
 
 // ============================================================================
