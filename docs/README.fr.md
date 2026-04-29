@@ -4,10 +4,9 @@
 
 # Halo
 
-### Desktop AI Agent. Code, automate, run 7x24.
+### Votre station de travail IA, 24h/24
 
-Toute la puissance de Claude Code, sans terminal.
-Ecrire du code, piloter un navigateur, creer des Humains Numeriques -- votre IA, disponible 24h/24.
+Fixez des objectifs. Il s'occupe du reste. Écrire du code, automatiser, déployer — vous décidez, Halo exécute.
 
 [![GitHub Stars](https://img.shields.io/github/stars/openkursar/hello-halo?style=social)](https://github.com/openkursar/hello-halo/stargazers)
 [![License](https://img.shields.io/badge/license-MIT-blue.svg)](../LICENSE)
@@ -33,13 +32,13 @@ Ecrire du code, piloter un navigateur, creer des Humains Numeriques -- votre IA,
 
 Halo est construit sur [Claude Code](https://github.com/anthropics/claude-code), avec un ensemble complet de fonctionnalites produit, plus de 300 000 lignes de code cumulees, valide par des dizaines de milliers d'utilisateurs et fonctionnant de maniere stable en environnement professionnel. En plus de cela, Halo offre egalement :
 
-| Impossible dans le terminal | Halo le peut |
-|:---:|:---:|
-| Voir chaque fichier genere par l'IA | **Artifact Rail** pour previsualiser en temps reel le code, HTML, images |
-| Ca s'arrete quand vous quittez l'ordinateur | **Acces distant**, continuez a tout moment via mobile / H5 / WeChat / client Android |
-| Il faut relancer manuellement a chaque fois | **Humains Numeriques** fonctionnant automatiquement 7x24 |
-| Difficile a utiliser pour les collegues non techniques | **Telecharger et utiliser**, zero configuration |
-| Automatiser les operations du navigateur | **AI Browser** avec navigateur integre, controle direct par l'IA |
+| Ce que Halo apporte |
+|:---:|
+| **Artifact Rail** — prévisualisez code, HTML et images en temps réel |
+| **Accès distant** — contrôlez depuis mobile / H5 / WeChat / Android à tout moment |
+| **AI AI Humains Numériques** fonctionnent 7x24, vous décidez seul |
+| **Télécharger et utiliser**, zéro configuration, accessible aux non-techniciens |
+| **AI Browser** — navigateur intégré contrôlé directement par l'IA |
 
 > Powered by [Claude Code](https://github.com/anthropics/claude-code) -- 100% compatible avec les capacites Agent, MCP et Skills de Claude Code.
 

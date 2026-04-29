@@ -4,10 +4,9 @@
 
 # Halo
 
-### Desktop AI Agent. Code, automate, run 7x24.
+### Your AI Workstation, 24/7
 
-All the power of Claude Code, no terminal required.
-Write code, control browsers, create Digital Humans — your AI, on standby around the clock.
+Set goals. It runs around the clock. Write code, automate, deploy — you make the calls, Halo does the work.
 
 [![GitHub Stars](https://img.shields.io/github/stars/openkursar/hello-halo?style=social)](https://github.com/openkursar/hello-halo/stargazers)
 [![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
@@ -33,13 +32,13 @@ Write code, control browsers, create Digital Humans — your AI, on standby arou
 
 Halo is built on top of [Claude Code](https://github.com/anthropics/claude-code), with a complete product layer totaling over 300,000 lines of code, validated by tens of thousands of users, and running stably in enterprise environments. On top of that, Halo also delivers:
 
-| What the terminal can't do | Halo can |
-|:---:|:---:|
-| See every file AI generates | **Artifact Rail** previews code, HTML, and images in real time |
-| Stops when you leave the computer | **Remote Access** — continue anytime from phone / H5 / WeChat / Android client |
-| Have to start manually every time | **Digital Humans** run automatically 7x24 |
-| Let non-technical colleagues use it | **Download and go**, zero configuration |
-| Automate browser operations | **AI Browser** — embedded browser directly controlled by AI |
+| What Halo delivers |
+|:---:|
+| **Artifact Rail** — preview code, HTML, and images in real time |
+| **Remote Access** — control from phone / H5 / WeChat / Android anytime |
+| **AI Digital Humans** run automatically 7x24, you just make decisions |
+| **Download and go**, zero configuration, non-technical users welcome |
+| **AI Browser** — embedded browser directly controlled by AI |
 
 > Powered by [Claude Code](https://github.com/anthropics/claude-code) — 100% compatible with Claude Code's Agent capabilities, MCP, and Skills.
 
@@ -49,9 +48,9 @@ Halo is built on top of [Claude Code](https://github.com/anthropics/claude-code)
 
 Most AI tools require you to sit in front of the screen, going back and forth in conversation. Halo is different — it can work on its own, and you only need to make decisions at key checkpoints.
 
-### Digital Humans — AI Workers Running Autonomously 7x24
+### AI Digital Humans — AI Workers Running Autonomously 7x24
 
-Create a Digital Human, give it a task and an execution frequency, and it will run autonomously on schedule:
+Create an AI Digital Human, give it a task and an execution frequency, and it will run autonomously on schedule:
 
 - Push a tech news digest every morning
 - Check online service status every hour and notify you of anomalies
@@ -59,13 +58,13 @@ Create a Digital Human, give it a task and an execution frequency, and it will r
 - Monitor GitHub dependency updates and security vulnerabilities
 - Track keyword mentions across social media
 
-Install with one click from the **Digital Human Store**, or create your own using natural language.
+Install with one click from the **AI Digital Human Store**, or create your own using natural language.
 
 > Think of it as a cron job + AI Agent hybrid — except you just speak in plain language.
 
-Digital Humans have the exact same Agent capabilities as conversation mode — the same Claude engine, MCP toolchain, and AI Browser — they just trigger automatically on schedule without needing you at the computer.
+AI Digital Humans have the exact same Agent capabilities as conversation mode — the same Claude engine, MCP toolchain, and AI Browser — they just trigger automatically on schedule without needing you at the computer.
 
-**WeChat is your control panel.** Digital Humans support two-way conversational control via personal WeChat / WeCom (Enterprise WeChat) — not just receiving notifications, you can give instructions to Digital Humans, check progress, and request reports directly in WeChat.
+**WeChat is your control panel.** AI Digital Humans support two-way conversational control via personal WeChat / WeCom (Enterprise WeChat) — not just receiving notifications, you can give instructions to AI Digital Humans, check progress, and request reports directly in WeChat.
 
 ![AI Digital Human](./docs/assets/ai-digital-human.png)
 
@@ -97,9 +96,9 @@ async (params) => {
 }
 ```
 
-When a Digital Human calls it, all it takes is: `browser_run({ file: "skills/bili-get-messages/index.js" })` — after getting the data, the AI decides which items need replies and how to reply.
+When an AI Digital Human calls it, all it takes is: `browser_run({ file: "skills/bili-get-messages/index.js" })` — after getting the data, the AI decides which items need replies and how to reply.
 
-For example, a Zhihu Digital Human's workflow:
+For example, a Zhihu AI Digital Human's workflow:
 1. AI decides: time to check for new invited questions
 2. Calls `zhihu-creator-invited` Skill -> script automatically fetches the invitation list and returns structured data
 3. AI judges: this question is worth answering, starts writing
@@ -155,7 +154,7 @@ npm run dev
 
 ---
 
-## Digital Human Store
+## AI Digital Human Store
 
 <table>
 <tr>
@@ -163,7 +162,7 @@ npm run dev
 
 ### For Users — Install and Use Instantly
 
-Open the Digital Human Store, pick one, fill in a few configuration fields, and it starts running automatically. No coding required, no prompts to write.
+Open the AI Digital Human Store, pick one, fill in a few configuration fields, and it starts running automatically. No coding required, no prompts to write.
 
 ![AI Store](./docs/assets/shop.png)
 
@@ -172,9 +171,9 @@ Open the Digital Human Store, pick one, fill in a few configuration fields, and 
 
 ### For Developers — Build and Publish
 
-Write a `spec.yaml` and submit a PR to the [Digital Human Protocol (DHP)](https://github.com/openkursar/digital-human-protocol). Once merged, it becomes immediately available to all Halo users.
+Write a `spec.yaml` and submit a PR to the [AI Digital Human Protocol (DHP)](https://github.com/openkursar/digital-human-protocol). Once merged, it becomes immediately available to all Halo users.
 
-You can also write Browser Skills (`.js` scripts) for Digital Humans to precisely execute operations on specific platforms.
+You can also write Browser Skills (`.js` scripts) for AI Digital Humans to precisely execute operations on specific platforms.
 
 </td>
 </tr>
@@ -247,7 +246,7 @@ https://github.com/user-attachments/assets/2d4d2f3e-d27c-44b0-8f1d-9059c8372003
 - [x] AI Browser (CDP)
 - [x] MCP Server Support
 - [x] Skills System
-- [x] Digital Humans and Digital Human Store
+- [x] AI Digital Humans and AI Digital Human Store
 - [ ] Third-party Ecosystem Plugin Compatibility
 - [ ] Enhanced Code Editing Experience
 - [ ] Visual Git + AI-Assisted Code Review
@@ -302,7 +301,7 @@ Then came the second problem — non-technical colleagues wanted to use it too, 
 
 So I built Halo: a visual interface, one-click install, remote access. The first version took a few hours. Everything after that? **100% built by Halo itself.**
 
-Now, we believe the next step is the **AI Workstation**: AI no longer needs someone watching to get work done. You set the goals, Digital Humans push forward autonomously 7x24. Writing code, running tests, monitoring deployments, generating reports — running continuously, with you only making decisions at key checkpoints.
+Now, we believe the next step is the **AI Workstation**: AI no longer needs someone watching to get work done. You set the goals, AI Digital Humans push forward autonomously 7x24. Writing code, running tests, monitoring deployments, generating reports — running continuously, with you only making decisions at key checkpoints.
 
 That's what Halo is building.
 

@@ -4,10 +4,9 @@
 
 # Halo
 
-### Desktop AI Agent. Code, automate, run 7x24.
+### Deine KI-Workstation, 24/7
 
-Die volle Leistung von Claude Code, ohne Terminal.
-Code schreiben, Browser steuern, Digitale Menschen erstellen -- deine KI, rund um die Uhr einsatzbereit.
+Setze Ziele. Es läuft rund um die Uhr. Code schreiben, automatisieren, bereitstellen — du triffst Entscheidungen, Halo führt aus.
 
 [![GitHub Stars](https://img.shields.io/github/stars/openkursar/hello-halo?style=social)](https://github.com/openkursar/hello-halo/stargazers)
 [![License](https://img.shields.io/badge/license-MIT-blue.svg)](../LICENSE)
@@ -33,13 +32,13 @@ Code schreiben, Browser steuern, Digitale Menschen erstellen -- deine KI, rund u
 
 Halo baut auf [Claude Code](https://github.com/anthropics/claude-code) auf und bietet eine vollstaendige Produkterfahrung mit insgesamt ueber 300.000 Zeilen Code, validiert durch zehntausende Nutzer und stabil im Unternehmenseinsatz. Darueber hinaus bietet Halo:
 
-| Im Terminal nicht moeglich | Halo kann es |
-|:---:|:---:|
-| Jede von der KI generierte Datei sehen | **Artifact Rail** zeigt Code, HTML und Bilder in Echtzeit |
-| Wenn du den Computer verlaesst, stoppt alles | **Fernzugriff** -- jederzeit weiter per Handy / H5 / WeChat / Android-Client |
-| Jedes Mal manuell starten | **Digitale Menschen** laufen 7x24 automatisch |
-| Fuer nicht-technische Kollegen nutzbar machen | **Herunterladen und loslegen**, keine Konfiguration noetig |
-| Browser-Operationen automatisieren | **AI Browser** -- eingebetteter Browser, direkt von der KI gesteuert |
+| Was Halo bietet |
+|:---:|
+| **Artifact Rail** — zeigt Code, HTML und Bilder in Echtzeit |
+| **Fernzugriff** — Steuerung per Handy / H5 / WeChat / Android jederzeit |
+| **AI AI Digitale Menschen** laufen 7x24 automatisch, du triffst nur Entscheidungen |
+| **Herunterladen und loslegen**, keine Konfiguration nötig |
+| **AI Browser** — eingebetteter Browser, direkt von der KI gesteuert |
 
 > Powered by [Claude Code](https://github.com/anthropics/claude-code) -- 100% kompatibel mit den Agent-Faehigkeiten, MCP und Skills von Claude Code.
 
@@ -49,7 +48,7 @@ Halo baut auf [Claude Code](https://github.com/anthropics/claude-code) auf und b
 
 Die meisten KI-Tools erfordern, dass du vor dem Bildschirm sitzt und Runde fuer Runde Dialoge fuehrst. Halo ist anders -- es kann selbststaendig arbeiten, du musst nur an entscheidenden Punkten Entscheidungen treffen.
 
-### Digitale Menschen -- 7x24 autonom arbeitende KI-Mitarbeiter
+### AI Digitale Menschen -- 7x24 autonom arbeitende KI-Mitarbeiter
 
 Erstelle einen Digitalen Menschen, gib ihm eine Aufgabe und eine Ausfuehrungsfrequenz, und er wird planmaessig selbststaendig arbeiten:
 
@@ -63,9 +62,9 @@ Im **Digital Human Store** mit einem Klick installieren oder mit natuerlicher Sp
 
 > Stell es dir als Kombination aus Cron-Job und KI-Agent vor -- aber du musst nur normale Sprache verwenden.
 
-Digitale Menschen verfuegen ueber exakt die gleichen Agent-Faehigkeiten wie der Konversationsmodus -- dieselbe Claude-Engine, MCP-Toolchain und den AI Browser, nur dass sie planmaessig automatisch ausgeloest werden, ohne dass du am Computer sitzen musst.
+AI Digitale Menschen verfuegen ueber exakt die gleichen Agent-Faehigkeiten wie der Konversationsmodus -- dieselbe Claude-Engine, MCP-Toolchain und den AI Browser, nur dass sie planmaessig automatisch ausgeloest werden, ohne dass du am Computer sitzen musst.
 
-**WeChat ist deine Steuerzentrale.** Digitale Menschen unterstuetzen die bidirektionale Dialogsteuerung ueber persoenliches WeChat / WeCom -- nicht nur Benachrichtigungen empfangen, du kannst dem Digitalen Menschen direkt in WeChat Anweisungen geben, den Fortschritt abfragen und Berichte anfordern.
+**WeChat ist deine Steuerzentrale.** AI Digitale Menschen unterstuetzen die bidirektionale Dialogsteuerung ueber persoenliches WeChat / WeCom -- nicht nur Benachrichtigungen empfangen, du kannst dem Digitalen Menschen direkt in WeChat Anweisungen geben, den Fortschritt abfragen und Berichte anfordern.
 
 ![AI Digital Human](./assets/ai-digital-human.png)
 
@@ -174,7 +173,7 @@ Oeffne den Digital Human Store, waehle einen aus, fuelle ein paar Konfigurations
 
 Schreibe eine `spec.yaml` und reiche einen PR beim [Digital Human Protocol (DHP)](https://github.com/openkursar/digital-human-protocol) ein. Nach dem Merge ist er sofort fuer alle Halo-Nutzer verfuegbar.
 
-Du kannst auch Browser Skills (`.js`-Skripte) fuer Digitale Menschen schreiben, damit sie auf bestimmten Plattformen praezise Aktionen ausfuehren.
+Du kannst auch Browser Skills (`.js`-Skripte) fuer AI Digitale Menschen schreiben, damit sie auf bestimmten Plattformen praezise Aktionen ausfuehren.
 
 </td>
 </tr>
@@ -247,7 +246,7 @@ https://github.com/user-attachments/assets/2d4d2f3e-d27c-44b0-8f1d-9059c8372003
 - [x] AI Browser (CDP)
 - [x] MCP-Server-Unterstuetzung
 - [x] Skills-System
-- [x] Digitale Menschen und Digital Human Store
+- [x] AI Digitale Menschen und Digital Human Store
 - [ ] Kompatibilitaet mit Drittanbieter-Oekosystem-Plugins
 - [ ] Verbesserte Code-Editiererfahrung
 - [ ] Git-Visualisierung + KI-gestuetzte Code-Review
@@ -302,7 +301,7 @@ Dann kam das zweite Problem -- nicht-technische Kollegen wollten es auch nutzen,
 
 Also baute ich Halo: visuelle Oberflaeche, Ein-Klick-Installation, Fernzugriff. Die erste Version brauchte nur ein paar Stunden. Alles danach wurde **100% von Halo selbst gebaut.**
 
-Jetzt glauben wir, dass der naechste Schritt die **KI-Workstation** ist: Die KI braucht keinen Menschen mehr, der ihr zuschaut. Du setzt ein Ziel, und Digitale Menschen arbeiten 7x24 autonom daran. Code schreiben, Tests ausfuehren, Deployments ueberwachen, Berichte erstellen -- kontinuierlich im Betrieb, du entscheidest nur an kritischen Punkten.
+Jetzt glauben wir, dass der naechste Schritt die **KI-Workstation** ist: Die KI braucht keinen Menschen mehr, der ihr zuschaut. Du setzt ein Ziel, und AI Digitale Menschen arbeiten 7x24 autonom daran. Code schreiben, Tests ausfuehren, Deployments ueberwachen, Berichte erstellen -- kontinuierlich im Betrieb, du entscheidest nur an kritischen Punkten.
 
 Das ist es, woran Halo arbeitet.
 

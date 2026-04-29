@@ -4,10 +4,9 @@
 
 # Halo
 
-### Desktop AI Agent. Code, automate, run 7x24.
+### Tu estación de trabajo AI, 24/7
 
-Toda la potencia de Claude Code, sin necesidad de terminal.
-Escribe código, controla el navegador, crea Humanos Digitales — tu IA, disponible las 24 horas.
+Establece objetivos. Él hace el resto. Escribe código, automatiza, despliega — tú decides, Halo ejecuta.
 
 [![GitHub Stars](https://img.shields.io/github/stars/openkursar/hello-halo?style=social)](https://github.com/openkursar/hello-halo/stargazers)
 [![License](https://img.shields.io/badge/license-MIT-blue.svg)](../LICENSE)
@@ -33,13 +32,13 @@ Escribe código, controla el navegador, crea Humanos Digitales — tu IA, dispon
 
 Halo se construye sobre [Claude Code](https://github.com/anthropics/claude-code), ofreciendo capacidades completas de producto con más de 300.000 líneas de código, validado por decenas de miles de usuarios y ejecutándose de forma estable en entornos empresariales. Además de eso, Halo también logra:
 
-| Lo que no puedes hacer en el terminal | Halo sí puede |
-|:---:|:---:|
-| Ver cada archivo generado por la IA | **Artifact Rail** previsualiza código, HTML e imágenes en tiempo real |
-| Se detiene cuando dejas el ordenador | **Acceso remoto**, continúa en cualquier momento desde móvil / H5 / WeChat / cliente Android |
-| Hay que iniciarlo manualmente cada vez | **Humanos Digitales** funcionan automáticamente 7x24 |
-| Usarlo con compañeros no técnicos | **Descarga y usa**, configuración cero |
-| Automatizar operaciones del navegador | **AI Browser** con navegador integrado, controlado directamente por la IA |
+| Lo que Halo ofrece |
+|:---:|
+| **Artifact Rail** — previsualiza código, HTML e imágenes en tiempo real |
+| **Acceso remoto** — control desde móvil / H5 / WeChat / Android en cualquier momento |
+| **AI AI Humanos Digitales** funcionan 7x24, tú solo decides |
+| **Descarga y usa**, sin configuración, también para usuarios no técnicos |
+| **AI Browser** — navegador integrado controlado directamente por la IA |
 
 > Powered by [Claude Code](https://github.com/anthropics/claude-code) — 100% compatible con las capacidades de Agent, MCP y Skills de Claude Code.
 
@@ -49,7 +48,7 @@ Halo se construye sobre [Claude Code](https://github.com/anthropics/claude-code)
 
 La mayoría de herramientas de IA requieren que estés frente a la pantalla, conversando turno a turno. Halo es diferente — puede trabajar solo, tú solo decides en los momentos clave.
 
-### Humanos Digitales — Empleados IA autónomos 7x24
+### AI Humanos Digitales — Empleados IA autónomos 7x24
 
 Crea un Humano Digital, asígnale una tarea y una frecuencia de ejecución, y funcionará de forma autónoma según lo programado:
 
@@ -59,13 +58,13 @@ Crea un Humano Digital, asígnale una tarea y una frecuencia de ejecución, y fu
 - Monitoreo de actualizaciones de dependencias y vulnerabilidades de seguridad en GitHub
 - Seguimiento de menciones de palabras clave en redes sociales
 
-Instala con un clic desde la **Tienda de Humanos Digitales**, o crea el tuyo propio con lenguaje natural.
+Instala con un clic desde la **Tienda de AI Humanos Digitales**, o crea el tuyo propio con lenguaje natural.
 
 > Piénsalo como la combinación de un cron job + AI Agent — pero solo necesitas hablar en lenguaje humano.
 
-Los Humanos Digitales tienen exactamente las mismas capacidades de Agent que el modo de conversación — el mismo motor Claude, la misma cadena de herramientas MCP, el mismo AI Browser, solo que se activan automáticamente según un horario, sin necesidad de que estés frente al ordenador.
+Los AI Humanos Digitales tienen exactamente las mismas capacidades de Agent que el modo de conversación — el mismo motor Claude, la misma cadena de herramientas MCP, el mismo AI Browser, solo que se activan automáticamente según un horario, sin necesidad de que estés frente al ordenador.
 
-**WeChat es tu consola de control.** Los Humanos Digitales soportan comunicación bidireccional a través de WeChat personal / WeCom — no solo recibes notificaciones, puedes dar instrucciones directamente al Humano Digital desde WeChat, consultar el progreso y solicitar informes.
+**WeChat es tu consola de control.** Los AI Humanos Digitales soportan comunicación bidireccional a través de WeChat personal / WeCom — no solo recibes notificaciones, puedes dar instrucciones directamente al Humano Digital desde WeChat, consultar el progreso y solicitar informes.
 
 ![AI Digital Human](./assets/ai-digital-human.png)
 
@@ -155,7 +154,7 @@ npm run dev
 
 ---
 
-## Tienda de Humanos Digitales
+## Tienda de AI Humanos Digitales
 
 <table>
 <tr>
@@ -163,7 +162,7 @@ npm run dev
 
 ### Para usuarios — Instalación instantánea
 
-Abre la Tienda de Humanos Digitales, elige uno, configura unos pocos campos y empezará a funcionar automáticamente. No necesitas escribir código ni prompts.
+Abre la Tienda de AI Humanos Digitales, elige uno, configura unos pocos campos y empezará a funcionar automáticamente. No necesitas escribir código ni prompts.
 
 ![AI Store](./assets/shop.png)
 
@@ -174,7 +173,7 @@ Abre la Tienda de Humanos Digitales, elige uno, configura unos pocos campos y em
 
 Escribe un `spec.yaml` y envía un PR al [Digital Human Protocol (DHP)](https://github.com/openkursar/digital-human-protocol). Una vez fusionado, estará disponible de inmediato para todos los usuarios de Halo.
 
-También puedes crear Browser Skills (scripts `.js`) para que los Humanos Digitales ejecuten operaciones precisas en plataformas específicas.
+También puedes crear Browser Skills (scripts `.js`) para que los AI Humanos Digitales ejecuten operaciones precisas en plataformas específicas.
 
 </td>
 </tr>
@@ -247,7 +246,7 @@ https://github.com/user-attachments/assets/2d4d2f3e-d27c-44b0-8f1d-9059c8372003
 - [x] AI Browser (CDP)
 - [x] Soporte de servidores MCP
 - [x] Sistema de Skills (Habilidades)
-- [x] Humanos Digitales y Tienda de Humanos Digitales
+- [x] AI Humanos Digitales y Tienda de AI Humanos Digitales
 - [ ] Compatibilidad con plugins de ecosistemas de terceros
 - [ ] Mejora de la experiencia de edición de código
 - [ ] Visualización Git + Code Review asistido por IA
@@ -302,7 +301,7 @@ Luego vino el segundo problema — mis compañeros no técnicos también quería
 
 Así que creé Halo: interfaz visual, instalación con un clic, acceso remoto. La primera versión se hizo en unas pocas horas. Todas las funciones posteriores fueron **100% construidas por el propio Halo.**
 
-Ahora, creemos que el siguiente paso es la **estación de trabajo IA**: la IA ya no necesita que alguien la supervise para trabajar. Tú defines los objetivos, y los Humanos Digitales avanzan de forma autónoma 7x24. Escriben código, ejecutan tests, monitorizan despliegues, generan informes — funcionando continuamente, y tú solo decides en los momentos clave.
+Ahora, creemos que el siguiente paso es la **estación de trabajo IA**: la IA ya no necesita que alguien la supervise para trabajar. Tú defines los objetivos, y los AI Humanos Digitales avanzan de forma autónoma 7x24. Escriben código, ejecutan tests, monitorizan despliegues, generan informes — funcionando continuamente, y tú solo decides en los momentos clave.
 
 Eso es lo que Halo está construyendo.
 
