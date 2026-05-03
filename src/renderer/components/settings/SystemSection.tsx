@@ -173,9 +173,9 @@ export function SystemSection({ config, setConfig }: SystemSectionProps) {
     if (value) {
       try {
         const u = new URL(value)
-        const supported = ['http:', 'https:', 'socks4:', 'socks5:']
+        const supported = ['http:', 'https:', 'socks4:', 'socks5:', 'socks5h:']
         if (!supported.includes(u.protocol)) {
-          setProxyError(t('Unsupported protocol. Use http://, https://, socks4://, or socks5://'))
+          setProxyError(t('Unsupported protocol. Use http://, https://, socks4://, socks5://, or socks5h://'))
           return
         }
         if (!u.hostname) {
@@ -365,7 +365,7 @@ export function SystemSection({ config, setConfig }: SystemSectionProps) {
               <p className="mt-1.5 text-xs text-destructive">{proxyError}</p>
             )}
             <p className="mt-1.5 text-xs text-muted-foreground">
-              {t('Supports http://, https://, socks4://, socks5://')}
+              {t('Supports http://, https://, socks4://, socks5://, socks5h://')}
             </p>
 
             {/* Browser proxy toggle — only visible when a proxy is configured */}
