@@ -211,10 +211,11 @@ async function fetchAnthropicUpstream(
       k => k.toLowerCase() === 'authorization'
     )
 
-    // Merge anthropic-beta headers from SDK and provider instead of overwriting.
-    // The CC subprocess sets betas for features it uses (context-management, etc.)
-    // and the provider adds its own (oauth, interleaved-thinking).
-    // Both must be present — overwriting drops CC's betas, causing API rejections.
+    // Merge anthropic-beta from the SDK layer and the provider instead of
+    // overwriting. The SDK sets betas for the features it uses (context-
+    // management, etc.) and the provider adds its own (oauth, interleaved-
+    // thinking). Both must be present — overwriting drops one side's betas,
+    // causing API rejections.
     const sdkBeta = Object.entries(sdkHeaders || {}).find(([k]) => k.toLowerCase() === 'anthropic-beta')?.[1]
     const customBeta = Object.entries(customHeaders || {}).find(([k]) => k.toLowerCase() === 'anthropic-beta')?.[1]
     let mergedBeta: string | undefined
@@ -223,7 +224,8 @@ async function fetchAnthropicUpstream(
       const all = [...sdkBeta.split(','), ...customBeta.split(',')]
         .map(s => s.trim()).filter(Boolean)
         .filter(s => seen.has(s) ? false : (seen.add(s), true))
-      mergedBeta = all.join(',')
+      // Web Headers API serializes array-valued headers as ', '-joined.
+      mergedBeta = all.join(', ')
     } else {
       mergedBeta = customBeta || sdkBeta
     }
