@@ -156,6 +156,10 @@ function getOrCreateAgent(proxyUrl: string): ProxyAgent {
     // it falls back to env vars (HTTP_PROXY) which may be unset.
     agent = new ProxyAgent({
       getProxyForUrl: () => proxyUrl,
+      keepAlive: true,
+      keepAliveMsecs: 55_000,
+      maxSockets: 25,
+      maxFreeSockets: 10,
     })
     agentPool.set(proxyUrl, agent)
   }

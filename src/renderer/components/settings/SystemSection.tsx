@@ -6,13 +6,14 @@
 import { useState, useEffect } from 'react'
 import {
   FolderOpen, Activity, Loader2, AlertTriangle, CheckCircle,
-  XOctagon, ChevronRight, Copy, FileText, RotateCcw, RefreshCw, Save
+  XOctagon, ChevronRight, Copy, FileText, RotateCcw, RefreshCw, Save, Power
 } from 'lucide-react'
 import { useTranslation } from '../../i18n'
 import { api } from '../../api'
 import type { HaloConfig } from '../../types'
 import type { HealthCheckResult, HealthReport } from './types'
 import { Switch } from '../ui/Switch'
+import { useConfirmDialog } from '../../hooks/useConfirmDialog'
 
 interface SystemSectionProps {
   config: HaloConfig | null
@@ -21,6 +22,7 @@ interface SystemSectionProps {
 
 export function SystemSection({ config, setConfig }: SystemSectionProps) {
   const { t } = useTranslation()
+  const { showConfirm, DialogComponent: RestartDialogComponent } = useConfirmDialog()
 
   // System settings state
   const [autoLaunch, setAutoLaunch] = useState(config?.system?.autoLaunch || false)
@@ -212,6 +214,23 @@ export function SystemSection({ config, setConfig }: SystemSectionProps) {
     }
   }
 
+  // Handle restart with confirmation
+  const handleRestart = async () => {
+    const confirmed = await showConfirm({
+      title: t('Restart Halo?'),
+      message: t('All active conversations and background tasks will be interrupted.'),
+      confirmLabel: t('Restart'),
+      cancelLabel: t('Cancel'),
+      variant: 'warning',
+    })
+    if (!confirmed) return
+    try {
+      await api.relaunch()
+    } catch (error) {
+      console.error('[SystemSection] Failed to relaunch:', error)
+    }
+  }
+
   // Get health status color and icon
   const getHealthStatusStyle = (status: string) => {
     switch (status) {
@@ -396,6 +415,23 @@ export function SystemSection({ config, setConfig }: SystemSectionProps) {
             >
               <FolderOpen className="w-4 h-4" />
               {t('Open Folder')}
+            </button>
+          </div>
+
+          {/* Restart Halo */}
+          <div className="flex items-center justify-between pt-4 border-t border-border">
+            <div className="flex-1">
+              <p className="font-medium">{t('Restart Halo')}</p>
+              <p className="text-sm text-muted-foreground">
+                {t('Restart the application to apply pending changes')}
+              </p>
+            </div>
+            <button
+              onClick={handleRestart}
+              className="flex items-center gap-2 px-3 py-1.5 text-sm bg-secondary hover:bg-secondary/80 rounded-lg transition-colors"
+            >
+              <Power className="w-4 h-4" />
+              {t('Restart')}
             </button>
           </div>
 
@@ -718,6 +754,9 @@ export function SystemSection({ config, setConfig }: SystemSectionProps) {
           </div>
         </div>
       </section>
+
+      {/* Confirm dialog portal */}
+      {RestartDialogComponent}
     </>
   )
 }

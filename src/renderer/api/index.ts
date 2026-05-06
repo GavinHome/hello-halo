@@ -861,6 +861,13 @@ export const api = {
     return window.halo.openLogFolder()
   },
 
+  relaunch: async (): Promise<ApiResponse> => {
+    if (!isElectron()) {
+      return { success: false, error: 'Only available in desktop app' }
+    }
+    return window.halo.relaunch()
+  },
+
   // ===== Window (Electron only) =====
   setTitleBarOverlay: async (options: {
     color: string

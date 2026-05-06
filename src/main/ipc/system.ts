@@ -2,7 +2,7 @@
  * System IPC Handlers - Auto launch, window controls, and logging
  */
 
-import { ipcMain, BrowserWindow, shell } from 'electron'
+import { ipcMain, app, BrowserWindow, shell } from 'electron'
 import { dirname } from 'path'
 import log from 'electron-log/main.js'
 import { setAutoLaunch, getAutoLaunch } from '../services/config.service'
@@ -140,6 +140,28 @@ export function registerSystemHandlers(): void {
     } catch (error) {
       const err = error as Error
       console.error('[Settings] system:open-log-folder - Failed:', err.message)
+      return { success: false, error: err.message }
+    }
+  })
+
+  // Relaunch the application (used after settings that require restart)
+  ipcMain.handle('system:relaunch', async () => {
+    console.log('[Settings] system:relaunch - Relaunching application')
+    try {
+      // Use setImmediate to allow the IPC response to reach renderer before exiting
+      setImmediate(() => {
+        try {
+          app.relaunch()
+          app.exit(0)
+        } catch (error) {
+          console.error('[Settings] system:relaunch - Relaunch failed:', (error as Error).message)
+          app.exit(1)
+        }
+      })
+      return { success: true }
+    } catch (error) {
+      const err = error as Error
+      console.error('[Settings] system:relaunch - Failed:', err.message)
       return { success: false, error: err.message }
     }
   })

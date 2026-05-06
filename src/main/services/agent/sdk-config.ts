@@ -180,11 +180,9 @@ export async function resolveCredentialsForSdk(
     // the local window to 1M and avoids premature auto-compact at 200K.
     // The router strips [1m] before forwarding the body to /v1/messages.
     //
-    // For other non-Anthropic providers (OpenAI-compat backends), substitute
-    // a fake Claude model so the SDK keeps building Anthropic-shaped requests.
-    if (apiType !== 'anthropic_passthrough') {
-      sdkModel = 'claude-sonnet-4-20250514'
-    }
+    // For other non-Anthropic providers (OpenAI-compat backends), pass the
+    // user's real model through. The router translates the wire format;
+    // the SDK no longer requires a fake Claude model name.
 
     console.log(`[SDK Config] ${credentials.provider} provider: routing via ${anthropicBaseUrl}, apiType=${apiType}, sdkModel=${sdkModel}`)
   }
