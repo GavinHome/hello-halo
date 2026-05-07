@@ -1,15 +1,16 @@
 /**
  * Advanced Section Component
- * Developer-level settings: prompt profile, extended capabilities, max turns, CLI integration
+ * Developer-level settings: SDK engine, extended capabilities, max turns, CLI integration
  */
 
 import { useState } from 'react'
-import { AlertTriangle, ChevronDown, ChevronUp, Puzzle, Terminal } from 'lucide-react'
+import { AlertTriangle, ChevronDown, ChevronUp, Cpu, Puzzle, RefreshCw, Terminal } from 'lucide-react'
 import { useTranslation } from '../../i18n'
 import { api } from '../../api'
 import type { HaloConfig } from '../../types'
 import { CLIConfigSection } from './CLIConfigSection'
 import { Switch } from '../ui/Switch'
+import { useConfirmDialog } from '../../hooks/useConfirmDialog'
 import { DEFAULT_DISABLED_TOOLS } from '../../../shared/constants/disabled-tools'
 
 // ─── Built-in MCP Extensions ────────────────────────────────────────────────────
@@ -87,10 +88,15 @@ interface AdvancedSectionProps {
 
 export function AdvancedSection({ config, setConfig }: AdvancedSectionProps) {
   const { t } = useTranslation()
+  const { showConfirm, DialogComponent: RestartDialogComponent } = useConfirmDialog()
 
   const [maxTurns, setMaxTurnsState] = useState(config?.agent?.maxTurns ?? 50)
-  const [promptProfile, setPromptProfileState] = useState<'official' | 'halo'>(
-    config?.agent?.promptProfile ?? 'halo'
+  const [sdkEngine, setSdkEngineState] = useState<'anthropic' | 'halo'>(
+    config?.agent?.sdkEngine ?? 'anthropic'
+  )
+  // Track whether the SDK engine was changed from the initial value (needs restart)
+  const [sdkEngineInitial] = useState<'anthropic' | 'halo'>(
+    config?.agent?.sdkEngine ?? 'anthropic'
   )
   const [disabledTools, setDisabledToolsState] = useState<string[]>(
     config?.agent?.disabledTools ?? DEFAULT_DISABLED_TOOLS
@@ -107,6 +113,8 @@ export function AdvancedSection({ config, setConfig }: AdvancedSectionProps) {
   })
   const [developerMode, setDeveloperModeState] = useState(config?.agent?.developerMode ?? false)
   const [capsPanelOpen, setCapsPanelOpen] = useState(false)
+
+  const sdkEngineChanged = sdkEngine !== sdkEngineInitial
 
   // ─── Helpers ────────────────────────────────────────────────────────────────
 
@@ -129,6 +137,33 @@ export function AdvancedSection({ config, setConfig }: AdvancedSectionProps) {
 
   // ─── Handlers ───────────────────────────────────────────────────────────────
 
+  const handleSdkEngineChange = async (engine: 'anthropic' | 'halo') => {
+    if (engine === sdkEngine) return
+    setSdkEngineState(engine)
+    try {
+      await saveAgentConfig({ sdkEngine: engine })
+    } catch (error) {
+      console.error('[AdvancedSection] Failed to update sdkEngine:', error)
+      setSdkEngineState(config?.agent?.sdkEngine ?? 'anthropic')
+    }
+  }
+
+  const handleRelaunch = async () => {
+    const confirmed = await showConfirm({
+      title: t('Restart Halo?'),
+      message: t('All active conversations and background tasks will be interrupted.'),
+      confirmLabel: t('Restart'),
+      cancelLabel: t('Cancel'),
+      variant: 'warning',
+    })
+    if (!confirmed) return
+    try {
+      await api.relaunch()
+    } catch (error) {
+      console.error('[AdvancedSection] Failed to relaunch:', error)
+    }
+  }
+
   const handleMaxTurnsChange = async (value: number) => {
     const clamped = Math.max(10, Math.min(9999, value))
     setMaxTurnsState(clamped)
@@ -137,16 +172,6 @@ export function AdvancedSection({ config, setConfig }: AdvancedSectionProps) {
     } catch (error) {
       console.error('[AdvancedSection] Failed to update maxTurns:', error)
       setMaxTurnsState(config?.agent?.maxTurns ?? 50)
-    }
-  }
-
-  const handlePromptProfileChange = async (profile: 'official' | 'halo') => {
-    setPromptProfileState(profile)
-    try {
-      await saveAgentConfig({ promptProfile: profile })
-    } catch (error) {
-      console.error('[AdvancedSection] Failed to update promptProfile:', error)
-      setPromptProfileState(config?.agent?.promptProfile ?? 'halo')
     }
   }
 
@@ -212,48 +237,69 @@ export function AdvancedSection({ config, setConfig }: AdvancedSectionProps) {
       </div>
 
       <div className="space-y-4">
-        {/* System Prompt Profile */}
+        {/* Agent SDK Engine */}
         <div>
           <div className="flex items-center gap-2 mb-1">
-            <p className="font-medium">{t('System Prompt Profile')}</p>
+            <Cpu className="w-4 h-4 text-muted-foreground shrink-0" />
+            <p className="font-medium">{t('Agent SDK Engine')}</p>
+            <span className="inline-flex items-center px-1.5 py-0.5 rounded text-xs font-medium bg-amber-500/10 text-amber-600 dark:text-amber-400 border border-amber-500/20 shrink-0">
+              {t('Experimental')}
+            </span>
           </div>
           <p className="text-sm text-muted-foreground mb-3">
-            {t('Choose the system prompt template used by the claude code agent')}
+            {t('Choose the underlying SDK that powers the AI agent')}
           </p>
 
           <div className="space-y-2">
-            {/* Official */}
+            {/* Claude Code SDK */}
             <label className="flex items-start gap-3 p-3 rounded-lg border border-border cursor-pointer hover:bg-muted/50 transition-colors has-[:checked]:border-primary has-[:checked]:bg-primary/5">
               <input
                 type="radio"
-                name="promptProfile"
-                value="official"
-                checked={promptProfile === 'official'}
-                onChange={() => handlePromptProfileChange('official')}
+                name="sdkEngine"
+                value="anthropic"
+                checked={sdkEngine === 'anthropic'}
+                onChange={() => handleSdkEngineChange('anthropic')}
                 className="mt-0.5 accent-primary"
               />
               <div>
-                <p className="font-medium text-sm">{t('Official')}</p>
-                <p className="text-xs text-muted-foreground">{t('Base prompt without Halo-specific optimizations')}</p>
+                <p className="font-medium text-sm">{t('Claude Code SDK')}</p>
+                <p className="text-xs text-muted-foreground">{t('Official Anthropic SDK (default)')}</p>
               </div>
             </label>
 
-            {/* Halo Optimized */}
+            {/* Halo SDK */}
             <label className="flex items-start gap-3 p-3 rounded-lg border border-border cursor-pointer hover:bg-muted/50 transition-colors has-[:checked]:border-primary has-[:checked]:bg-primary/5">
               <input
                 type="radio"
-                name="promptProfile"
+                name="sdkEngine"
                 value="halo"
-                checked={promptProfile === 'halo'}
-                onChange={() => handlePromptProfileChange('halo')}
+                checked={sdkEngine === 'halo'}
+                onChange={() => handleSdkEngineChange('halo')}
                 className="mt-0.5 accent-primary"
               />
               <div>
-                <p className="font-medium text-sm">{t('Halo Optimized')}</p>
-                <p className="text-xs text-muted-foreground">{t('Includes Halo-specific improvements (Web Research strategy, etc.)')}</p>
+                <p className="font-medium text-sm">{t('Halo SDK')}</p>
+                <p className="text-xs text-muted-foreground">{t('Module-level invocation with faster startup. Optimized for open-source models. Mirrors Claude Code SDK behavior. Experimental.')}</p>
               </div>
             </label>
           </div>
+
+          {/* Restart required notice */}
+          {sdkEngineChanged && (
+            <div className="flex items-center justify-between mt-3 p-3 bg-blue-500/10 border border-blue-500/20 rounded-lg">
+              <div className="flex items-center gap-2 text-sm text-blue-600 dark:text-blue-400">
+                <RefreshCw className="w-4 h-4 shrink-0" />
+                <span>{t('Restart required for the SDK engine change to take effect.')}</span>
+              </div>
+              <button
+                type="button"
+                onClick={handleRelaunch}
+                className="ml-3 shrink-0 px-3 py-1.5 text-xs font-medium rounded-md bg-blue-600 text-white hover:bg-blue-700 transition-colors"
+              >
+                {t('Restart Now')}
+              </button>
+            </div>
+          )}
         </div>
 
         {/* Extended Capabilities */}
@@ -375,6 +421,9 @@ export function AdvancedSection({ config, setConfig }: AdvancedSectionProps) {
         {/* Claude CLI Integration */}
         <CLIConfigSection />
       </div>
+
+      {/* Confirm dialog portal */}
+      {RestartDialogComponent}
     </section>
   )
 }

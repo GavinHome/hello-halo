@@ -1,25 +1,25 @@
 /**
  * Claude OAuth Provider
  *
- * Implements OAuth PKCE flow for Claude.ai (Claude Pro/Max) authentication.
+ * OAuth 2.0 Authorization Code with PKCE (RFC 7636) for Claude Pro/Max.
  *
- * Authentication Flow:
+ * Flow:
  * 1. Generate PKCE code_verifier + code_challenge (S256)
- * 2. Open BrowserWindow to claude.ai/oauth/authorize
- * 3. User logs in and authorizes → redirected to callback with code
+ * 2. Open BrowserWindow to the authorize endpoint
+ * 3. User logs in → redirected to callback with `code`
  * 4. Exchange code for access_token + refresh_token
  * 5. Use Bearer token for API calls with required headers
  *
- * Key Implementation Details:
- * - OAuth code may contain '#' separator → must split on '#' before exchange
- * - Must add 'anthropic-beta: oauth-2025-04-20' header on all API calls
- * - Must add 'interleaved-thinking-2025-05-14' to anthropic-beta
- * - Must set user-agent to 'claude-cli/2.1.2 (external, cli)'
- * - Must delete x-api-key header (use Authorization: Bearer instead)
- * - Must add '?beta=true' to /v1/messages URL
- *
- * Note: Halo uses the official Anthropic Claude SDK which handles tool naming
- * correctly, so we don't need to add/strip the mcp_ prefix ourselves.
+ * Notes:
+ * - The authorization code returned by the server may carry the state via
+ *   '#' separator → split on '#' before exchange
+ * - `anthropic-beta` is computed per model (see buildBetaHeaders)
+ * - Authentication uses Authorization: Bearer (no x-api-key)
+ * - User-Agent is not set here. The downstream HTTP layer already emits a
+ *   canonical UA; setting it here once produced a duplicate value at the
+ *   undici layer (case-insensitive merge of `User-Agent` + `user-agent`).
+ * - The /v1/messages URL deliberately omits ?beta=true; the SDK appends it
+ *   itself and the router forwards it through.
  */
 
 import { randomBytes, createHash, randomUUID } from 'crypto'
@@ -42,31 +42,76 @@ import type {
 // Constants
 // ============================================================================
 
-/** OAuth client_id for Claude.ai */
+/** OAuth client_id for the bundled Claude Code CLI (production). */
 const CLAUDE_CLIENT_ID = '9d1c250a-e61b-44d9-88ed-5944d1962f5e'
 
-/** OAuth endpoints */
-const CLAUDE_AUTHORIZE_URL = 'https://claude.ai/oauth/authorize'
-const CLAUDE_TOKEN_URL = 'https://console.anthropic.com/v1/oauth/token'
-const CLAUDE_REDIRECT_URI = 'https://console.anthropic.com/oauth/code/callback'
+/** OAuth endpoints (canonical platform.claude.com / claude.com hosts). */
+const CLAUDE_AUTHORIZE_URL = 'https://claude.com/cai/oauth/authorize'
+const CLAUDE_TOKEN_URL = 'https://platform.claude.com/v1/oauth/token'
+const CLAUDE_REDIRECT_URI = 'https://platform.claude.com/oauth/code/callback'
 
-/** OAuth scopes */
-const CLAUDE_SCOPES = 'org:create_api_key user:profile user:inference'
+/**
+ * OAuth scopes.
+ *
+ * - `CLAUDE_AI_OAUTH_SCOPES` — Claude Pro/Max inference scopes. Used on token
+ *   refresh, which narrows the token by dropping `org:create_api_key`.
+ *
+ * - `CLAUDE_AUTHORIZE_SCOPES` — the superset sent at the initial authorize
+ *   request. Sending a smaller subset would cause server-side feature gates
+ *   (sessions, MCP, file upload) to fail.
+ */
+const CLAUDE_AI_OAUTH_SCOPES = [
+  'user:profile',
+  'user:inference',
+  'user:sessions:claude_code',
+  'user:mcp_servers',
+  'user:file_upload',
+]
+const CLAUDE_AUTHORIZE_SCOPES = ['org:create_api_key', ...CLAUDE_AI_OAUTH_SCOPES].join(' ')
 
 /** API endpoint */
 const CLAUDE_API_BASE = 'https://api.anthropic.com'
 
-/** User-Agent — must match Claude CLI for server acceptance */
-const CLAUDE_USER_AGENT = 'claude-cli/2.1.2 (external, cli)'
-
-/** Required beta headers for OAuth-based API access */
-const REQUIRED_BETAS = [
-  'oauth-2025-04-20',
-  'interleaved-thinking-2025-05-14'
-]
-
 /** Token refresh threshold — refresh 5 minutes before expiry */
 const TOKEN_REFRESH_THRESHOLD_MS = 5 * 60 * 1000
+
+// ============================================================================
+// Beta Header Builder
+// ============================================================================
+
+/**
+ * Build the anthropic-beta header value for a given model.
+ *
+ * Runtime profile assumed:
+ *   - first-party Anthropic API
+ *   - OAuth subscriber (Pro/Max)
+ *   - claude-4+ / claude-mythos models
+ *   - agentic workload (multi-turn tool use)
+ *
+ * Under that profile the betas below apply unconditionally; 1M context is
+ * gated on the [1m] suffix.
+ */
+function buildBetaHeaders(model: string, is1mContext: boolean): string[] {
+  const betas = [
+    // Required by the OAuth API gateway for subscriber tokens.
+    'oauth-2025-04-20',
+    // Thinking-block preservation across turns.
+    'context-management-2025-06-27',
+    // Global-scope prompt cache (no-op without cache_control fields).
+    'prompt-caching-scope-2026-01-05',
+    // Interleaved thinking.
+    'interleaved-thinking-2025-05-14',
+    // Agentic-workload marker.
+    'claude-code-20250219',
+  ]
+
+  // 1M context window — only for [1m] model variants.
+  if (is1mContext) {
+    betas.push('context-1m-2025-08-07')
+  }
+
+  return betas
+}
 
 // ============================================================================
 // PKCE Implementation (replaces @openauthjs/openauth/pkce dependency)
@@ -96,6 +141,8 @@ function generatePKCE(): { verifier: string; challenge: string } {
 interface PendingClaudeAuth {
   /** PKCE code_verifier — needed for token exchange */
   verifier: string
+  /** OAuth state — independent from verifier, echoed back by the server */
+  state: string
   /** The full authorize URL opened in the browser */
   authorizeUrl: string
   /** Timestamp when this auth request was created */
@@ -123,16 +170,21 @@ class ClaudeProvider implements OAuthAISourceProvider {
   /**
    * Build the BackendRequestConfig for each outgoing API request.
    *
-   * Key details:
-   * - Authorization: Bearer <access_token> (NOT x-api-key)
-   * - anthropic-beta must include 'oauth-2025-04-20' and 'interleaved-thinking-2025-05-14'
-   * - user-agent must be 'claude-cli/2.1.2 (external, cli)'
-   * - URL must have ?beta=true appended to /v1/messages
+   * Headers set here:
+   * - Authorization: Bearer <access_token>
+   * - anthropic-beta — per-model, see buildBetaHeaders(). The router merges
+   *   this with any anthropic-beta from the SDK layer (deduplicated).
+   * - x-client-request-id — fresh UUID per request. The downstream HTTP layer
+   *   skips emitting this header when the base URL is not first-party, so
+   *   this provider is the sole emitter and there is no duplication.
    *
-   * Note: ?beta=true is included directly in the URL because the Anthropic
-   * OAuth endpoint requires it. The handleAnthropicPassthrough in request-handler
-   * will pass through the SDK's queryString separately (if any), but the OAuth
-   * beta flag must be ensured by the provider.
+   * Headers intentionally NOT set:
+   * - user-agent / User-Agent — owned by the downstream HTTP layer. Setting
+   *   it here once produced a `User-Agent: X, X` duplicate at the undici
+   *   layer (case-insensitive merge of `User-Agent` and `user-agent`).
+   *
+   * URL: plain `/v1/messages`. The SDK appends `?beta=true` itself and the
+   * router forwards the query string through.
    */
   getBackendConfig(config: AISourcesConfig): BackendRequestConfig | null {
     const c = config['claude'] as OAuthSourceConfig | undefined
@@ -142,24 +194,28 @@ class ClaudeProvider implements OAuthAISourceProvider {
 
     const rawModel = c.model || 'claude-sonnet-4-6'
     const is1mContext = /\[1m\]$/i.test(rawModel)
-    // Strip [1m] suffix — it's a client-side marker for 1M context, not part of the API model ID
-    const model = rawModel.replace(/\[1m\]$/i, '')
+    // Preserve the [1m] suffix on the propagated model id. The embedded
+    // Claude SDK relies on this suffix for its internal has1mContext() /
+    // getContextWindowForModel() detection — without it, the SDK's local
+    // context window stays at the 200K default and auto-compact triggers
+    // long before the 1M wire window is exhausted.
+    //
+    // [1m] is stripped at the wire boundary inside the anthropic_passthrough
+    // handler (openai-compat-router/server/request-handler.ts) before the
+    // request body is forwarded to the Anthropic API, which only accepts
+    // canonical model ids.
+    const model = rawModel
 
-    // Append 1M context beta header when user selected a [1m] model variant
-    const betas = is1mContext
-      ? [...REQUIRED_BETAS, 'context-1m-2025-08-07']
-      : REQUIRED_BETAS
+    const betas = buildBetaHeaders(model, is1mContext)
 
     const headers: Record<string, string> = {
       'Authorization': `Bearer ${c.accessToken}`,
-      'anthropic-beta': betas.join(','),
-      'user-agent': CLAUDE_USER_AGENT,
+      // Web Headers API serializes array-valued headers as ', '-joined.
+      'anthropic-beta': betas.join(', '),
       'x-client-request-id': randomUUID()
     }
 
-    // The URL includes ?beta=true as required by the OAuth endpoint.
-    // handleAnthropicPassthrough appends SDK queryString with '&' when URL already has '?'.
-    const url = `${CLAUDE_API_BASE}/v1/messages?beta=true`
+    const url = `${CLAUDE_API_BASE}/v1/messages`
 
     return {
       url,
@@ -205,31 +261,39 @@ class ClaudeProvider implements OAuthAISourceProvider {
    * Start the OAuth login flow.
    * Generates PKCE challenge and returns the authorize URL for the BrowserWindow.
    *
-   * OAuth authorize params:
-   * - URL: https://claude.ai/oauth/authorize
-   * - Params: code=true, client_id, response_type=code, redirect_uri, scope, code_challenge, code_challenge_method=S256
-   * - state is set to verifier
+   * Authorize params: code=true, client_id, response_type=code, redirect_uri,
+   * scope, code_challenge, code_challenge_method=S256, state.
+   *
+   * `state` is generated as an independent 32-byte random value (RFC 6749 §10.12
+   * — CSRF protection). It MUST NOT be derived from `code_verifier`: a fixed
+   * relationship between the two values is observable across logins.
+   *
+   * The redirectUri is returned so the renderer can hand it to the
+   * `auth:open-login-window` IPC without duplicating the constant.
    */
   async startLogin(): Promise<ProviderResult<OAuthStartResult>> {
     try {
       console.log('[Claude] Starting OAuth PKCE flow')
 
       const pkce = generatePKCE()
+      // Independent CSRF state — see docstring; must not reuse pkce.verifier.
+      const state = randomBytes(32).toString('base64url')
 
       const url = new URL(CLAUDE_AUTHORIZE_URL)
       url.searchParams.set('code', 'true')
       url.searchParams.set('client_id', CLAUDE_CLIENT_ID)
       url.searchParams.set('response_type', 'code')
       url.searchParams.set('redirect_uri', CLAUDE_REDIRECT_URI)
-      url.searchParams.set('scope', CLAUDE_SCOPES)
+      url.searchParams.set('scope', CLAUDE_AUTHORIZE_SCOPES)
       url.searchParams.set('code_challenge', pkce.challenge)
       url.searchParams.set('code_challenge_method', 'S256')
-      url.searchParams.set('state', pkce.verifier)
+      url.searchParams.set('state', state)
 
       const authorizeUrl = url.toString()
 
       pendingAuth = {
         verifier: pkce.verifier,
+        state,
         authorizeUrl,
         createdAt: Date.now()
       }
@@ -240,7 +304,8 @@ class ClaudeProvider implements OAuthAISourceProvider {
         success: true,
         data: {
           loginUrl: authorizeUrl,
-          state: pkce.verifier
+          state,
+          redirectUri: CLAUDE_REDIRECT_URI
         }
       }
     } catch (error) {
@@ -254,12 +319,14 @@ class ClaudeProvider implements OAuthAISourceProvider {
 
   /**
    * Complete the OAuth login flow.
-   * The state parameter contains the authorization code from the callback URL.
+   * The `state` parameter here actually carries the callback string —
+   * `code[#state]` — pasted by the user (or read from the redirect URL).
    *
-   * Token exchange details:
-   * - Code may contain '#' separator → split on '#', use splits[0] as code, splits[1] as state
-   * - POST to https://console.anthropic.com/v1/oauth/token
-   * - Body: { code, state, grant_type: "authorization_code", client_id, redirect_uri, code_verifier }
+   * Token exchange:
+   * - POST to CLAUDE_TOKEN_URL with JSON body
+   * - Split on '#': splits[0] = authorization code, splits[1] = echoed state
+   * - Body field order: grant_type, code, redirect_uri, client_id,
+   *   code_verifier, state.
    */
   async completeLogin(state: string): Promise<ProviderResult<OAuthCompleteResult>> {
     if (!pendingAuth) {
@@ -272,7 +339,8 @@ class ClaudeProvider implements OAuthAISourceProvider {
       // The 'state' parameter here is actually the authorization code from the callback
       const code = state
 
-      // Code may contain '#' separator — split and use first part as the actual code
+      // splits[0] = authorization code, splits[1] = state echoed by the server
+      // (which must equal the state we sent in startLogin).
       const splits = code.split('#')
 
       const response = await proxyFetch(CLAUDE_TOKEN_URL, {
@@ -281,12 +349,12 @@ class ClaudeProvider implements OAuthAISourceProvider {
           'Content-Type': 'application/json'
         },
         body: JSON.stringify({
-          code: splits[0],
-          state: splits[1] || '',
           grant_type: 'authorization_code',
-          client_id: CLAUDE_CLIENT_ID,
+          code: splits[0],
           redirect_uri: CLAUDE_REDIRECT_URI,
-          code_verifier: pendingAuth.verifier
+          client_id: CLAUDE_CLIENT_ID,
+          code_verifier: pendingAuth.verifier,
+          state: splits[1] || pendingAuth.state
         })
       })
 
@@ -399,11 +467,12 @@ class ClaudeProvider implements OAuthAISourceProvider {
   }
 
   /**
-   * Refresh the OAuth token using refresh_token grant.
+   * Refresh the OAuth token using the refresh_token grant.
    *
-   * Token refresh details:
-   * - POST to https://console.anthropic.com/v1/oauth/token
-   * - Body: { grant_type: "refresh_token", refresh_token, client_id }
+   * - POST to CLAUDE_TOKEN_URL with JSON body
+   * - Body field order: grant_type, refresh_token, client_id, scope
+   * - `scope` narrows the refreshed token to inference scopes (drops
+   *   `org:create_api_key`)
    * - Response: { access_token, refresh_token, expires_in }
    */
   async refreshTokenWithConfig(config: AISourcesConfig): Promise<ProviderResult<{
@@ -427,7 +496,9 @@ class ClaudeProvider implements OAuthAISourceProvider {
         body: JSON.stringify({
           grant_type: 'refresh_token',
           refresh_token: c.refreshToken,
-          client_id: CLAUDE_CLIENT_ID
+          client_id: CLAUDE_CLIENT_ID,
+          // Narrows from the authorize-time superset (drops org:create_api_key).
+          scope: CLAUDE_AI_OAUTH_SCOPES.join(' ')
         })
       })
 

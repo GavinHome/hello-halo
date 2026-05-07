@@ -862,7 +862,7 @@ function PermissionSection({ instance, onChange, onDebouncedChange, permissionDe
               className="w-full bg-muted border border-border rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-1 focus:ring-primary resize-none"
             />
             <p className="text-xs text-muted-foreground">
-              {t('Owners have full access. Others are guests.')}
+              {t('Owners always have full access and are not restricted by the guest settings below.')}
             </p>
           </div>
 
@@ -876,6 +876,17 @@ function PermissionSection({ instance, onChange, onDebouncedChange, permissionDe
             </div>
           )}
 
+          {/* Guest section divider — makes the owner/guest boundary visually explicit */}
+          {hasOwners && (
+            <div className="flex items-center gap-2 pt-1">
+              <div className="flex-1 border-t border-border/60" />
+              <span className="text-[10px] uppercase tracking-widest text-muted-foreground/50 px-1">
+                {t('Guest Permissions')}
+              </span>
+              <div className="flex-1 border-t border-border/60" />
+            </div>
+          )}
+
           {/* Guest access toggle (only when owners are set) */}
           {hasOwners && (
             <>
@@ -884,8 +895,8 @@ function PermissionSection({ instance, onChange, onDebouncedChange, permissionDe
                   <p className="text-sm text-muted-foreground">{t('Guest Access')}</p>
                   <p className="text-xs text-muted-foreground/70">
                     {guestAccessEnabled
-                      ? t('Guests have limited access')
-                      : t('Guests have no access')}
+                      ? t('Guests have limited access to selected tools below')
+                      : t('Guests have no tool access — chat only')}
                   </p>
                 </div>
                 <label className="relative inline-flex items-center cursor-pointer">
@@ -909,7 +920,7 @@ function PermissionSection({ instance, onChange, onDebouncedChange, permissionDe
               {guestAccessEnabled && (
                 <div className="space-y-2">
                   <label className="text-sm text-muted-foreground">
-                    {t('Allowed Tools')}
+                    {t('Guest Allowed Tools')}
                   </label>
 
                   {/* Built-in tool tags grouped — unchanged from original */}

@@ -217,6 +217,7 @@ export interface HaloAPI {
   getAutoLaunch: () => Promise<IpcResponse>
   setAutoLaunch: (enabled: boolean) => Promise<IpcResponse>
   openLogFolder: () => Promise<IpcResponse>
+  relaunch: () => Promise<IpcResponse>
 
   // Window
   setTitleBarOverlay: (options: { color: string; symbolColor: string }) => Promise<IpcResponse>
@@ -614,6 +615,7 @@ const api: HaloAPI = {
   getAutoLaunch: () => ipcRenderer.invoke('system:get-auto-launch'),
   setAutoLaunch: (enabled) => ipcRenderer.invoke('system:set-auto-launch', enabled),
   openLogFolder: () => ipcRenderer.invoke('system:open-log-folder'),
+  relaunch: () => ipcRenderer.invoke('system:relaunch'),
 
   // Window
   setTitleBarOverlay: (options) => ipcRenderer.invoke('window:set-title-bar-overlay', options),

@@ -60,3 +60,4 @@ RELEASE_NOTES.md
 
 # Halo Agent SDK (managed in separate private repo)
 src/sdk/
+/temp/

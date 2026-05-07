@@ -174,10 +174,17 @@ export async function resolveCredentialsForSdk(
 
     anthropicApiKey = encodeBackendConfig(credentialsToBackendConfig(credentials, { apiType }))
 
-    // Pass a fake Claude model to CC for normal request handling
-    sdkModel = 'claude-sonnet-4-20250514'
+    // For Claude OAuth (anthropic_passthrough) the upstream is the real
+    // Anthropic API, so we keep the user's actual model id — including any
+    // [1m] suffix — so the SDK's internal context-window detection sizes
+    // the local window to 1M and avoids premature auto-compact at 200K.
+    // The router strips [1m] before forwarding the body to /v1/messages.
+    //
+    // For other non-Anthropic providers (OpenAI-compat backends), pass the
+    // user's real model through. The router translates the wire format;
+    // the SDK no longer requires a fake Claude model name.
 
-    console.log(`[SDK Config] ${credentials.provider} provider: routing via ${anthropicBaseUrl}, apiType=${apiType}`)
+    console.log(`[SDK Config] ${credentials.provider} provider: routing via ${anthropicBaseUrl}, apiType=${apiType}, sdkModel=${sdkModel}`)
   }
 
   return {

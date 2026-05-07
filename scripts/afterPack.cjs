@@ -13,7 +13,12 @@
 //    with the prebuild matching the target platform. Prebuilds are downloaded
 //    by prepare-binaries.mjs and stored in node_modules/better-sqlite3/prebuilds/.
 //
-// 3. macOS ad-hoc signing (prevents "damaged app" prompts on unsigned builds).
+// 3. Ensure executable permissions on all native binaries in the unpacked
+//    output. Some npm packages (e.g. @anthropic-ai/claude-code v2.1.89)
+//    ship tarballs with missing +x on vendored binaries. This step detects
+//    ELF and Mach-O files by magic bytes and adds +x if missing.
+//
+// 4. macOS ad-hoc signing (prevents "damaged app" prompts on unsigned builds).
 // ============================================================================
 
 const { execSync } = require('child_process');
@@ -202,6 +207,112 @@ function cleanNodePtyPrebuilds(context) {
   console.log(`[afterPack] ${key}: keeping node-pty prebuilds/${targetDir}`);
 }
 
+/**
+ * Ensure all native binaries in the unpacked output have executable permission.
+ *
+ * npm packages occasionally ship tarballs with missing +x on vendored binaries
+ * (e.g. @anthropic-ai/claude-code v2.1.89 lost +x on ripgrep). This causes
+ * EACCES at runtime with no fallback, silently breaking core tools like
+ * Grep/Glob.
+ *
+ * Rather than maintaining a list of known-broken packages, we detect native
+ * binaries by their file header magic bytes and fix permissions generically:
+ *
+ *   - ELF:    0x7F 'E' 'L' 'F'          (Linux binaries)
+ *   - Mach-O: 0xFEEDFACE / 0xFEEDFACF   (macOS binaries, 32/64-bit)
+ *   - Mach-O fat: 0xCAFEBABE / 0xBEBAFECA (universal binaries)
+ *
+ * Note: Java .class files share the 0xCAFEBABE magic with Mach-O fat binaries.
+ * We skip files with a .class extension to avoid false positives (Capacitor
+ * Android build artifacts live in the unpacked output).
+ *
+ * Windows .exe/.dll are not checked — NTFS does not use Unix permission bits.
+ *
+ * This runs at pack time, so there is zero runtime cost.
+ */
+function ensureNativeBinaryPermissions(context) {
+  if (context.electronPlatformName === 'win32') {
+    // Windows does not use Unix permission bits; skip entirely.
+    return;
+  }
+
+  const unpackedDir = getUnpackedDir(context);
+  if (!fs.existsSync(unpackedDir)) {
+    console.log('[afterPack] No unpacked directory found, skipping binary permission fix');
+    return;
+  }
+
+  // Magic bytes that identify native executable formats (non-Windows)
+  const MAGIC = {
+    ELF:       Buffer.from([0x7F, 0x45, 0x4C, 0x46]),           // \x7FELF
+    MACHO_64:  Buffer.from([0xCF, 0xFA, 0xED, 0xFE]),           // Mach-O 64-bit
+    MACHO_32:  Buffer.from([0xCE, 0xFA, 0xED, 0xFE]),           // Mach-O 32-bit
+    MACHO_FAT: Buffer.from([0xCA, 0xFE, 0xBA, 0xBE]),           // Mach-O fat (universal)
+    MACHO_FAT_CIGAM: Buffer.from([0xBE, 0xBA, 0xFE, 0xCA]),     // Mach-O fat (reversed)
+  };
+
+  const EXEC_BITS = 0o111; // owner + group + others execute
+
+  function isNativeBinary(filePath) {
+    let fd;
+    try {
+      fd = fs.openSync(filePath, 'r');
+      const header = Buffer.alloc(4);
+      const bytesRead = fs.readSync(fd, header, 0, 4, 0);
+      if (bytesRead < 4) return false;
+
+      return Object.values(MAGIC).some(magic => header.equals(magic));
+    } catch {
+      return false;
+    } finally {
+      if (fd !== undefined) fs.closeSync(fd);
+    }
+  }
+
+  const fixed = [];
+
+  function walkDir(dir) {
+    let entries;
+    try {
+      entries = fs.readdirSync(dir, { withFileTypes: true });
+    } catch {
+      return;
+    }
+
+    for (const entry of entries) {
+      const fullPath = path.join(dir, entry.name);
+      if (entry.isDirectory()) {
+        walkDir(fullPath);
+      } else if (entry.isFile()) {
+        try {
+          // Skip Java .class files — they share the 0xCAFEBABE magic with Mach-O fat binaries
+          if (entry.name.endsWith('.class')) continue;
+
+          const stat = fs.statSync(fullPath);
+          if ((stat.mode & EXEC_BITS) === EXEC_BITS) continue; // already executable
+          if (!isNativeBinary(fullPath)) continue;
+
+          fs.chmodSync(fullPath, stat.mode | EXEC_BITS);
+          fixed.push(path.relative(unpackedDir, fullPath));
+        } catch {
+          // Ignore individual file errors (broken symlinks, etc.)
+        }
+      }
+    }
+  }
+
+  walkDir(unpackedDir);
+
+  if (fixed.length > 0) {
+    console.log(`[afterPack] Fixed executable permissions on ${fixed.length} native binary(ies):`);
+    for (const f of fixed) {
+      console.log(`  +x ${f}`);
+    }
+  } else {
+    console.log('[afterPack] All native binaries already have executable permissions');
+  }
+}
+
 module.exports = async function(context) {
   // Clean non-target watcher packages from unpacked output
   cleanNonTargetWatchers(context);
@@ -211,6 +322,11 @@ module.exports = async function(context) {
 
   // Clean non-target node-pty prebuild directories and strip .pdb files
   cleanNodePtyPrebuilds(context);
+
+  // Ensure all native binaries in unpacked output have +x permission.
+  // Defends against upstream npm packages shipping broken permissions
+  // (e.g. @anthropic-ai/claude-code v2.1.89 ripgrep EACCES bug).
+  ensureNativeBinaryPermissions(context);
 
   // macOS ad-hoc signing (other platforms skip)
   if (context.electronPlatformName !== 'darwin') {
