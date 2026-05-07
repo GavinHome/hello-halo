@@ -314,7 +314,8 @@ export interface HaloAPI {
   getGitBashStatus: () => Promise<IpcResponse<{
     found: boolean
     path: string | null
-    source: 'system' | 'app-local' | 'env-var' | null
+    source: 'system' | 'app-local' | 'env-var' | 'mock' | null
+    mockMode?: boolean
   }>>
   installGitBash: (onProgress: (progress: {
     phase: 'downloading' | 'extracting' | 'configuring' | 'done' | 'error'

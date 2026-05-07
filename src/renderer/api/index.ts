@@ -1434,11 +1434,12 @@ export const api = {
   getGitBashStatus: async (): Promise<ApiResponse<{
     found: boolean
     path: string | null
-    source: 'system' | 'app-local' | 'env-var' | null
+    source: 'system' | 'app-local' | 'env-var' | 'mock' | null
+    mockMode?: boolean
   }>> => {
     if (!isElectron()) {
       // In remote mode, assume Git Bash is available (server handles it)
-      return { success: true, data: { found: true, path: null, source: null } }
+      return { success: true, data: { found: true, path: null, source: null, mockMode: false } }
     }
     return window.halo.getGitBashStatus()
   },

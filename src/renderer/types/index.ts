@@ -295,6 +295,7 @@ export interface Space {
   lastActiveAt?: string;  // Last user activity time (conversations/messages)
   preferences?: SpacePreferences;  // User preferences for this space
   workingDir?: string;  // Project directory for custom spaces (agent cwd, artifacts, file explorer)
+  isMissing?: boolean;  // True when the space data path is currently unavailable
 }
 
 export interface CreateSpaceInput {

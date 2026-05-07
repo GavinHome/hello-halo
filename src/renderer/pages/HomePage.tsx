@@ -18,7 +18,7 @@ import {
 import { Header } from '../components/layout/Header'
 import { SpaceGuide } from '../components/space/SpaceGuide'
 import { CreateSpaceDialog } from '../components/space/CreateSpaceDialog'
-import { Blocks, ArrowRight, AlertCircle, SendHorizontal } from 'lucide-react'
+import { Blocks, ArrowRight, AlertCircle, SendHorizontal, Unplug } from 'lucide-react'
 import { api } from '../api'
 import { useTranslation } from '../i18n'
 import { useAppsStore } from '../stores/apps.store'
@@ -50,6 +50,7 @@ export function HomePage() {
 
   // Handle space click - no reset needed, SpacePage handles its own state
   const handleSpaceClick = (space: Space) => {
+    if (space.isMissing) return
     setCurrentSpace(space)
     refreshCurrentSpace()  // Load full space data (preferences) from backend
     setView('space')
@@ -247,12 +248,20 @@ export function HomePage() {
               <div
                 key={`${space.id}-${i}`}
                 onClick={() => handleSpaceClick(space)}
-                className="space-card p-4 group animate-fade-in"
+                className={`space-card p-4 group animate-fade-in ${
+                  space.isMissing ? 'opacity-70 cursor-not-allowed border-dashed' : ''
+                }`}
               >
                 <div className="flex items-start justify-between">
-                  <div className="flex items-center gap-2">
+                  <div className="flex items-center gap-2 min-w-0">
                     <SpaceIcon iconId={space.icon} size={20} />
                     <span className="font-medium truncate">{space.name}</span>
+                    {space.isMissing && (
+                      <span className="inline-flex items-center gap-1 rounded-full border border-border px-1.5 py-0.5 text-[10px] text-muted-foreground">
+                        <Unplug className="w-3 h-3" />
+                        {t('Unavailable')}
+                      </span>
+                    )}
                   </div>
                   <div className="flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-all">
                     <button
@@ -272,7 +281,9 @@ export function HomePage() {
                   </div>
                 </div>
                 <p className="text-xs text-muted-foreground mt-2">
-                  {formatTimeAgo(space.lastActiveAt || space.updatedAt)}{t('active')}
+                  {space.isMissing
+                    ? t('Path unavailable. Reconnect the drive to open this space.')
+                    : `${formatTimeAgo(space.lastActiveAt || space.updatedAt)}${t('active')}`}
                 </p>
               </div>
             ))}
