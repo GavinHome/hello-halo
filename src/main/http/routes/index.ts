@@ -1112,9 +1112,10 @@ export function registerApiRoutes(app: Express): void {
     }
   })
 
-  // @deprecated — Proactive push replaced by AI-driven notify_bot tool.
-  // Retained for backward compatibility; no UI calls this endpoint anymore.
-  // POST /api/im-sessions/set-proactive — set proactive flag for a session
+  // POST /api/im-sessions/set-proactive — toggle a session's auto-sync flag.
+  // When proactive=true, the run's final assistant text is pushed to this
+  // contact at run completion (apps/runtime/im-auto-sync.ts). Used by the
+  // remote web client; desktop goes through IPC.
   app.post('/api/im-sessions/set-proactive', async (req: Request, res: Response) => {
     try {
       const registry = getImSessionRegistry()
