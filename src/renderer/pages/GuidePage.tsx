@@ -552,7 +552,10 @@ export function GuidePage() {
   const { setView, updateConfig, config } = useAppStore()
   const { t, lang, setLang } = useGuideI18n()
   const [step, setStep] = useState<GuideStep>('welcome')
-  const [appearance, setAppearance] = useState<Appearance>('system')
+  const [appearance, setAppearance] = useState<Appearance>(() => {
+    // 从配置中读取已保存的外观设置，如果没有则默认为 'system'
+    return (config?.appearance?.theme as Appearance) || 'system'
+  })
   const [remoteEnabled, setRemoteEnabled] = useState(false)
   const [wechatEnabled, setWechatEnabled] = useState(false)
   const [saving, setSaving] = useState(false)
@@ -626,13 +629,16 @@ export function GuidePage() {
   const handleSave = useCallback(async () => {
     setSaving(true)
     try {
+      // 只保存外观设置，不设置 isFirstLaunch: false，这样 GuidePage 会继续显示
       await api.setConfig({
         appearance: { theme: appearance },
-        isFirstLaunch: false,
       })
 
-      // Sync store so App.tsx early return stops intercepting
-      updateConfig({ isFirstLaunch: false })
+      // 完整刷新并同步配置，确保 config.aiSources 是最新的
+      const configResult = await api.getConfig()
+      if (configResult.success && configResult.data) {
+        updateConfig(configResult.data)
+      }
     } catch {
       // Continue even if save fails — user can configure later
     }
@@ -643,8 +649,23 @@ export function GuidePage() {
     setStep('done')
   }, [appearance])
 
-  const handleGetStarted = () => {
-    setView('setup')
+  const handleGetStarted = async () => {
+    try {
+      // 设置 isFirstLaunch: false
+      await api.setConfig({
+        isFirstLaunch: false,
+      })
+
+      // 刷新配置
+      const result = await api.getConfig()
+      if (result.success && result.data) {
+        updateConfig(result.data)
+      }
+    } catch {
+      // Continue even if save fails
+    }
+    // 直接设置 view 为 home
+    setView('home')
   }
 
   // ── Step renderers ────────────────────────────────────────────

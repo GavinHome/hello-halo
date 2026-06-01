@@ -924,8 +924,8 @@ export default function App() {
           <span className="text-foreground">{t('Reconnecting...')}</span>
         </div>
       )}
-      {<GuidePage /> }
-      {/* {config?.isFirstLaunch ? <GuidePage /> : renderView()} */}
+      {/* Show GuidePage on first launch, completely overriding view state */}
+      {config?.isFirstLaunch ? <GuidePage /> : renderView()}
       {/* Search panel - full screen edit mode */}
       <SearchPanel isOpen={isSearchOpen} onClose={closeSearch} />
       {/* Search highlight bar - floating navigation mode */}
