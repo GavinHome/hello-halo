@@ -14,6 +14,7 @@ import { useAppsStore } from './stores/apps.store'
 import { useAppsPageStore } from './stores/apps-page.store'
 import { SplashPage } from './pages/SplashPage'
 import { SetupPage } from './pages/SetupPage'
+import { GuidePage } from './pages/GuidePage'
 import { GitBashSetupPage } from './pages/GitBashSetupPage'
 import { ServerConnectPage } from './pages/ServerConnectPage'
 import type { ServerAddedInfo } from './pages/ServerConnectPage'
@@ -923,7 +924,7 @@ export default function App() {
           <span className="text-foreground">{t('Reconnecting...')}</span>
         </div>
       )}
-      {renderView()}
+      {config?.isFirstLaunch ? <GuidePage /> : renderView()}
       {/* Search panel - full screen edit mode */}
       <SearchPanel isOpen={isSearchOpen} onClose={closeSearch} />
       {/* Search highlight bar - floating navigation mode */}
