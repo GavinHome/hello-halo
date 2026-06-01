@@ -1,0 +1,94 @@
+{
+  "$schema": "./product.schema.json",
+  "name": "Halo",
+  "dataFolderName": "halo",
+  "version": "1.0.0",
+  "updateConfig": {
+    "provider": "github",
+    "owner": "openkursar",
+    "repo": "hello-halo"
+  },
+  "authProviders": [
+    {
+      "type": "tencent",
+      "displayName": {
+        "en": "Tencent",
+        "zh-CN": "腾讯"
+      },
+      "description": {
+        "en": "kimi-k2.6、glm-5.1、deepseek-v4 free quota, WeChat Scan to Log In",
+        "zh-CN": "kimi-k2.6、glm-5.1、deepseek-v4 免费额度, 微信扫码登录"
+      },
+      "icon": "log-in",
+      "iconBgColor": "#3b82f6",
+      "recommended": true,
+      "path": "./halo-local/dist/providers/tencent/index.js",
+      "enabled": false
+    },
+    {
+      "type": "kiro",
+      "displayName": {
+        "en": "Kiro",
+        "zh-CN": "Kiro"
+      },
+      "description": {
+        "en": "Claude Sonnet 4.5, Haiku 4.5, free with Google/GitHub login",
+        "zh-CN": "Claude Sonnet 4.5, Haiku 4.5, Google/GitHub 登录免费使用"
+      },
+      "icon": "log-in",
+      "iconBgColor": "#232f3e",
+      "recommended": false,
+      "path": "./halo-local/dist/providers/kiro/index.js",
+      "enabled": false
+    },
+    {
+      "type": "claude",
+      "displayName": {
+        "en": "Claude",
+        "zh-CN": "Claude"
+      },
+      "recommended": true,
+      "description": {
+        "en": "Claude Pro/Max, login with claude.ai account",
+        "zh-CN": "Claude Pro/Max, 使用 claude.ai 账号登录"
+      },
+      "icon": "log-in",
+      "iconBgColor": "#D97757",
+      "builtin": true,
+      "enabled": false
+    },
+
+    {
+      "type": "custom",
+      "displayName": {
+        "en": "Custom API",
+        "zh-CN": "自定义 API"
+      },
+      "description": {
+        "en": "Claude / OpenAI compatible",
+        "zh-CN": "兼容 Claude / OpenAI"
+      },
+      "icon": "key",
+      "iconBgColor": "#da7756",
+      "recommended": false,
+      "builtin": true,
+      "enabled": false
+    },
+    {
+      "type": "github-copilot",
+      "displayName": {
+        "en": "GitHub Copilot",
+        "zh-CN": "GitHub Copilot"
+      },
+      "description": {
+        "en": "Login with GitHub, use Copilot models",
+        "zh-CN": "GitHub 登录，使用 Copilot 模型"
+      },
+      "icon": "github",
+      "iconBgColor": "#24292e",
+      "recommended": false,
+      "builtin": true,
+      "enabled": false
+    }
+  ]
+}

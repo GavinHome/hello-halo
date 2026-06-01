@@ -30,6 +30,8 @@ interface GuideTranslations {
   appearanceSystem: string
   appearanceLight: string
   appearanceDark: string
+  aiModelStepTitle: string
+  aiModelStepSubtitle: string
   remoteStepTitle: string
   remoteStepSubtitle: string
   remoteEnableTitle: string
@@ -47,6 +49,7 @@ interface GuideTranslations {
   doneButton: string
   back: string
   next: string
+  skip: string
 }
 
 const EN: GuideTranslations = {
@@ -60,6 +63,8 @@ const EN: GuideTranslations = {
   appearanceSystem: 'System',
   appearanceLight: 'Light',
   appearanceDark: 'Dark',
+  aiModelStepTitle: 'Set up your AI',
+  aiModelStepSubtitle: 'Pick a model provider. You can change it anytime in Settings.',
   remoteStepTitle: 'Enable Remote Access',
   remoteStepSubtitle: 'Connect to Halo from your phone anytime, anywhere',
   remoteEnableTitle: 'Enable remote access',
@@ -77,6 +82,7 @@ const EN: GuideTranslations = {
   doneButton: 'Start Using',
   back: 'Back',
   next: 'Next',
+  skip: 'Skip for now',
 }
 
 const ZH_CN: GuideTranslations = {
@@ -90,6 +96,8 @@ const ZH_CN: GuideTranslations = {
   appearanceSystem: '跟随系统',
   appearanceLight: '浅色',
   appearanceDark: '深色',
+  aiModelStepTitle: '配置 AI 模型',
+  aiModelStepSubtitle: '选择一个模型服务商,稍后可以在设置中修改。',
   remoteStepTitle: '开启远程访问',
   remoteStepSubtitle: '随时随地用手机连接 Halo',
   remoteEnableTitle: '开启远程访问',
@@ -107,6 +115,7 @@ const ZH_CN: GuideTranslations = {
   doneButton: '开始使用',
   back: '上一步',
   next: '下一步',
+  skip: '暂时跳过',
 }
 
 const ZH_TW: GuideTranslations = {
@@ -120,6 +129,8 @@ const ZH_TW: GuideTranslations = {
   appearanceSystem: '跟隨系統',
   appearanceLight: '淺色',
   appearanceDark: '深色',
+  aiModelStepTitle: '設定 AI 模型',
+  aiModelStepSubtitle: '選擇一個模型服務商,稍後可以在設定中修改。',
   remoteStepTitle: '開啟遠端存取',
   remoteStepSubtitle: '隨時隨地用手機連接 Halo',
   remoteEnableTitle: '開啟遠端存取',
@@ -137,6 +148,7 @@ const ZH_TW: GuideTranslations = {
   doneButton: '開始使用',
   back: '上一步',
   next: '下一步',
+  skip: '暫時跳過',
 }
 
 const JA: GuideTranslations = {
@@ -150,6 +162,8 @@ const JA: GuideTranslations = {
   appearanceSystem: 'システム',
   appearanceLight: 'ライト',
   appearanceDark: 'ダーク',
+  aiModelStepTitle: 'AIモデルを設定',
+  aiModelStepSubtitle: 'モデルプロバイダーを選択してください。設定でいつでも変更できます。',
   remoteStepTitle: 'リモートアクセスを有効化',
   remoteStepSubtitle: 'いつでもどこからでもスマホでHaloに接続',
   remoteEnableTitle: 'リモートアクセスを有効化',
@@ -167,6 +181,7 @@ const JA: GuideTranslations = {
   doneButton: '使い始める',
   back: '戻る',
   next: '次へ',
+  skip: '今はスキップ',
 }
 
 const DE: GuideTranslations = {
@@ -180,6 +195,8 @@ const DE: GuideTranslations = {
   appearanceSystem: 'System',
   appearanceLight: 'Hell',
   appearanceDark: 'Dunkel',
+  aiModelStepTitle: 'KI-Modell einrichten',
+  aiModelStepSubtitle: 'Wählen Sie einen Modellanbieter. Sie können ihn jederzeit in den Einstellungen ändern.',
   remoteStepTitle: 'Fernzugriff aktivieren',
   remoteStepSubtitle: 'Verbinden Sie sich jederzeit und überall mit Halo von Ihrem Telefon',
   remoteEnableTitle: 'Fernzugriff aktivieren',
@@ -197,6 +214,7 @@ const DE: GuideTranslations = {
   doneButton: 'Jetzt starten',
   back: 'Zurück',
   next: 'Weiter',
+  skip: 'Vorerst überspringen',
 }
 
 const ES: GuideTranslations = {
@@ -210,6 +228,8 @@ const ES: GuideTranslations = {
   appearanceSystem: 'Sistema',
   appearanceLight: 'Claro',
   appearanceDark: 'Oscuro',
+  aiModelStepTitle: 'Configurar tu IA',
+  aiModelStepSubtitle: 'Elige un proveedor de modelos. Puedes cambiarlo en cualquier momento en Ajustes.',
   remoteStepTitle: 'Habilitar acceso remoto',
   remoteStepSubtitle: 'Conéctate a Halo desde tu teléfono en cualquier momento y lugar',
   remoteEnableTitle: 'Habilitar acceso remoto',
@@ -227,6 +247,7 @@ const ES: GuideTranslations = {
   doneButton: 'Empezar a usar',
   back: 'Atrás',
   next: 'Siguiente',
+  skip: 'Omitir por ahora',
 }
 
 const FR: GuideTranslations = {
@@ -240,6 +261,8 @@ const FR: GuideTranslations = {
   appearanceSystem: 'Système',
   appearanceLight: 'Clair',
   appearanceDark: 'Sombre',
+  aiModelStepTitle: 'Configurer votre IA',
+  aiModelStepSubtitle: 'Choisissez un fournisseur de modèles. Vous pouvez le modifier à tout moment dans les paramètres.',
   remoteStepTitle: 'Activer l\'accès à distance',
   remoteStepSubtitle: 'Connectez-vous à Halo depuis votre téléphone à tout moment et partout',
   remoteEnableTitle: 'Activer l\'accès à distance',
@@ -257,6 +280,7 @@ const FR: GuideTranslations = {
   doneButton: 'Commencer à utiliser',
   back: 'Retour',
   next: 'Suivant',
+  skip: 'Ignorer pour l\'instant',
 }
 
 const TRANSLATIONS: Record<GuideLanguage, GuideTranslations> = {
