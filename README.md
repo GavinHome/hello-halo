@@ -47,7 +47,7 @@ Halo is an AI workstation powered by frontier Agent with a pluggable engine arch
 
 ## AI Digital Humans — Your Autonomous AI Workforce
 
-Traditional RPA follows rigid scripts and breaks when anything changes. Halo takes a different approach: **AI makes the decisions, Halo Browser Skills handle the operations.** The result is automation that understands context, adapts to changes, and executes with precision.
+Traditional RPA follows rigid scripts and breaks when anything changes. Halo takes a different approach: **AI makes the decisions, Halo Browser Actions handle the operations.** The result is automation that understands context, adapts to changes, and executes with precision.
 
 ### Autonomous Agents Running 7x24
 
@@ -78,15 +78,15 @@ AI Digital Humans have the exact same Agent capabilities as conversation mode �
 
 ![AI Digital Human](./docs/assets/ai-digital-human.png)
 
-*See it in action — Digital Humans operating Zhihu, Bilibili, Xiaohongshu & X 7x24 (ready-made Skills available in the store):*
+*See it in action — Digital Humans operating Zhihu, Bilibili, Xiaohongshu & X 7x24 (ready-made Browser Actions available in the store):*
 
 [![中文 点击播放](https://img.shields.io/badge/▶_点击播放-FB7299?style=for-the-badge&logo=bilibili&logoColor=white)](https://www.bilibili.com/video/BV1yfNuzaEtv/) &nbsp; [![Watch the Video](https://img.shields.io/badge/▶_Watch_the_Video-FB7299?style=for-the-badge&logo=bilibili&logoColor=white)](https://www.bilibili.com/video/BV1yfNuzaEtv/)
 
-### Halo Browser Skill — AI Decides, Scripts Execute
+### Halo Browser Action — AI Decides, Scripts Execute
 
-This is what separates Halo from "AI browser agents" that fumble around clicking randomly.
+A Browser Action is a special kind of Skill: a reusable `.js` script that performs one concrete operation on one platform. This is what separates Halo from "AI browser agents" that fumble around clicking randomly.
 
-Halo Browser Skill takes the RPA approach to reliability: **pre-write reusable scripts for common operations on each platform**. The AI only decides *what* to do and *when* — the script already knows *how*.
+Halo Browser Actions take the RPA approach to reliability: **pre-write reusable scripts for common operations on each platform**. The AI only decides *what* to do and *when* — the script already knows *how*.
 
 Scripts run directly in a real browser via Halo's `browser_run` — with full access to the page DOM, cookies, and internal APIs, just like the Chrome DevTools Console. This works for public platforms and private enterprise systems alike.
 
@@ -114,22 +114,22 @@ AI calls it with: `browser_run({ file: ".claude/skills/bili-get-messages/index.j
 
 **Example: Enterprise workflow — a Xiaohongshu content operations Digital Human:**
 1. AI decides: time to check for new comments on today's posts
-2. Calls `xhs-get-comments` Skill → script fetches comment list via platform API
+2. Calls `xhs-get-comments` Action → script fetches comment list via platform API
 3. AI judges: these 5 comments need replies, drafts personalized responses
-4. Calls `xhs-reply-comment` Skill → script submits each reply
+4. Calls `xhs-reply-comment` Action → script submits each reply
 
 **Example: Enterprise internal — a DevOps monitoring Digital Human:**
 1. AI decides: time for the hourly infra check
-2. Calls `check-grafana-alerts` Skill → script reads alert dashboard via internal API
+2. Calls `check-grafana-alerts` Action → script reads alert dashboard via internal API
 3. AI judges: 2 alerts are critical, composes an incident summary
-4. Calls `create-jira-ticket` Skill → script creates a P1 ticket with full context
-5. Calls `notify-oncall` Skill → pushes alert to WeCom on-call group
+4. Calls `create-jira-ticket` Action → script creates a P1 ticket with full context
+5. Calls `notify-oncall` Action → pushes alert to WeCom on-call group
 
-**AI decides. Skills execute. Stable, repeatable, auditable.**
+**AI decides. Actions execute. Stable, repeatable, auditable.**
 
-Ready-made Skills are available for Xiaohongshu, Bilibili, Zhihu, Twitter / X, WeChat, and more. Enterprise teams can write private Skills for internal systems. The community can contribute and share their own.
+Ready-made Browser Actions are available for Xiaohongshu, Bilibili, Zhihu, Twitter / X, WeChat, and more. Enterprise teams can write private Actions for internal systems. The community can contribute and share their own.
 
-Want to build one yourself? A full walkthrough — building an **OA Approval Assistant** that patrols a login-required internal system on a schedule — is in the docs: [**Build a Browser Skill Digital Human →**](https://hello-halo.cc/docs/digital-humans/guide-02-build.html)
+Want to build one yourself? A full walkthrough — building an **OA Approval Assistant** that patrols a login-required internal system on a schedule — is in the docs: [**Build a Browser Action Digital Human →**](https://hello-halo.cc/docs/digital-humans/guide-02-build.html)
 
 ### Remote Access — Manage Your AI Fleet From Anywhere
 
@@ -196,7 +196,7 @@ Open the AI Digital Human Store, pick one, fill in a few configuration fields, a
 
 Write a `spec.yaml` and submit a PR to the [AI Digital Human Protocol (DHP)](https://github.com/openkursar/digital-human-protocol). Once merged, it becomes immediately available to all Halo users.
 
-You can also write Halo Browser Skills (`.js` scripts) for AI Digital Humans to precisely execute operations on specific platforms.
+You can also write Halo Browser Actions (`.js` scripts) for AI Digital Humans to precisely execute operations on specific platforms.
 
 </td>
 </tr>
