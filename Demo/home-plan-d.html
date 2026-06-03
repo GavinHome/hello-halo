@@ -614,6 +614,10 @@ body {
           <span class="si-name">法律助手</span>
           <span class="si-dot yellow"></span>
         </div>
+        <div class="sidebar-item" onclick="showView('store')" style="color:hsl(var(--primary)/0.8)">
+          <div class="si-icon" style="background:hsl(var(--primary)/0.08)">＋</div>
+          <span class="si-name">发现数字人</span>
+        </div>
       </div>
 
       <div class="sidebar-spacer"></div>
@@ -622,7 +626,7 @@ body {
           <div class="si-icon" style="background:hsl(var(--secondary))">🛠</div>
           <span class="si-name">Studio</span>
         </div>
-        <div class="sidebar-item">
+        <div class="sidebar-item" onclick="showView('settings')">
           <div class="si-icon" style="background:hsl(var(--secondary))">⚙</div>
           <span class="si-name">设置</span>
         </div>
@@ -973,8 +977,9 @@ const settingsTabs = {
         <div class="settings-row-left"><div class="settings-row-label">⚖ 法律助手</div><div class="settings-row-hint">手动触发 · 空闲</div></div>
         <div class="settings-row-right"><button class="select-pill">配置</button></div>
       </div>
-      <div style="margin-top:16px">
-        <button class="store-install-btn" onclick="showView('store')">发现更多数字人</button>
+      <div style="margin-top:16px;display:flex;gap:8px">
+        <button class="store-install-btn" onclick="alert('打开创建表单...')">创建数字人</button>
+        <button class="store-install-btn installed" onclick="showView('store')">发现更多数字人</button>
       </div>
     </div>`
 }
