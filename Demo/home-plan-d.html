@@ -418,6 +418,128 @@ body {
 @keyframes blink { 0%, 60%, 100% { opacity: 0.3; } 30% { opacity: 1; } }
 
 /* ============================================
+   Store Page — 数字人商店
+   ============================================ */
+.page-overlay {
+  position: absolute; inset: 0; background: hsl(var(--background));
+  display: flex; flex-direction: column; z-index: 20;
+  opacity: 0; pointer-events: none; transition: opacity 0.2s;
+  overflow: hidden;
+}
+.page-overlay.active { opacity: 1; pointer-events: auto; }
+.page-header {
+  height: 48px; display: flex; align-items: center; padding: 0 16px; gap: 12px;
+  border-bottom: 1px solid hsl(var(--border)); flex-shrink: 0;
+}
+.page-header .back-btn {
+  background: none; border: none; color: hsl(var(--muted-foreground));
+  font-size: 18px; cursor: pointer; padding: 4px 8px; border-radius: 6px;
+}
+.page-header .back-btn:hover { color: hsl(var(--foreground)); background: hsl(var(--secondary)); }
+.page-header h2 { font-size: 15px; font-weight: 600; color: hsl(var(--foreground)); flex: 1; }
+.page-scroll { flex: 1; overflow-y: auto; padding: 20px 24px 40px; }
+
+.store-tabs {
+  display: flex; gap: 4px; margin-bottom: 20px; padding: 3px;
+  background: hsl(var(--secondary) / 0.5); border-radius: 10px; width: fit-content;
+}
+.store-tab {
+  padding: 6px 16px; border-radius: 8px; font-size: 13px; cursor: pointer;
+  border: none; background: transparent; color: hsl(var(--muted-foreground));
+  font-family: inherit; transition: all 0.15s;
+}
+.store-tab.active {
+  background: hsl(var(--card)); color: hsl(var(--foreground));
+  font-weight: 500; box-shadow: 0 1px 3px rgba(0,0,0,0.2);
+}
+.store-tab:hover:not(.active) { color: hsl(var(--foreground)); }
+
+.store-grid {
+  display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 12px;
+}
+.store-card {
+  background: hsl(var(--card)); border: 1px solid hsl(var(--border));
+  border-radius: 14px; padding: 16px; cursor: pointer; transition: all 0.2s;
+}
+.store-card:hover { border-color: hsl(var(--primary) / 0.3); transform: translateY(-1px); }
+.store-card-top { display: flex; align-items: center; gap: 10px; margin-bottom: 10px; }
+.store-card-avatar {
+  width: 40px; height: 40px; border-radius: 11px; display: flex;
+  align-items: center; justify-content: center; font-size: 20px;
+}
+.store-card-name { font-size: 14px; font-weight: 600; color: hsl(var(--foreground)); }
+.store-card-author { font-size: 11px; color: hsl(var(--muted-foreground)); }
+.store-card-desc {
+  font-size: 12px; color: hsl(var(--muted-foreground)); line-height: 1.5;
+  margin-bottom: 12px; display: -webkit-box; -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical; overflow: hidden;
+}
+.store-card-bottom { display: flex; align-items: center; justify-content: space-between; }
+.store-card-tags { display: flex; gap: 4px; }
+.store-card-tag {
+  background: hsl(var(--secondary)); color: hsl(var(--muted-foreground));
+  padding: 2px 8px; border-radius: 4px; font-size: 10px;
+}
+.store-install-btn {
+  padding: 5px 14px; border-radius: 8px; font-size: 12px; font-weight: 500;
+  border: none; cursor: pointer; font-family: inherit; transition: all 0.15s;
+  background: hsl(var(--primary)); color: hsl(var(--primary-foreground));
+}
+.store-install-btn:hover { opacity: 0.9; }
+.store-install-btn.installed {
+  background: hsl(var(--secondary)); color: hsl(var(--muted-foreground));
+}
+
+/* ============================================
+   Settings Page — 设置页
+   ============================================ */
+.settings-layout { display: flex; flex: 1; overflow: hidden; }
+.settings-nav {
+  width: 180px; border-right: 1px solid hsl(var(--border)); padding: 12px 8px;
+  flex-shrink: 0; overflow-y: auto;
+}
+.settings-nav-item {
+  display: flex; align-items: center; gap: 8px; padding: 8px 12px; border-radius: 8px;
+  font-size: 13px; cursor: pointer; color: hsl(var(--muted-foreground)); transition: all 0.15s;
+}
+.settings-nav-item:hover { background: hsl(var(--secondary)); color: hsl(var(--foreground)); }
+.settings-nav-item.active {
+  background: hsl(var(--primary) / 0.1); color: hsl(var(--primary)); font-weight: 500;
+}
+.settings-nav-label {
+  font-size: 10px; font-weight: 600; color: hsl(var(--muted-foreground) / 0.6);
+  padding: 8px 12px 4px; letter-spacing: 0.3px;
+}
+.settings-content { flex: 1; overflow-y: auto; padding: 24px 28px 40px; }
+.settings-section { margin-bottom: 32px; }
+.settings-section-title { font-size: 14px; font-weight: 600; color: hsl(var(--foreground)); margin-bottom: 4px; }
+.settings-section-desc { font-size: 12px; color: hsl(var(--muted-foreground)); margin-bottom: 16px; }
+.settings-row {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 12px 0; border-bottom: 1px solid hsl(var(--border) / 0.4);
+}
+.settings-row:last-child { border-bottom: none; }
+.settings-row-left { flex: 1; }
+.settings-row-label { font-size: 13px; color: hsl(var(--foreground)); }
+.settings-row-hint { font-size: 11px; color: hsl(var(--muted-foreground)); margin-top: 2px; }
+.settings-row-right { display: flex; align-items: center; gap: 8px; }
+.toggle {
+  width: 40px; height: 22px; border-radius: 11px;
+  background: hsl(var(--muted)); position: relative; cursor: pointer; transition: background 0.2s;
+}
+.toggle.on { background: hsl(var(--primary)); }
+.toggle::after {
+  content: ''; position: absolute; top: 2px; left: 2px;
+  width: 18px; height: 18px; border-radius: 50%; background: white; transition: transform 0.2s;
+}
+.toggle.on::after { transform: translateX(18px); }
+.select-pill {
+  padding: 5px 14px; border-radius: 8px; font-size: 12px;
+  border: 1px solid hsl(var(--border)); background: hsl(var(--card));
+  color: hsl(var(--foreground)); cursor: pointer; font-family: inherit;
+}
+
+/* ============================================
    Responsive — Mobile First
    ============================================ */
 @media (max-width: 640px) {
@@ -430,6 +552,9 @@ body {
   .shortcut { padding: 4px 10px; font-size: 11px; }
   .demo-bar { gap: 4px; padding: 8px 10px; flex-wrap: wrap; }
   .demo-btn { padding: 4px 10px; font-size: 11px; }
+  .settings-nav { width: 140px; }
+  .settings-content { padding: 16px; }
+  .store-grid { grid-template-columns: 1fr; }
 }
 </style>
 </head>
@@ -437,8 +562,11 @@ body {
 
 <!-- Demo state switcher -->
 <div class="demo-bar">
-  <button class="demo-btn active" onclick="setDemoState('empty')">空状态（新用户）</button>
-  <button class="demo-btn" onclick="setDemoState('has-data')">有数据（老用户）</button>
+  <button class="demo-btn active" onclick="showView('home-empty')">空状态</button>
+  <button class="demo-btn" onclick="showView('home-data')">有数据</button>
+  <div class="demo-sep"></div>
+  <button class="demo-btn" onclick="showView('store')">数字人商店</button>
+  <button class="demo-btn" onclick="showView('settings')">设置页</button>
   <div class="demo-sep"></div>
   <button class="demo-btn" onclick="toggleTheme()" id="theme-btn">切换亮色</button>
   <button class="demo-btn" onclick="toggleSidebar()" id="sidebar-btn">侧边栏</button>
@@ -629,41 +757,275 @@ body {
         <button class="chat-send-btn" onclick="sendFromChat()">↑</button>
       </div>
     </div>
+
+    <!-- Store Page overlay -->
+    <div class="page-overlay" id="store-page">
+      <div class="page-header">
+        <button class="back-btn" onclick="showView('home-data')">←</button>
+        <h2>发现数字人</h2>
+      </div>
+      <div class="page-scroll">
+        <div class="store-tabs">
+          <button class="store-tab active">全部</button>
+          <button class="store-tab">效率</button>
+          <button class="store-tab">内容</button>
+          <button class="store-tab">开发</button>
+          <button class="store-tab">金融</button>
+        </div>
+        <div class="store-grid">
+          <div class="store-card">
+            <div class="store-card-top">
+              <div class="store-card-avatar" style="background:hsl(142 71% 45%/0.1)">📊</div>
+              <div><div class="store-card-name">股票分析师</div><div class="store-card-author">Halo Official</div></div>
+            </div>
+            <div class="store-card-desc">自动扫描 A 股打板机会，实时行情分析，定时推送异动提醒。支持趋势分析、量化筛选。</div>
+            <div class="store-card-bottom">
+              <div class="store-card-tags"><span class="store-card-tag">金融</span><span class="store-card-tag">自动化</span></div>
+              <button class="store-install-btn installed">已安装</button>
+            </div>
+          </div>
+          <div class="store-card">
+            <div class="store-card-top">
+              <div class="store-card-avatar" style="background:hsl(var(--primary)/0.1)">💻</div>
+              <div><div class="store-card-name">代码助手</div><div class="store-card-author">Halo Official</div></div>
+            </div>
+            <div class="store-card-desc">监控 Git 仓库 CI 状态，自动 Code Review，检测构建失败并生成修复建议。</div>
+            <div class="store-card-bottom">
+              <div class="store-card-tags"><span class="store-card-tag">开发</span><span class="store-card-tag">自动化</span></div>
+              <button class="store-install-btn installed">已安装</button>
+            </div>
+          </div>
+          <div class="store-card">
+            <div class="store-card-top">
+              <div class="store-card-avatar" style="background:hsl(38 92% 50%/0.1)">📢</div>
+              <div><div class="store-card-name">小红书运营</div><div class="store-card-author">Community</div></div>
+            </div>
+            <div class="store-card-desc">自动回复评论和私信，定时发布内容，追踪品牌提及和竞品动态，生成运营日报。</div>
+            <div class="store-card-bottom">
+              <div class="store-card-tags"><span class="store-card-tag">内容</span><span class="store-card-tag">自动化</span></div>
+              <button class="store-install-btn">安装</button>
+            </div>
+          </div>
+          <div class="store-card">
+            <div class="store-card-top">
+              <div class="store-card-avatar" style="background:hsl(270 70% 50%/0.1)">🔍</div>
+              <div><div class="store-card-name">竞品监控</div><div class="store-card-author">Community</div></div>
+            </div>
+            <div class="store-card-desc">定时爬取竞品官网/App 变化，对比版本差异，自动生成竞品分析周报。</div>
+            <div class="store-card-bottom">
+              <div class="store-card-tags"><span class="store-card-tag">效率</span><span class="store-card-tag">自动化</span></div>
+              <button class="store-install-btn">安装</button>
+            </div>
+          </div>
+          <div class="store-card">
+            <div class="store-card-top">
+              <div class="store-card-avatar" style="background:hsl(0 62% 50%/0.1)">📧</div>
+              <div><div class="store-card-name">邮件助理</div><div class="store-card-author">Halo Official</div></div>
+            </div>
+            <div class="store-card-desc">自动分类收件箱，智能草拟回复，标记重要邮件，每日生成邮件摘要。</div>
+            <div class="store-card-bottom">
+              <div class="store-card-tags"><span class="store-card-tag">效率</span></div>
+              <button class="store-install-btn">安装</button>
+            </div>
+          </div>
+          <div class="store-card">
+            <div class="store-card-top">
+              <div class="store-card-avatar" style="background:hsl(142 71% 45%/0.1)">📰</div>
+              <div><div class="store-card-name">资讯聚合</div><div class="store-card-author">Community</div></div>
+            </div>
+            <div class="store-card-desc">聚合科技/财经/行业资讯，AI 筛选高价值内容，每日推送精选摘要。</div>
+            <div class="store-card-bottom">
+              <div class="store-card-tags"><span class="store-card-tag">内容</span></div>
+              <button class="store-install-btn">安装</button>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Settings Page overlay -->
+    <div class="page-overlay" id="settings-page">
+      <div class="page-header">
+        <button class="back-btn" onclick="showView('home-data')">←</button>
+        <h2>设置</h2>
+      </div>
+      <div class="settings-layout">
+        <div class="settings-nav">
+          <div class="settings-nav-item active" onclick="switchSettingsTab(this,'general')">🌐 通用</div>
+          <div class="settings-nav-item" onclick="switchSettingsTab(this,'ai')">🧠 AI 模型</div>
+          <div class="settings-nav-label">扩展</div>
+          <div class="settings-nav-item" onclick="switchSettingsTab(this,'skills')">⚡ 技能</div>
+          <div class="settings-nav-item" onclick="switchSettingsTab(this,'mcp')">🔌 MCP 服务器</div>
+          <div class="settings-nav-label">数字人</div>
+          <div class="settings-nav-item" onclick="switchSettingsTab(this,'dh')">🤖 数字人管理</div>
+        </div>
+        <div class="settings-content" id="settings-content">
+          <!-- General tab (default) -->
+          <div class="settings-section">
+            <div class="settings-section-title">通用</div>
+            <div class="settings-section-desc">基础配置项</div>
+            <div class="settings-row">
+              <div class="settings-row-left"><div class="settings-row-label">语言</div></div>
+              <div class="settings-row-right"><button class="select-pill">简体中文</button></div>
+            </div>
+            <div class="settings-row">
+              <div class="settings-row-left"><div class="settings-row-label">外观</div></div>
+              <div class="settings-row-right"><button class="select-pill">跟随系统</button></div>
+            </div>
+            <div class="settings-row">
+              <div class="settings-row-left"><div class="settings-row-label">远程访问</div><div class="settings-row-hint">允许通过手机 / 网页访问 Halo</div></div>
+              <div class="settings-row-right"><div class="toggle" onclick="this.classList.toggle('on')"></div></div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
   </div>
 </div>
 
 <script>
 // ── State ────────────────────────────────────
-let demoState = 'empty'  // 'empty' | 'has-data'
+let currentView = 'home-empty'  // 'home-empty' | 'home-data' | 'chat' | 'store' | 'settings'
 let isDark = true
 
-// ── Demo state switcher ──────────────────────
-function setDemoState(state) {
-  demoState = state
-  document.querySelectorAll('.demo-bar .demo-btn').forEach((b, i) => {
-    if (i < 2) b.classList.toggle('active', (i === 0 && state === 'empty') || (i === 1 && state === 'has-data'))
-  })
+// Settings tab content
+const settingsTabs = {
+  general: `
+    <div class="settings-section">
+      <div class="settings-section-title">通用</div>
+      <div class="settings-section-desc">基础配置项</div>
+      <div class="settings-row">
+        <div class="settings-row-left"><div class="settings-row-label">语言</div></div>
+        <div class="settings-row-right"><button class="select-pill">简体中文</button></div>
+      </div>
+      <div class="settings-row">
+        <div class="settings-row-left"><div class="settings-row-label">外观</div></div>
+        <div class="settings-row-right"><button class="select-pill">跟随系统</button></div>
+      </div>
+      <div class="settings-row">
+        <div class="settings-row-left"><div class="settings-row-label">远程访问</div><div class="settings-row-hint">允许通过手机 / 网页访问 Halo</div></div>
+        <div class="settings-row-right"><div class="toggle" onclick="this.classList.toggle('on')"></div></div>
+      </div>
+    </div>`,
+  ai: `
+    <div class="settings-section">
+      <div class="settings-section-title">AI 模型</div>
+      <div class="settings-section-desc">配置 AI 提供商和模型</div>
+      <div class="settings-row">
+        <div class="settings-row-left"><div class="settings-row-label">当前提供商</div><div class="settings-row-hint">Anthropic (Claude Sonnet 4)</div></div>
+        <div class="settings-row-right"><button class="select-pill">切换</button></div>
+      </div>
+      <div class="settings-row">
+        <div class="settings-row-left"><div class="settings-row-label">OpenAI 兼容模式</div><div class="settings-row-hint">连接企业 LLM 网关</div></div>
+        <div class="settings-row-right"><div class="toggle" onclick="this.classList.toggle('on')"></div></div>
+      </div>
+    </div>`,
+  skills: `
+    <div class="settings-section">
+      <div class="settings-section-title">技能</div>
+      <div class="settings-section-desc">AI 使用的工具扩展，在对话中自动调用</div>
+      <div class="settings-row">
+        <div class="settings-row-left"><div class="settings-row-label">🌐 网页搜索</div><div class="settings-row-hint">搜索互联网获取实时信息</div></div>
+        <div class="settings-row-right"><div class="toggle on" onclick="this.classList.toggle('on')"></div></div>
+      </div>
+      <div class="settings-row">
+        <div class="settings-row-left"><div class="settings-row-label">📧 邮件工具</div><div class="settings-row-hint">发送和读取邮件 (MCP)</div></div>
+        <div class="settings-row-right"><div class="toggle on" onclick="this.classList.toggle('on')"></div></div>
+      </div>
+      <div class="settings-row">
+        <div class="settings-row-left"><div class="settings-row-label">🖥️ 浏览器操作</div><div class="settings-row-hint">控制浏览器执行网页操作</div></div>
+        <div class="settings-row-right"><div class="toggle on" onclick="this.classList.toggle('on')"></div></div>
+      </div>
+      <div style="margin-top:16px">
+        <button class="store-install-btn" onclick="alert('打开技能市场...')">浏览技能市场</button>
+      </div>
+    </div>`,
+  mcp: `
+    <div class="settings-section">
+      <div class="settings-section-title">MCP 服务器</div>
+      <div class="settings-section-desc">Model Context Protocol 工具服务器配置</div>
+      <div class="settings-row">
+        <div class="settings-row-left"><div class="settings-row-label">📁 filesystem</div><div class="settings-row-hint">stdio · 文件系统访问</div></div>
+        <div class="settings-row-right"><span style="font-size:11px;color:hsl(var(--halo-success))">运行中</span></div>
+      </div>
+      <div class="settings-row">
+        <div class="settings-row-left"><div class="settings-row-label">🌐 fetch</div><div class="settings-row-hint">stdio · HTTP 请求</div></div>
+        <div class="settings-row-right"><span style="font-size:11px;color:hsl(var(--halo-success))">运行中</span></div>
+      </div>
+      <div style="margin-top:16px;display:flex;gap:8px">
+        <button class="store-install-btn" onclick="alert('添加 MCP 服务器...')">添加服务器</button>
+        <button class="store-install-btn installed" onclick="alert('浏览 MCP 市场...')">浏览市场</button>
+      </div>
+    </div>`,
+  dh: `
+    <div class="settings-section">
+      <div class="settings-section-title">数字人管理</div>
+      <div class="settings-section-desc">管理已安装的数字人，配置运行频率和权限</div>
+      <div class="settings-row">
+        <div class="settings-row-left"><div class="settings-row-label">📊 股票分析师</div><div class="settings-row-hint">每 30 分钟 · 自动化运行中</div></div>
+        <div class="settings-row-right"><button class="select-pill">配置</button></div>
+      </div>
+      <div class="settings-row">
+        <div class="settings-row-left"><div class="settings-row-label">💻 代码助手</div><div class="settings-row-hint">事件触发 · CI 监控</div></div>
+        <div class="settings-row-right"><button class="select-pill">配置</button></div>
+      </div>
+      <div class="settings-row">
+        <div class="settings-row-left"><div class="settings-row-label">⚖ 法律助手</div><div class="settings-row-hint">手动触发 · 空闲</div></div>
+        <div class="settings-row-right"><button class="select-pill">配置</button></div>
+      </div>
+      <div style="margin-top:16px">
+        <button class="store-install-btn" onclick="showView('store')">发现更多数字人</button>
+      </div>
+    </div>`
+}
 
+// ── View System ──────────────────────────────
+function showView(view) {
+  currentView = view
   const hero = document.getElementById('home-hero')
   const condArea = document.getElementById('conditional-area')
   const greeting = document.getElementById('greeting')
   const greetingTitle = document.getElementById('greeting-title')
   const greetingSub = document.getElementById('greeting-sub')
+  const chatView = document.getElementById('chat-view')
+  const storePage = document.getElementById('store-page')
+  const settingsPage = document.getElementById('settings-page')
 
-  if (state === 'empty') {
-    hero.classList.remove('compact')
-    greeting.classList.remove('compact')
-    condArea.classList.remove('visible')
-    greetingTitle.textContent = '你好'
-    greetingSub.textContent = '有什么我能帮你的？'
-  } else {
-    hero.classList.add('compact')
-    greeting.classList.add('compact')
-    condArea.classList.add('visible')
-    greetingTitle.textContent = '下午好'
-    greetingSub.textContent = '2 个数字人工作中'
+  // Reset all overlays
+  chatView.classList.remove('active')
+  storePage.classList.remove('active')
+  settingsPage.classList.remove('active')
+
+  // Update demo bar active state
+  document.querySelectorAll('.demo-bar .demo-btn').forEach(b => b.classList.remove('active'))
+  const btnMap = { 'home-empty': 0, 'home-data': 1, 'store': 2, 'settings': 3 }
+  if (btnMap[view] !== undefined) {
+    document.querySelectorAll('.demo-bar .demo-btn')[btnMap[view]].classList.add('active')
   }
-  backToHome()
+
+  switch (view) {
+    case 'home-empty':
+      hero.classList.remove('compact')
+      greeting.classList.remove('compact')
+      condArea.classList.remove('visible')
+      greetingTitle.textContent = '你好'
+      greetingSub.textContent = '有什么我能帮你的？'
+      break
+    case 'home-data':
+      hero.classList.add('compact')
+      greeting.classList.add('compact')
+      condArea.classList.add('visible')
+      greetingTitle.textContent = '下午好'
+      greetingSub.textContent = '2 个数字人工作中'
+      break
+    case 'store':
+      storePage.classList.add('active')
+      break
+    case 'settings':
+      settingsPage.classList.add('active')
+      switchSettingsTab(document.querySelector('.settings-nav-item'), 'general')
+      break
+  }
 }
 
 // ── Theme toggle ─────────────────────────────
@@ -678,6 +1040,13 @@ function toggleSidebar() {
   document.getElementById('sidebar').classList.toggle('open')
 }
 
+// ── Settings tab switcher ────────────────────
+function switchSettingsTab(el, tab) {
+  document.querySelectorAll('.settings-nav-item').forEach(i => i.classList.remove('active'))
+  if (el) el.classList.add('active')
+  document.getElementById('settings-content').innerHTML = settingsTabs[tab] || settingsTabs.general
+}
+
 // ── Home input ───────────────────────────────
 function fillAndSend(text) {
   document.getElementById('main-input').value = text
@@ -690,8 +1059,6 @@ function sendFromHome() {
   if (!text) return
   input.value = ''
   document.querySelector('.input-send').classList.remove('active')
-
-  // Enter chat view
   openChat('✨', 'Halo', '通用对话')
   const msgs = document.getElementById('chat-messages')
   msgs.innerHTML = ''
@@ -704,8 +1071,10 @@ function openChat(icon, name, desc) {
   document.getElementById('chat-icon').textContent = icon
   document.getElementById('chat-name').textContent = name
   document.getElementById('chat-status').textContent = desc || '在线'
+  // Close other overlays, show chat
+  document.getElementById('store-page').classList.remove('active')
+  document.getElementById('settings-page').classList.remove('active')
   document.getElementById('chat-view').classList.add('active')
-
   const msgs = document.getElementById('chat-messages')
   if (!msgs.innerHTML.trim()) {
     msgs.innerHTML = `<div style="text-align:center;padding:60px 0;color:hsl(var(--muted-foreground));font-size:13px">
@@ -725,7 +1094,6 @@ function sendFromChat() {
   if (!text) return
   textarea.value = ''
   textarea.nextElementSibling.classList.remove('active')
-
   const msgs = document.getElementById('chat-messages')
   const icon = document.getElementById('chat-icon').textContent
   addMessage(msgs, 'user', '🧑', text)
@@ -804,7 +1172,7 @@ function addToolCall(container, icon, tool) {
 }
 
 // ── Init ─────────────────────────────────────
-setDemoState('empty')
+showView('home-empty')
 </script>
 </body>
 </html>
