@@ -1,0 +1,721 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<title>Halo — 移动端优先</title>
+<style>
+/* ── Theme ── */
+:root {
+  --background: 0 0% 4%; --foreground: 0 0% 98%;
+  --card: 0 0% 7%; --card-foreground: 0 0% 98%;
+  --primary: 217 91% 60%; --primary-foreground: 0 0% 100%;
+  --secondary: 0 0% 15%; --secondary-foreground: 0 0% 98%;
+  --muted: 0 0% 15%; --muted-foreground: 0 0% 64%;
+  --accent: 217 91% 60%; --border: 0 0% 20%;
+  --input: 0 0% 15%; --ring: 217 91% 60%;
+  --halo-glow: 217 91% 60%; --halo-success: 142 71% 45%;
+  --halo-warning: 38 92% 50%; --halo-error: 0 62% 50%;
+  --radius: 0.75rem; --safe-bottom: env(safe-area-inset-bottom, 0px);
+}
+.light {
+  --background: 0 0% 100%; --foreground: 0 0% 9%;
+  --card: 0 0% 98%; --card-foreground: 0 0% 9%;
+  --primary: 217 91% 55%; --primary-foreground: 0 0% 100%;
+  --secondary: 0 0% 94%; --secondary-foreground: 0 0% 20%;
+  --muted: 0 0% 94%; --muted-foreground: 0 0% 45%;
+  --accent: 217 91% 55%; --border: 0 0% 90%;
+  --input: 0 0% 94%; --ring: 217 91% 55%;
+  --halo-glow: 217 91% 55%; --halo-success: 142 71% 40%; --halo-warning: 38 92% 45%;
+}
+* { margin: 0; padding: 0; box-sizing: border-box; border-color: hsl(var(--border)); }
+html { color-scheme: dark; } html.light { color-scheme: light; }
+body {
+  font-family: -apple-system, BlinkMacSystemFont, 'SF Pro Text', 'Segoe UI', Roboto, sans-serif;
+  background: hsl(var(--background)); color: hsl(var(--foreground));
+  height: 100vh; overflow: hidden; -webkit-font-smoothing: antialiased;
+  -webkit-tap-highlight-color: transparent;
+}
+::-webkit-scrollbar { width: 3px; } ::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: hsl(var(--muted)); border-radius: 2px; }
+
+/* ── Demo Bar ── */
+.demo-bar {
+  position: fixed; top: 0; left: 0; right: 0; z-index: 999;
+  display: flex; justify-content: center; gap: 6px; padding: 8px 12px;
+  background: hsl(var(--background) / 0.92); backdrop-filter: blur(16px);
+  border-bottom: 1px solid hsl(var(--border));
+}
+.demo-btn {
+  padding: 4px 12px; border-radius: 14px; font-size: 11px; cursor: pointer;
+  border: 1px solid hsl(var(--border)); background: transparent;
+  color: hsl(var(--muted-foreground)); transition: all 0.2s; font-family: inherit;
+}
+.demo-btn:hover { border-color: hsl(var(--primary) / 0.5); color: hsl(var(--foreground)); }
+.demo-btn.active { background: hsl(var(--primary)); color: hsl(var(--primary-foreground)); border-color: hsl(var(--primary)); font-weight: 500; }
+.demo-sep { width: 1px; background: hsl(var(--border)); margin: 0 2px; }
+
+/* ── Layout ── */
+.app { display: flex; flex-direction: column; height: 100vh; padding-top: 38px; }
+.topbar {
+  height: 44px; display: flex; align-items: center; padding: 0 14px; gap: 8px;
+  flex-shrink: 0; border-bottom: 1px solid hsl(var(--border) / 0.5);
+}
+.topbar-title { font-size: 16px; font-weight: 600; color: hsl(var(--foreground)); flex: 1; }
+.topbar-btn {
+  width: 34px; height: 34px; border-radius: 9px; background: none; border: none;
+  color: hsl(var(--muted-foreground)); font-size: 17px; cursor: pointer;
+  display: flex; align-items: center; justify-content: center; position: relative;
+}
+.topbar-btn:active { background: hsl(var(--secondary)); }
+.notify-dot { position: absolute; top: 5px; right: 5px; width: 7px; height: 7px; border-radius: 50%; background: hsl(var(--halo-error)); border: 1.5px solid hsl(var(--card)); }
+.main { flex: 1; display: flex; flex-direction: column; overflow: hidden; position: relative; }
+
+/* ── Tab Bar ── */
+.tab-bar {
+  display: flex; align-items: stretch; height: 56px;
+  background: hsl(var(--card)); border-top: 1px solid hsl(var(--border));
+  flex-shrink: 0; padding-bottom: var(--safe-bottom);
+}
+.tab-item {
+  flex: 1; display: flex; flex-direction: column; align-items: center;
+  justify-content: center; gap: 3px; font-size: 10px;
+  color: hsl(var(--muted-foreground)); cursor: pointer;
+  transition: color 0.15s; -webkit-tap-highlight-color: transparent;
+  border: none; background: none; font-family: inherit; position: relative; min-width: 0;
+}
+.tab-item:active { color: hsl(var(--foreground)); }
+.tab-item.active { color: hsl(var(--primary)); }
+.tab-icon { font-size: 22px; line-height: 1; }
+.tab-label { font-size: 10px; font-weight: 500; }
+.tab-badge { position: absolute; top: 6px; left: calc(50% + 8px); min-width: 16px; height: 16px; border-radius: 8px; background: hsl(var(--halo-error)); color: white; font-size: 9px; font-weight: 600; display: flex; align-items: center; justify-content: center; padding: 0 4px; line-height: 1; }
+
+/* ── Tab Panels ── */
+.tab-panel { display: none; flex: 1; flex-direction: column; overflow: hidden; }
+.tab-panel.active { display: flex; }
+.panel-scroll { flex: 1; overflow-y: auto; -webkit-overflow-scrolling: touch; }
+.panel-scroll::-webkit-scrollbar { display: none; }
+
+/* ── Home Tab ── */
+.home-hero { padding: 16px 16px 0; flex-shrink: 0; }
+.greeting h1 { font-size: 20px; font-weight: 700; margin-bottom: 2px; background: linear-gradient(135deg, hsl(var(--foreground)), hsl(var(--primary) / 0.8)); -webkit-background-clip: text; -webkit-text-fill-color: transparent; }
+.greeting p { font-size: 12px; color: hsl(var(--muted-foreground)); }
+.home-input { padding: 10px 16px 0; flex-shrink: 0; }
+.input-wrap { position: relative; background: hsl(var(--card)); border: 1px solid hsl(var(--border)); border-radius: 14px; transition: all 0.25s; overflow: hidden; }
+.input-wrap:focus-within { border-color: hsl(var(--primary) / 0.5); box-shadow: 0 0 0 3px hsl(var(--primary) / 0.08); }
+.input-field { width: 100%; background: transparent; border: none; padding: 11px 44px 11px 14px; color: hsl(var(--foreground)); font-size: 14px; outline: none; font-family: inherit; }
+.input-field::placeholder { color: hsl(var(--muted-foreground) / 0.6); }
+.input-send {
+  position: absolute; right: 5px; top: 50%; transform: translateY(-50%);
+  width: 32px; height: 32px; border-radius: 9px; background: hsl(var(--primary));
+  border: none; color: hsl(var(--primary-foreground)); font-size: 15px; cursor: pointer;
+  display: flex; align-items: center; justify-content: center; opacity: 0.4; transition: all 0.2s;
+}
+.input-send.active { opacity: 1; }
+.feed-section { padding: 0 16px 20px; }
+.feed-header { display: flex; align-items: center; justify-content: space-between; margin: 16px 0 10px; }
+.feed-title { font-size: 12px; font-weight: 600; color: hsl(var(--muted-foreground)); letter-spacing: 0.3px; display: flex; align-items: center; gap: 6px; }
+.feed-title .pulse { width: 7px; height: 7px; border-radius: 50%; background: hsl(var(--halo-success)); animation: pulse-glow 2s ease-in-out infinite; }
+@keyframes pulse-glow { 0%,100% { opacity: 0.5; } 50% { opacity: 1; box-shadow: 0 0 6px hsl(var(--halo-success)); } }
+.feed-count { font-size: 11px; color: hsl(var(--muted-foreground) / 0.6); padding: 2px 8px; border-radius: 10px; background: hsl(var(--secondary) / 0.5); }
+
+/* Activity card */
+.activity-card { background: hsl(var(--card)); border: 1px solid hsl(var(--border)); border-radius: 14px; padding: 14px 16px; margin-bottom: 10px; cursor: pointer; transition: all 0.2s; position: relative; overflow: hidden; animation: card-in 0.4s ease-out both; }
+@keyframes card-in { from { opacity: 0; transform: translateY(12px); } to { opacity: 1; transform: translateY(0); } }
+.activity-card:nth-child(2) { animation-delay: 0.08s; } .activity-card:nth-child(3) { animation-delay: 0.16s; }
+.activity-card:active { border-color: hsl(var(--primary) / 0.3); }
+.activity-card.running::before { content: ''; position: absolute; top: 0; left: 0; right: 0; height: 2px; background: linear-gradient(90deg, transparent, hsl(var(--primary)), transparent); animation: scan 3s ease-in-out infinite; }
+@keyframes scan { 0% { transform: translateX(-100%); } 100% { transform: translateX(100%); } }
+.ac-top { display: flex; align-items: center; gap: 10px; margin-bottom: 8px; }
+.ac-avatar { width: 32px; height: 32px; border-radius: 9px; display: flex; align-items: center; justify-content: center; font-size: 15px; flex-shrink: 0; }
+.ac-meta { flex: 1; } .ac-name { font-size: 13px; font-weight: 500; color: hsl(var(--foreground)); } .ac-time { font-size: 10px; color: hsl(var(--muted-foreground) / 0.6); }
+.ac-status { font-size: 10px; padding: 2px 8px; border-radius: 6px; font-weight: 500; }
+.ac-status.done { background: hsl(var(--halo-success) / 0.12); color: hsl(var(--halo-success)); }
+.ac-status.running { background: hsl(var(--primary) / 0.12); color: hsl(var(--primary)); }
+.ac-status.alert { background: hsl(var(--halo-warning) / 0.12); color: hsl(var(--halo-warning)); }
+.ac-body { font-size: 13px; color: hsl(var(--foreground) / 0.85); line-height: 1.6; margin-bottom: 8px; }
+.ac-result { background: hsl(var(--secondary) / 0.4); border-radius: 8px; padding: 10px 12px; font-size: 12px; color: hsl(var(--muted-foreground)); line-height: 1.5; margin-bottom: 8px; font-family: 'SF Mono', Menlo, monospace; }
+.ac-footer { display: flex; gap: 8px; }
+.ac-btn { padding: 6px 14px; border-radius: 8px; font-size: 12px; cursor: pointer; border: 1px solid hsl(var(--border)); background: transparent; color: hsl(var(--muted-foreground)); font-family: inherit; min-height: 32px; }
+.ac-btn:active { border-color: hsl(var(--primary) / 0.4); color: hsl(var(--foreground)); }
+.ac-btn.primary { background: hsl(var(--primary) / 0.1); border-color: hsl(var(--primary) / 0.3); color: hsl(var(--primary)); }
+
+/* Empty state */
+.empty-hint { text-align: center; padding: 48px 24px; animation: card-in 0.5s ease-out; }
+.empty-hint-icon { font-size: 36px; margin-bottom: 12px; }
+.empty-hint-title { font-size: 15px; font-weight: 600; color: hsl(var(--foreground)); margin-bottom: 6px; }
+.empty-hint-desc { font-size: 13px; color: hsl(var(--muted-foreground)); line-height: 1.6; margin-bottom: 16px; }
+.empty-hint-btn { display: inline-flex; padding: 9px 22px; border-radius: 10px; font-size: 13px; cursor: pointer; background: hsl(var(--primary)); color: hsl(var(--primary-foreground)); border: none; font-family: inherit; font-weight: 500; min-height: 40px; }
+
+/* ── Spaces Tab ── */
+.list-page { padding: 0 16px 20px; }
+.list-item { display: flex; align-items: center; gap: 12px; padding: 14px 4px; border-bottom: 1px solid hsl(var(--border) / 0.3); cursor: pointer; min-height: 60px; animation: card-in 0.35s ease-out both; }
+.list-item:nth-child(2) { animation-delay: 0.05s; } .list-item:nth-child(3) { animation-delay: 0.1s; } .list-item:nth-child(4) { animation-delay: 0.15s; } .list-item:nth-child(5) { animation-delay: 0.2s; }
+.list-item:active { opacity: 0.7; }
+.list-icon { width: 40px; height: 40px; border-radius: 11px; display: flex; align-items: center; justify-content: center; font-size: 18px; flex-shrink: 0; }
+.list-info { flex: 1; min-width: 0; }
+.list-name { font-size: 14px; font-weight: 500; color: hsl(var(--foreground)); }
+.list-sub { font-size: 11px; color: hsl(var(--muted-foreground)); margin-top: 2px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.list-right { display: flex; align-items: center; gap: 6px; flex-shrink: 0; }
+.list-time { font-size: 10px; color: hsl(var(--muted-foreground) / 0.5); }
+.list-add { display: flex; align-items: center; justify-content: center; gap: 8px; padding: 14px; margin: 12px 0; border-radius: 12px; border: 1px dashed hsl(var(--border) / 0.5); color: hsl(var(--muted-foreground) / 0.5); font-size: 13px; cursor: pointer; }
+.list-add:active { border-color: hsl(var(--primary) / 0.4); color: hsl(var(--primary)); }
+.dh-status-pill { font-size: 10px; padding: 2px 8px; border-radius: 6px; font-weight: 500; }
+.dh-status-pill.running { background: hsl(var(--halo-success) / 0.12); color: hsl(var(--halo-success)); }
+.dh-status-pill.idle { background: hsl(var(--halo-warning) / 0.12); color: hsl(var(--halo-warning)); }
+.dh-status-pill.paused { background: hsl(var(--secondary)); color: hsl(var(--muted-foreground)); }
+
+/* ── Settings Tab ── */
+.settings-tabs { display: flex; gap: 0; overflow-x: auto; border-bottom: 1px solid hsl(var(--border)); flex-shrink: 0; -webkit-overflow-scrolling: touch; padding: 0 8px; }
+.settings-tabs::-webkit-scrollbar { display: none; }
+.s-tab { padding: 11px 12px; font-size: 12px; cursor: pointer; color: hsl(var(--muted-foreground)); border-bottom: 2px solid transparent; white-space: nowrap; background: none; border-top: none; border-left: none; border-right: none; font-family: inherit; flex-shrink: 0; }
+.s-tab.active { color: hsl(var(--primary)); border-bottom-color: hsl(var(--primary)); }
+.settings-body { flex: 1; overflow-y: auto; padding: 16px; -webkit-overflow-scrolling: touch; }
+.settings-body::-webkit-scrollbar { display: none; }
+.s-section { margin-bottom: 20px; }
+.s-section-title { font-size: 14px; font-weight: 600; color: hsl(var(--foreground)); margin-bottom: 4px; }
+.s-section-desc { font-size: 12px; color: hsl(var(--muted-foreground)); margin-bottom: 12px; }
+.s-row { display: flex; align-items: center; justify-content: space-between; padding: 12px 0; border-bottom: 1px solid hsl(var(--border) / 0.4); min-height: 48px; }
+.s-row:last-child { border-bottom: none; }
+.s-row-left { flex: 1; min-width: 0; }
+.s-label { font-size: 13px; color: hsl(var(--foreground)); }
+.s-hint { font-size: 11px; color: hsl(var(--muted-foreground)); margin-top: 2px; }
+.s-row-right { display: flex; align-items: center; gap: 8px; flex-shrink: 0; }
+.toggle { width: 44px; height: 26px; border-radius: 13px; background: hsl(var(--muted)); position: relative; cursor: pointer; transition: background 0.2s; flex-shrink: 0; }
+.toggle.on { background: hsl(var(--primary)); }
+.toggle::after { content: ''; position: absolute; top: 3px; left: 3px; width: 20px; height: 20px; border-radius: 50%; background: white; transition: transform 0.2s; }
+.toggle.on::after { transform: translateX(18px); }
+.pill { padding: 6px 14px; border-radius: 8px; font-size: 12px; border: 1px solid hsl(var(--border)); background: hsl(var(--card)); color: hsl(var(--foreground)); cursor: pointer; font-family: inherit; min-height: 32px; }
+.pill-action { padding: 6px 16px; border-radius: 8px; font-size: 12px; cursor: pointer; background: hsl(var(--primary)); color: hsl(var(--primary-foreground)); border: none; font-family: inherit; min-height: 32px; }
+.pill-muted { padding: 6px 16px; border-radius: 8px; font-size: 12px; cursor: pointer; background: hsl(var(--secondary)); color: hsl(var(--muted-foreground)); border: none; font-family: inherit; min-height: 32px; }
+.status-ok { font-size: 11px; color: hsl(var(--halo-success)); }
+
+/* ── View Overlays (Space / DH detail) ── */
+.view-overlay {
+  position: absolute; inset: 0; display: flex; flex-direction: column;
+  background: hsl(var(--background)); z-index: 10;
+  transform: translateX(100%); pointer-events: none;
+  transition: transform 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+}
+.view-overlay.active { transform: translateX(0); pointer-events: auto; }
+.v-header {
+  height: 44px; display: flex; align-items: center; padding: 0 8px; gap: 6px;
+  flex-shrink: 0; border-bottom: 1px solid hsl(var(--border) / 0.5);
+}
+.v-back { width: 34px; height: 34px; border-radius: 9px; background: none; border: none; color: hsl(var(--foreground)); font-size: 18px; cursor: pointer; display: flex; align-items: center; justify-content: center; flex-shrink: 0; }
+.v-back:active { background: hsl(var(--secondary)); }
+.v-icon { width: 28px; height: 28px; border-radius: 8px; display: flex; align-items: center; justify-content: center; font-size: 14px; flex-shrink: 0; }
+.v-name { font-size: 15px; font-weight: 600; color: hsl(var(--foreground)); flex: 1; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.v-actions { display: flex; gap: 4px; }
+.v-action-btn { width: 34px; height: 34px; border-radius: 8px; background: none; border: none; color: hsl(var(--muted-foreground)); font-size: 15px; cursor: pointer; display: flex; align-items: center; justify-content: center; }
+.v-action-btn:active { background: hsl(var(--secondary)); }
+
+/* Chat */
+.chat-area { flex: 1; display: flex; flex-direction: column; overflow: hidden; }
+.chat-msgs { flex: 1; overflow-y: auto; padding: 16px 0; -webkit-overflow-scrolling: touch; }
+.chat-msgs::-webkit-scrollbar { display: none; }
+.msg { display: flex; gap: 10px; padding: 4px 16px; margin-bottom: 12px; animation: card-in 0.3s ease-out; }
+.msg.user { flex-direction: row-reverse; }
+.msg-avatar { width: 30px; height: 30px; border-radius: 9px; display: flex; align-items: center; justify-content: center; font-size: 14px; flex-shrink: 0; }
+.msg.user .msg-avatar { background: hsl(var(--primary) / 0.15); }
+.msg.assistant .msg-avatar { background: hsl(var(--secondary)); }
+.msg-content { max-width: 80%; }
+.msg.user .msg-content { display: flex; flex-direction: column; align-items: flex-end; }
+.msg-bubble { padding: 10px 14px; border-radius: 14px; font-size: 14px; line-height: 1.6; }
+.msg.user .msg-bubble { background: hsl(var(--primary)); color: hsl(var(--primary-foreground)); border-bottom-right-radius: 4px; }
+.msg.assistant .msg-bubble { background: hsl(var(--card)); border: 1px solid hsl(var(--border)); border-bottom-left-radius: 4px; }
+.chat-bar { display: flex; align-items: flex-end; gap: 8px; padding: 8px 12px; border-top: 1px solid hsl(var(--border) / 0.5); flex-shrink: 0; }
+.chat-bar textarea { flex: 1; background: hsl(var(--card)); border: 1px solid hsl(var(--border)); border-radius: 12px; padding: 10px 14px; font-size: 14px; color: hsl(var(--foreground)); outline: none; resize: none; font-family: inherit; line-height: 1.4; min-height: 40px; }
+.chat-send { width: 36px; height: 36px; border-radius: 10px; background: hsl(var(--primary)); border: none; color: hsl(var(--primary-foreground)); font-size: 16px; cursor: pointer; display: flex; align-items: center; justify-content: center; opacity: 0.5; flex-shrink: 0; }
+.chat-send.active { opacity: 1; }
+
+/* DH detail tabs */
+.dh-persona { padding: 14px 16px 0; border-bottom: 1px solid hsl(var(--border)); flex-shrink: 0; }
+.dh-p-top { display: flex; align-items: flex-start; gap: 10px; }
+.dh-p-avatar { width: 40px; height: 40px; border-radius: 11px; display: flex; align-items: center; justify-content: center; font-size: 20px; flex-shrink: 0; }
+.dh-p-info { flex: 1; min-width: 0; }
+.dh-p-name { font-size: 15px; font-weight: 600; }
+.dh-p-status { display: flex; align-items: center; gap: 5px; margin-top: 2px; font-size: 11px; color: hsl(var(--muted-foreground)); }
+.dh-dot { width: 6px; height: 6px; border-radius: 50%; }
+.dh-dot.running { background: hsl(var(--halo-success)); } .dh-dot.idle { background: hsl(var(--halo-warning)); } .dh-dot.paused { background: hsl(var(--muted-foreground)); }
+.dh-p-sub { font-size: 11px; color: hsl(var(--muted-foreground) / 0.6); margin-top: 3px; }
+.dh-p-actions { display: flex; gap: 6px; flex-shrink: 0; }
+.dh-p-btn { padding: 6px 14px; border-radius: 8px; font-size: 12px; cursor: pointer; border: 1px solid hsl(var(--border)); background: transparent; color: hsl(var(--muted-foreground)); font-family: inherit; min-height: 34px; }
+.dh-p-btn.primary { background: hsl(var(--primary) / 0.1); border-color: hsl(var(--primary) / 0.3); color: hsl(var(--primary)); }
+.dh-tabs { display: flex; border-bottom: 1px solid hsl(var(--border) / 0.3); flex-shrink: 0; }
+.dh-tab { flex: 1; padding: 10px 0; font-size: 13px; cursor: pointer; text-align: center; color: hsl(var(--muted-foreground)); border-bottom: 2px solid transparent; background: none; border-top: none; border-left: none; border-right: none; font-family: inherit; }
+.dh-tab.active { color: hsl(var(--primary)); border-bottom-color: hsl(var(--primary)); }
+.dh-content { flex: 1; overflow: hidden; display: flex; flex-direction: column; }
+
+/* DH Activity timeline */
+.dh-activity { flex: 1; overflow-y: auto; padding: 14px 16px; -webkit-overflow-scrolling: touch; }
+.dh-act-entry { margin-bottom: 14px; }
+.dh-act-head { display: flex; align-items: center; gap: 6px; margin-bottom: 4px; }
+.dh-act-ts { font-size: 11px; color: hsl(var(--muted-foreground) / 0.6); font-family: 'SF Mono', Menlo, monospace; }
+.dh-act-arrow { color: hsl(var(--muted-foreground) / 0.4); font-size: 10px; }
+.dh-act-st { font-size: 10px; padding: 2px 8px; border-radius: 4px; font-weight: 500; }
+.dh-act-st.fail { background: hsl(0 62% 50% / 0.15); color: hsl(0 62% 60%); }
+.dh-act-st.output { background: hsl(142 71% 45% / 0.12); color: hsl(142 71% 55%); }
+.dh-act-st.done { background: hsl(var(--primary) / 0.1); color: hsl(var(--primary) / 0.8); }
+.dh-act-dur { font-size: 10px; color: hsl(var(--muted-foreground) / 0.5); }
+.dh-act-msg { font-size: 12px; color: hsl(var(--muted-foreground)); line-height: 1.5; padding: 6px 10px; background: hsl(var(--card) / 0.5); border-radius: 8px; margin-bottom: 4px; }
+.dh-act-err { font-size: 11px; color: hsl(0 62% 55%); font-family: 'SF Mono', Menlo, monospace; padding: 4px 10px; }
+.dh-act-cont { display: inline-flex; align-items: center; gap: 4px; padding: 6px 14px; border-radius: 8px; font-size: 12px; cursor: pointer; background: hsl(var(--primary) / 0.1); color: hsl(var(--primary)); border: 1px solid hsl(var(--primary) / 0.3); font-family: inherit; margin-top: 4px; }
+.dh-act-out { background: hsl(var(--card)); border: 1px solid hsl(var(--border) / 0.5); border-radius: 12px; padding: 14px; margin-top: 6px; }
+.dh-act-out-t { font-size: 13px; font-weight: 600; margin-bottom: 8px; }
+.dh-act-out-b { font-size: 12px; color: hsl(var(--foreground) / 0.75); line-height: 1.7; }
+.dh-act-out-b h4 { font-size: 12px; font-weight: 600; margin: 8px 0 4px; }
+.dh-act-out-b ul { padding-left: 16px; margin: 4px 0; } .dh-act-out-b li { margin-bottom: 2px; }
+
+/* DH Config */
+.dh-cfg { flex: 1; overflow-y: auto; padding: 16px; -webkit-overflow-scrolling: touch; }
+.dh-cfg::-webkit-scrollbar { display: none; }
+.dh-cfg-info { margin-bottom: 16px; padding-bottom: 14px; border-bottom: 1px solid hsl(var(--border) / 0.3); }
+.dh-cfg-name { font-size: 15px; font-weight: 600; }
+.dh-cfg-desc { font-size: 12px; color: hsl(var(--muted-foreground)); line-height: 1.5; margin-top: 4px; }
+.dh-cfg-ver { font-size: 11px; color: hsl(var(--muted-foreground) / 0.5); margin-top: 4px; }
+.dh-cfg-btns { display: flex; gap: 8px; margin-top: 10px; }
+.dh-cfg-btn { padding: 6px 14px; border-radius: 8px; font-size: 12px; cursor: pointer; border: 1px solid hsl(var(--border)); background: transparent; color: hsl(var(--muted-foreground)); font-family: inherit; min-height: 34px; }
+.dh-cfg-sec { margin-bottom: 16px; }
+.dh-cfg-sec-t { font-size: 13px; font-weight: 600; margin-bottom: 10px; }
+.dh-cfg-pills { display: flex; gap: 6px; margin-bottom: 8px; }
+.dh-cfg-pill { padding: 6px 14px; border-radius: 8px; font-size: 12px; cursor: pointer; border: 1px solid hsl(var(--border) / 0.5); background: transparent; color: hsl(var(--muted-foreground)); font-family: inherit; min-height: 32px; }
+.dh-cfg-pill.active { background: hsl(var(--primary) / 0.1); border-color: hsl(var(--primary) / 0.4); color: hsl(var(--primary)); }
+.dh-cfg-time { display: inline-flex; align-items: center; gap: 4px; margin-bottom: 6px; }
+.dh-cfg-time-input { width: 42px; text-align: center; padding: 6px 0; border-radius: 8px; background: hsl(var(--secondary) / 0.5); border: 1px solid hsl(var(--border) / 0.5); color: hsl(var(--foreground) / 0.8); font-size: 16px; font-family: 'SF Mono', Menlo, monospace; }
+.dh-cfg-time-sep { color: hsl(var(--muted-foreground) / 0.4); font-size: 16px; }
+.dh-cfg-row { display: flex; align-items: center; justify-content: space-between; padding: 10px 0; border-bottom: 1px solid hsl(var(--border) / 0.3); }
+.dh-cfg-row:last-child { border-bottom: none; }
+.dh-cfg-row-info { flex: 1; }
+.dh-cfg-row-label { font-size: 12px; color: hsl(var(--foreground) / 0.8); }
+.dh-cfg-row-hint { font-size: 10px; color: hsl(var(--muted-foreground)); margin-top: 2px; }
+.dh-cfg-warning { font-size: 11px; color: hsl(var(--halo-warning)); margin-top: 8px; padding: 6px 10px; background: hsl(38 92% 50% / 0.08); border-radius: 6px; }
+
+/* Canvas overlay */
+.canvas-overlay {
+  position: absolute; inset: 0; z-index: 20; display: flex; flex-direction: column;
+  background: hsl(var(--background)); transform: translateX(100%); pointer-events: none;
+  transition: transform 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+}
+.canvas-overlay.active { transform: translateX(0); pointer-events: auto; }
+.canvas-body { flex: 1; overflow: auto; background: hsl(var(--card)); display: flex; flex-direction: column; }
+
+/* Artifacts bottom sheet */
+.art-sheet {
+  position: absolute; bottom: 0; left: 0; right: 0; z-index: 25;
+  background: hsl(var(--card)); border-top: 1px solid hsl(var(--border));
+  border-radius: 16px 16px 0 0; max-height: 60vh;
+  transform: translateY(100%); transition: transform 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+  display: flex; flex-direction: column; overflow: hidden;
+}
+.art-sheet.open { transform: translateY(0); }
+.art-sheet-handle { width: 36px; height: 4px; background: hsl(var(--muted)); border-radius: 2px; margin: 8px auto; flex-shrink: 0; }
+.art-sheet-header { display: flex; align-items: center; gap: 8px; padding: 4px 16px 10px; border-bottom: 1px solid hsl(var(--border) / 0.3); flex-shrink: 0; }
+.art-sheet-title { font-size: 13px; font-weight: 600; flex: 1; }
+.art-sheet-body { flex: 1; overflow-y: auto; padding: 8px 0; }
+.art-file { display: flex; align-items: center; gap: 8px; padding: 8px 16px; font-size: 12px; cursor: pointer; }
+.art-file:active { background: hsl(var(--secondary) / 0.3); }
+.art-ft { font-size: 9px; padding: 1px 5px; border-radius: 3px; font-weight: 500; text-transform: uppercase; }
+.art-ft.pdf { background: hsl(0 62% 50% / 0.15); color: hsl(0 62% 60%); }
+.art-ft.html { background: hsl(38 92% 50% / 0.15); color: hsl(38 92% 60%); }
+.art-ft.md { background: hsl(var(--primary) / 0.12); color: hsl(var(--primary) / 0.8); }
+.art-ft.py { background: hsl(142 71% 45% / 0.12); color: hsl(142 71% 55%); }
+.art-fn { flex: 1; color: hsl(var(--muted-foreground)); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.art-sheet-footer { display: flex; gap: 8px; padding: 10px 16px; border-top: 1px solid hsl(var(--border) / 0.3); flex-shrink: 0; padding-bottom: calc(10px + var(--safe-bottom)); }
+.art-footer-btn { flex: 1; padding: 8px 0; border-radius: 8px; font-size: 12px; cursor: pointer; border: 1px solid hsl(var(--border) / 0.5); background: transparent; color: hsl(var(--muted-foreground)); text-align: center; font-family: inherit; min-height: 36px; }
+
+/* DH Conv sheet */
+.conv-sheet {
+  position: absolute; bottom: 0; left: 0; right: 0; z-index: 25;
+  background: hsl(var(--card)); border-top: 1px solid hsl(var(--border));
+  border-radius: 16px 16px 0 0; max-height: 55vh;
+  transform: translateY(100%); transition: transform 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+  display: flex; flex-direction: column;
+}
+.conv-sheet.open { transform: translateY(0); }
+.conv-handle { width: 36px; height: 4px; background: hsl(var(--muted)); border-radius: 2px; margin: 8px auto; }
+.conv-sheet-header { display: flex; align-items: center; padding: 4px 16px 10px; border-bottom: 1px solid hsl(var(--border) / 0.3); }
+.conv-sheet-title { font-size: 13px; font-weight: 600; flex: 1; }
+.conv-sheet-close { width: 28px; height: 28px; border-radius: 6px; background: none; border: none; color: hsl(var(--muted-foreground)); font-size: 14px; cursor: pointer; display: flex; align-items: center; justify-content: center; }
+.conv-list { flex: 1; overflow-y: auto; padding: 6px; }
+.conv-item { display: flex; gap: 10px; padding: 10px 12px; border-radius: 10px; cursor: pointer; border: 1px solid transparent; }
+.conv-item:active { background: hsl(var(--secondary) / 0.3); }
+.conv-item.active { background: hsl(var(--secondary) / 0.5); border-color: hsl(var(--border) / 0.5); }
+.conv-icon { width: 34px; height: 34px; border-radius: 9px; display: flex; align-items: center; justify-content: center; font-size: 14px; flex-shrink: 0; }
+.conv-icon.native { background: hsl(var(--primary) / 0.12); color: hsl(var(--primary)); }
+.conv-icon.im { background: hsl(var(--secondary)); font-size: 16px; }
+.conv-info { flex: 1; min-width: 0; }
+.conv-name { font-size: 13px; font-weight: 500; }
+.conv-meta { display: flex; align-items: center; gap: 5px; margin-top: 2px; }
+.conv-badge { font-size: 9px; padding: 1px 6px; border-radius: 3px; font-weight: 500; }
+.conv-badge.native { background: hsl(var(--primary) / 0.1); color: hsl(var(--primary) / 0.7); }
+.conv-badge.im { background: hsl(142 71% 45% / 0.1); color: hsl(142 71% 55%); }
+.conv-preview { font-size: 11px; color: hsl(var(--muted-foreground) / 0.6); margin-top: 3px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+
+/* Wide screen centering */
+@media (min-width: 480px) {
+  .app { max-width: 430px; margin: 0 auto; border-left: 1px solid hsl(var(--border) / 0.3); border-right: 1px solid hsl(var(--border) / 0.3); }
+  .tab-bar { max-width: 430px; margin: 0 auto; }
+  .demo-bar { justify-content: center; }
+}
+</style>
+</head>
+<body>
+
+<div class="demo-bar">
+  <button class="demo-btn active" onclick="setHomeMode('empty')">空状态</button>
+  <button class="demo-btn" onclick="setHomeMode('data')">有数据</button>
+  <div class="demo-sep"></div>
+  <button class="demo-btn" onclick="toggleTheme()" id="theme-btn">切换亮色</button>
+</div>
+
+<div class="app">
+  <div class="topbar">
+    <span class="topbar-title" id="topbar-title">Halo</span>
+    <button class="topbar-btn">🔔<span class="notify-dot"></span></button>
+    <button class="topbar-btn">🔍</button>
+  </div>
+
+  <div class="main">
+    <!-- Tab 1: Home -->
+    <div class="tab-panel active" id="panel-home">
+      <div class="panel-scroll" id="home-scroll">
+        <div class="home-hero"><div class="greeting" id="greeting"><h1>你好</h1><p>你的数字人正在为你工作</p></div></div>
+        <div class="home-input">
+          <div class="input-wrap">
+            <input class="input-field" id="main-input" placeholder="有什么可以帮你的？" oninput="document.querySelector('.input-send').classList.toggle('active',this.value.trim().length>0)" onkeydown="if(event.key==='Enter')sendFromHome()">
+            <button class="input-send" onclick="sendFromHome()">↑</button>
+          </div>
+        </div>
+        <!-- Empty state -->
+        <div id="home-empty" class="empty-hint">
+          <div class="empty-hint-icon">🤖</div>
+          <div class="empty-hint-title">Halo 不只是对话</div>
+          <div class="empty-hint-desc">设置数字人后，它会 7×24 为你工作 ——<br>监控股市、审查代码、追踪竞品，成果自动推送到这里。</div>
+          <button class="empty-hint-btn" onclick="switchTab(2)">了解数字人</button>
+        </div>
+        <!-- Data state -->
+        <div id="home-data" class="feed-section" style="display:none">
+          <div class="feed-header"><div class="feed-title"><span class="pulse"></span> AI 动态</div><span class="feed-count">3 条新动态</span></div>
+          <div class="activity-card running" onclick="openDH('📊','股票分析师',{status:'running',statusText:'运行中',freq:'每 30 分钟',lastRun:'12 分钟前',space:'Halo',spaceIcon:'✨'})">
+            <div class="ac-top"><div class="ac-avatar" style="background:hsl(142 71% 45%/0.1)">📊</div><div class="ac-meta"><div class="ac-name">股票分析师</div><div class="ac-time">12 分钟前</div></div><span class="ac-status running">运行中</span></div>
+            <div class="ac-body">发现中芯国际 3 连板，半导体板块资金净流入 8.2 亿。推送了 3 条打板机会。</div>
+            <div class="ac-result">002371 中芯国际  ▲+9.8%  连板 3<br>688981 中微公司  ▲+6.2%  放量突破<br>300782 卓胜微    ▲+5.1%  板块联动</div>
+            <div class="ac-footer"><button class="ac-btn primary" onclick="event.stopPropagation()">查看详情</button></div>
+          </div>
+          <div class="activity-card" onclick="openDH('💻','代码助手',{status:'running',statusText:'运行中',freq:'事件触发',lastRun:'1 小时前',space:'hello-halo',spaceIcon:'💻'})">
+            <div class="ac-top"><div class="ac-avatar" style="background:hsl(var(--primary)/0.1)">💻</div><div class="ac-meta"><div class="ac-name">代码助手</div><div class="ac-time">1 小时前</div></div><span class="ac-status done">已完成</span></div>
+            <div class="ac-body">hello-halo 仓库 CI 构建通过 ✓，自动合入 2 个 PR。检测到 1 个潜在安全漏洞。</div>
+            <div class="ac-result">PR #342  fix: memory leak        ✓ merged<br>PR #345  feat: dark mode toggle    ✓ merged<br>⚠ CVE-2024-XXXX                    → needs review</div>
+            <div class="ac-footer"><button class="ac-btn primary" onclick="event.stopPropagation()">查看报告</button></div>
+          </div>
+          <div class="activity-card" onclick="openDH('⚖','法律助手',{status:'idle',statusText:'空闲',freq:'手动触发',lastRun:'3 小时前',space:'Halo',spaceIcon:'✨'})">
+            <div class="ac-top"><div class="ac-avatar" style="background:hsl(var(--halo-warning)/0.1)">⚖</div><div class="ac-meta"><div class="ac-name">法律助手</div><div class="ac-time">3 小时前</div></div><span class="ac-status alert">待确认</span></div>
+            <div class="ac-body">合同审查完成：7 条条款通过，3 条风险条款等待你确认。</div>
+            <div class="ac-footer"><button class="ac-btn primary" onclick="event.stopPropagation()">审查风险条款</button></div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Tab 2: Spaces -->
+    <div class="tab-panel" id="panel-spaces">
+      <div class="panel-scroll list-page">
+        <div class="list-item" onclick="openSpace('✨','Halo')"><div class="list-icon" style="background:hsl(var(--primary)/0.1)">✨</div><div class="list-info"><div class="list-name">Halo</div><div class="list-sub">默认空间 · 最近: 帮我设计登录流程</div></div><div class="list-right"><span class="list-time">30m</span></div></div>
+        <div class="list-item" onclick="openSpace('📊','投资分析空间')"><div class="list-icon" style="background:hsl(142 71% 45%/0.1)">📊</div><div class="list-info"><div class="list-name">投资分析空间</div><div class="list-sub">关联数字人: 股票分析师</div></div><div class="list-right"><span class="list-time">12m</span></div></div>
+        <div class="list-item" onclick="openSpace('💻','hello-halo')"><div class="list-icon" style="background:hsl(var(--primary)/0.1)">💻</div><div class="list-info"><div class="list-name">hello-halo</div><div class="list-sub">关联数字人: 代码助手 · CI 构建通过</div></div><div class="list-right"><span class="list-time">1h</span></div></div>
+        <div class="list-item" onclick="openSpace('📝','论文笔记')"><div class="list-icon" style="background:hsl(38 92% 50%/0.1)">📝</div><div class="list-info"><div class="list-name">论文笔记</div><div class="list-sub">最近: 解读 Attention Is All You Need</div></div><div class="list-right"><span class="list-time">昨天</span></div></div>
+        <div class="list-add" onclick="alert('新建空间...')">＋ 新建空间</div>
+      </div>
+    </div>
+
+    <!-- Tab 3: Digital Humans -->
+    <div class="tab-panel" id="panel-dh">
+      <div class="panel-scroll list-page">
+        <div class="list-item" onclick="openDH('📊','股票分析师',{status:'running',statusText:'运行中',freq:'每 30 分钟',lastRun:'12 分钟前',space:'Halo',spaceIcon:'✨'})"><div class="list-icon" style="background:hsl(142 71% 45%/0.1)">📊</div><div class="list-info"><div class="list-name">股票分析师</div><div class="list-sub">每 30 分钟 · 上次: 12 分钟前</div></div><div class="list-right"><span class="dh-status-pill running">运行中</span></div></div>
+        <div class="list-item" onclick="openDH('💻','代码助手',{status:'running',statusText:'运行中',freq:'事件触发',lastRun:'1 小时前',space:'hello-halo',spaceIcon:'💻'})"><div class="list-icon" style="background:hsl(var(--primary)/0.1)">💻</div><div class="list-info"><div class="list-name">代码助手</div><div class="list-sub">事件触发 · CI 监控 · 上次: 1 小时前</div></div><div class="list-right"><span class="dh-status-pill running">运行中</span></div></div>
+        <div class="list-item" onclick="openDH('⚖','法律助手',{status:'idle',statusText:'空闲',freq:'手动触发',lastRun:'3 小时前',space:'Halo',spaceIcon:'✨'})"><div class="list-icon" style="background:hsl(0 62% 50%/0.1)">⚖</div><div class="list-info"><div class="list-name">法律助手</div><div class="list-sub">手动触发 · 上次: 3 小时前</div></div><div class="list-right"><span class="dh-status-pill idle">空闲</span></div></div>
+        <div class="list-add" onclick="switchTab(3);switchSettingsTab(document.querySelector('.s-tab:last-child'),'dh')">＋ 创建数字人</div>
+        <div class="list-add" onclick="switchTab(3);switchSettingsTab(document.querySelector('.s-tab:nth-child(6)'),'store')">🔍 发现更多数字人</div>
+      </div>
+    </div>
+
+    <!-- Tab 4: Settings -->
+    <div class="tab-panel" id="panel-settings">
+      <div class="settings-tabs" id="settings-tabs">
+        <button class="s-tab active" onclick="switchSettingsTab(this,'general')">🌐 通用</button>
+        <button class="s-tab" onclick="switchSettingsTab(this,'ai')">🧠 AI</button>
+        <button class="s-tab" onclick="switchSettingsTab(this,'skills')">⚡ 技能</button>
+        <button class="s-tab" onclick="switchSettingsTab(this,'mcp')">🔌 MCP</button>
+        <button class="s-tab" onclick="switchSettingsTab(this,'notify')">🔔 通知</button>
+        <button class="s-tab" onclick="switchSettingsTab(this,'store')">🏪 市场</button>
+        <button class="s-tab" onclick="switchSettingsTab(this,'dh')">🤖 数字人</button>
+      </div>
+      <div class="settings-body" id="settings-body"></div>
+    </div>
+
+    <!-- Space Detail Overlay -->
+    <div class="view-overlay" id="space-view">
+      <div class="v-header">
+        <button class="v-back" onclick="closeView()">←</button>
+        <div class="v-icon" id="sv-icon" style="background:hsl(var(--primary)/0.1)">✨</div>
+        <span class="v-name" id="sv-name">Halo</span>
+        <div class="v-actions">
+          <button class="v-action-btn" onclick="toggleArtSheet()" title="产物">📦</button>
+          <button class="v-action-btn" onclick="openCanvas()" title="浏览器">🌐</button>
+        </div>
+      </div>
+      <div class="chat-area">
+        <div class="chat-msgs" id="sv-chat-msgs"></div>
+        <div class="chat-bar">
+          <textarea rows="1" placeholder="发消息..." oninput="this.nextElementSibling.classList.toggle('active',this.value.trim().length>0)" onkeydown="if(event.key==='Enter'&&!event.shiftKey){event.preventDefault();sendChat('sv')}"></textarea>
+          <button class="chat-send" onclick="sendChat('sv')">↑</button>
+        </div>
+      </div>
+      <div class="art-sheet" id="art-sheet">
+        <div class="art-sheet-handle"></div>
+        <div class="art-sheet-header"><span class="art-sheet-title">📦 产物</span><span style="font-size:10px;color:hsl(var(--muted-foreground)/0.5)">35 产物</span><button class="v-action-btn" onclick="toggleArtSheet()" style="width:28px;height:28px;font-size:12px">×</button></div>
+        <div class="art-sheet-body">
+          <div class="art-file"><span class="art-ft py">PY</span><span class="art-fn">md2pdf.py</span></div>
+          <div class="art-file"><span class="art-ft pdf">PDF</span><span class="art-fn">MedBench_Report.pdf</span></div>
+          <div class="art-file"><span class="art-ft html">HTML</span><span class="art-fn">medical-llm-comparison.html</span></div>
+          <div class="art-file"><span class="art-ft md">MD</span><span class="art-fn">memory.md</span></div>
+          <div class="art-file"><span class="art-ft pdf">PDF</span><span class="art-fn">MiniMax_IPO研究报告.pdf</span></div>
+        </div>
+        <div class="art-sheet-footer"><button class="art-footer-btn" onclick="alert('打开文件夹...')">📁 文件夹</button><button class="art-footer-btn" onclick="openCanvas('https://www.bing.com');toggleArtSheet()">🌐 浏览器</button></div>
+      </div>
+      <div class="canvas-overlay" id="canvas-overlay">
+        <div class="v-header">
+          <button class="v-back" onclick="closeCanvas()">←</button>
+          <span class="v-name" id="canvas-title">浏览器</span>
+          <button class="v-action-btn" onclick="closeCanvas()" style="font-size:14px">×</button>
+        </div>
+        <div class="canvas-body">
+          <div style="display:flex;align-items:center;gap:6px;padding:6px 12px;border-bottom:1px solid hsl(var(--border)/0.3);flex-shrink:0">
+            <button style="background:none;border:none;color:hsl(var(--muted-foreground));font-size:14px;cursor:pointer">←</button>
+            <button style="background:none;border:none;color:hsl(var(--muted-foreground));font-size:14px;cursor:pointer">→</button>
+            <button style="background:none;border:none;color:hsl(var(--muted-foreground));font-size:14px;cursor:pointer">↻</button>
+            <div id="canvas-url" style="flex:1;background:hsl(var(--secondary)/0.3);border-radius:6px;padding:6px 10px;font-size:12px;color:hsl(var(--muted-foreground));font-family:'SF Mono',Menlo,monospace">about:blank</div>
+          </div>
+          <div id="canvas-content" style="flex:1;display:flex;flex-direction:column;align-items:center;justify-content:center;color:hsl(var(--muted-foreground)/0.4);font-size:13px;gap:8px"><div style="font-size:28px">🌐</div>点击下方按钮打开网页</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- DH Detail Overlay -->
+    <div class="view-overlay" id="dh-view">
+      <div class="v-header">
+        <button class="v-back" onclick="closeView()">←</button>
+        <span class="v-name" id="dh-topbar-name">股票分析师</span>
+        <div class="v-actions"><button class="v-action-btn" onclick="toggleConvSheet()" title="对话列表">💬</button></div>
+      </div>
+      <div class="dh-persona">
+        <div class="dh-p-top">
+          <div class="dh-p-avatar" id="dh-avatar" style="background:hsl(142 71% 45%/0.1)">📊</div>
+          <div class="dh-p-info">
+            <div class="dh-p-name" id="dh-name">股票分析师</div>
+            <div class="dh-p-status"><span class="dh-dot running" id="dh-dot"></span><span id="dh-st-text">运行中</span><span>·</span><span id="dh-freq">每 30 分钟</span></div>
+            <div class="dh-p-sub"><span id="dh-last-run">上次运行: 12 分钟前</span><span> · </span><span id="dh-space-link" style="cursor:pointer" onclick="closeView();openSpace('✨','Halo')">✨ Halo</span></div>
+          </div>
+          <div class="dh-p-actions"><button class="dh-p-btn" id="dh-pause-btn" onclick="toggleDHPause()">⏸ 暂停</button><button class="dh-p-btn primary">▶ 运行</button></div>
+        </div>
+        <div class="dh-tabs">
+          <button class="dh-tab active" onclick="switchDHTab(this,'chat')">💬 聊天</button>
+          <button class="dh-tab" onclick="switchDHTab(this,'activity')">📊 动态</button>
+          <button class="dh-tab" onclick="switchDHTab(this,'config')">⚙ 设置</button>
+        </div>
+      </div>
+      <div class="dh-content" id="dh-content">
+        <div class="chat-area" id="dh-chat-panel">
+          <div class="chat-msgs" id="dh-chat-msgs"></div>
+          <div class="chat-bar">
+            <textarea rows="1" placeholder="和数字人对话..." oninput="this.nextElementSibling.classList.toggle('active',this.value.trim().length>0)" onkeydown="if(event.key==='Enter'&&!event.shiftKey){event.preventDefault();sendChat('dh')}"></textarea>
+            <button class="chat-send" onclick="sendChat('dh')">↑</button>
+          </div>
+        </div>
+      </div>
+      <div class="conv-sheet" id="conv-sheet">
+        <div class="conv-handle"></div>
+        <div class="conv-sheet-header"><span class="conv-sheet-title">对话</span><button class="conv-sheet-close" onclick="toggleConvSheet()">×</button></div>
+        <div class="conv-list">
+          <div class="conv-item active" onclick="selectConv(this)"><div class="conv-icon native">💬</div><div class="conv-info"><div class="conv-name">Halo Chat</div><div class="conv-meta"><span class="conv-badge native">原生对话</span></div><div class="conv-preview">发送消息开始与此应用聊天</div></div></div>
+          <div class="conv-item" onclick="selectConv(this)"><div class="conv-icon im">👤</div><div class="conv-info"><div class="conv-name">maybe</div><div class="conv-meta"><span class="conv-badge im">WeCom · 直接</span></div><div class="conv-preview">你现在设计的这个，有没有把H...</div></div></div>
+          <div class="conv-item" onclick="selectConv(this)"><div class="conv-icon im">👤</div><div class="conv-info"><div class="conv-name">产品群</div><div class="conv-meta"><span class="conv-badge im">WeCom · 群聊</span></div><div class="conv-preview">帮我查一下昨天的市场数据</div></div></div>
+          <div class="conv-item" onclick="selectConv(this)"><div class="conv-icon im">📢</div><div class="conv-info"><div class="conv-name">运营日报</div><div class="conv-meta"><span class="conv-badge im">Telegram · 频道</span></div><div class="conv-preview">今日运营数据汇总已发送</div></div></div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="tab-bar">
+    <button class="tab-item active" onclick="switchTab(0)"><span class="tab-icon">🏠</span><span class="tab-label">首页</span></button>
+    <button class="tab-item" onclick="switchTab(1)"><span class="tab-icon">💬</span><span class="tab-label">空间</span><span class="tab-badge">4</span></button>
+    <button class="tab-item" onclick="switchTab(2)"><span class="tab-icon">🤖</span><span class="tab-label">数字人</span><span class="tab-badge">3</span></button>
+    <button class="tab-item" onclick="switchTab(3)"><span class="tab-icon">⚙</span><span class="tab-label">设置</span></button>
+  </div>
+</div>
+
+<script>
+let isDark = true, currentIcon = '✨', currentName = 'Halo', dhPaused = false, activeTab = 0
+
+const panels = ['panel-home','panel-spaces','panel-dh','panel-settings']
+const tabTitles = ['Halo','空间','数字人','设置']
+
+// ── Settings content ──
+const settingsContent = {
+  general: `<div class="s-section"><div class="s-section-title">通用</div><div class="s-section-desc">基础配置</div><div class="s-row"><div class="s-row-left"><div class="s-label">语言</div></div><div class="s-row-right"><button class="pill">简体中文</button></div></div><div class="s-row"><div class="s-row-left"><div class="s-label">外观</div></div><div class="s-row-right"><button class="pill">跟随系统</button></div></div><div class="s-row"><div class="s-row-left"><div class="s-label">远程访问</div><div class="s-hint">允许通过手机/网页访问 Halo</div></div><div class="s-row-right"><div class="toggle" onclick="this.classList.toggle('on')"></div></div></div></div>`,
+  ai: `<div class="s-section"><div class="s-section-title">AI 模型</div><div class="s-section-desc">配置 AI 提供商和模型</div><div class="s-row"><div class="s-row-left"><div class="s-label">当前提供商</div><div class="s-hint">Anthropic (Claude Sonnet 4)</div></div><div class="s-row-right"><button class="pill">切换</button></div></div><div class="s-row"><div class="s-row-left"><div class="s-label">最大上下文</div><div class="s-hint">每次对话的最大 token 数</div></div><div class="s-row-right"><button class="pill">128K</button></div></div></div>`,
+  skills: `<div class="s-section"><div class="s-section-title">技能</div><div class="s-section-desc">AI 使用的工具扩展</div><div class="s-row"><div class="s-row-left"><div class="s-label">🌐 网页搜索</div><div class="s-hint">搜索互联网获取实时信息</div></div><div class="s-row-right"><div class="toggle on" onclick="this.classList.toggle('on')"></div></div></div><div class="s-row"><div class="s-row-left"><div class="s-label">🖥️ 浏览器操作</div><div class="s-hint">控制浏览器执行网页操作</div></div><div class="s-row-right"><div class="toggle on" onclick="this.classList.toggle('on')"></div></div></div></div>`,
+  mcp: `<div class="s-section"><div class="s-section-title">MCP 服务器</div><div class="s-section-desc">工具服务器配置</div><div class="s-row"><div class="s-row-left"><div class="s-label">📁 filesystem</div><div class="s-hint">stdio · 文件系统</div></div><div class="s-row-right"><span class="status-ok">运行中</span></div></div><div class="s-row"><div class="s-row-left"><div class="s-label">🌐 fetch</div><div class="s-hint">stdio · HTTP 请求</div></div><div class="s-row-right"><span class="status-ok">运行中</span></div></div><div style="margin-top:12px"><button class="pill-action" onclick="alert('添加 MCP...')">添加服务器</button></div></div>`,
+  notify: `<div class="s-section"><div class="s-section-title">通知渠道</div><div class="s-section-desc">配置数字人推送和 IM 集成</div><div class="s-row"><div class="s-row-left"><div class="s-label">📧 电子邮件</div><div class="s-hint">未配置 SMTP 服务器</div></div><div class="s-row-right"><button class="pill">配置</button></div></div><div class="s-row"><div class="s-row-left"><div class="s-label">💬 企业微信</div><div class="s-hint">已连接 · maybe@company.com</div></div><div class="s-row-right"><span class="status-ok">已连接</span></div></div><div class="s-row"><div class="s-row-left"><div class="s-label">✈️ Telegram</div><div class="s-hint">未连接</div></div><div class="s-row-right"><button class="pill">连接</button></div></div><div class="s-row"><div class="s-row-left"><div class="s-label">📱 推送通知</div><div class="s-hint">移动端 App 推送</div></div><div class="s-row-right"><div class="toggle on" onclick="this.classList.toggle('on')"></div></div></div></div>`,
+  store: `<div class="s-section"><div class="s-section-title">发现数字人</div><div class="s-section-desc">安装更多数字人为你工作</div><div style="display:flex;flex-direction:column;gap:10px"><div class="activity-card" style="cursor:default"><div class="ac-top"><div class="ac-avatar" style="background:hsl(38 92% 50%/0.1)">📢</div><div class="ac-meta"><div class="ac-name">社媒运营</div><div class="ac-time">Community</div></div></div><div class="ac-body">自动回复评论和私信，定时发布内容，追踪品牌提及。</div><div class="ac-footer"><button class="ac-btn primary" onclick="alert('安装中...')">安装</button></div></div><div class="activity-card" style="cursor:default"><div class="ac-top"><div class="ac-avatar" style="background:hsl(0 62% 50%/0.1)">📧</div><div class="ac-meta"><div class="ac-name">邮件助理</div><div class="ac-time">Halo Official</div></div></div><div class="ac-body">自动分类收件箱，智能草拟回复，标记重要邮件。</div><div class="ac-footer"><button class="ac-btn primary" onclick="alert('安装中...')">安装</button></div></div></div></div>`,
+  dh: `<div class="s-section"><div class="s-section-title">数字人管理</div><div class="s-section-desc">管理已安装的数字人</div><div class="s-row"><div class="s-row-left"><div class="s-label">📊 股票分析师</div><div class="s-hint">每 30 分钟 · 运行中</div></div><div class="s-row-right"><button class="pill">配置</button></div></div><div class="s-row"><div class="s-row-left"><div class="s-label">💻 代码助手</div><div class="s-hint">事件触发 · CI 监控</div></div><div class="s-row-right"><button class="pill">配置</button></div></div><div class="s-row"><div class="s-row-left"><div class="s-label">⚖ 法律助手</div><div class="s-hint">手动触发 · 空闲</div></div><div class="s-row-right"><button class="pill">配置</button></div></div><div style="margin-top:12px;display:flex;gap:8px"><button class="pill-action" onclick="alert('创建数字人...')">创建数字人</button><button class="pill-muted" onclick="switchSettingsTab(document.querySelector('[onclick*=store]'),'store')">发现更多</button></div></div>`
+}
+
+// ── DH activity data ──
+const dhActivityData = {
+  '股票分析师': [
+    { time:'06/03 08:00',status:'fail',statusText:'失败',duration:'32s',msg:'AI ended without reporting results.',error:'report_to_user not called',canContinue:true },
+    { time:'06/02 09:15',status:'output',statusText:'输出',duration:'2m 18s',msg:'今日 A 股打板分析已生成，共筛选 12 只标的。',output:{title:'A 股打板机会分析 — 2026-06-02',html:'<h4>1. 002371 中芯国际 — 3 连板</h4><ul><li>半导体板块资金净流入 8.2 亿</li></ul><h4>2. 300750 宁德时代 — 放量突破</h4><ul><li>北向资金连续 3 日净买入</li></ul>'}},
+    { time:'06/01 08:02',status:'output',statusText:'输出',duration:'1m 45s',msg:'日报已生成并推送至邮箱。',output:{title:'A 股日报 — 2026-06-01',html:'<p>三大指数全线收涨，创业板 +1.45%。</p>'}}
+  ],
+  '代码助手': [
+    { time:'06/03 10:30',status:'done',statusText:'完成',duration:'8s',msg:'CI 构建通过，PR #342 已自动合入。'},
+    { time:'06/03 08:00',status:'fail',statusText:'失败',duration:'45s',msg:'CI 构建失败，检测到安全漏洞。',error:'CVE-2024-XXXX',canContinue:true},
+  ],
+  '法律助手': [
+    { time:'06/03 14:00',status:'output',statusText:'输出',duration:'35s',msg:'合同审查完成，7 条通过，3 条风险条款。',output:{title:'合同审查报告',html:'<h4>风险条款</h4><ul><li><strong>第 5.3 条</strong>: 无限连带责任，建议修改</li><li><strong>第 8.1 条</strong>: 知识产权归属不明确</li></ul>'}}
+  ]
+}
+
+const dhConfigContent = `
+<div class="dh-cfg-info"><div class="dh-cfg-name" id="cfg-name">股票分析师</div><div class="dh-cfg-desc">自动扫描 A 股打板机会，实时行情分析，定时推送异动提醒。</div><div class="dh-cfg-ver">v1.2.0 · Halo Official</div><div class="dh-cfg-btns"><button class="dh-cfg-btn">⚙ 设置</button><button class="dh-cfg-btn">&lt;&gt; YAML</button></div></div>
+<div class="dh-cfg-sec"><div class="dh-cfg-sec-t">计划任务 <span style="float:right"><span class="toggle on" onclick="event.stopPropagation();this.classList.toggle('on')"></span></span></div><div class="dh-cfg-pills"><button class="dh-cfg-pill">按间隔</button><button class="dh-cfg-pill active">按时间</button></div><div class="dh-cfg-pills"><button class="dh-cfg-pill active">每天</button><button class="dh-cfg-pill">按周</button><button class="dh-cfg-pill">按月</button></div><div class="dh-cfg-time"><input class="dh-cfg-time-input" value="08"><span class="dh-cfg-time-sep">:</span><input class="dh-cfg-time-input" value="00"></div></div>
+<div class="dh-cfg-sec"><div class="dh-cfg-sec-t">运行时</div><div class="dh-cfg-row"><div class="dh-cfg-row-info"><div class="dh-cfg-row-label">模型</div><div class="dh-cfg-row-hint">使用全局选择的模型</div></div><button class="pill">GLM-5.1</button></div></div>
+<div class="dh-cfg-sec"><div class="dh-cfg-row"><div class="dh-cfg-row-info"><div class="dh-cfg-row-label">AI 浏览器</div><div class="dh-cfg-row-hint">为网页自动化启用浏览器</div></div><div class="toggle on" onclick="this.classList.toggle('on')"></div></div><div class="dh-cfg-row"><div class="dh-cfg-row-info"><div class="dh-cfg-row-label">电子邮件</div><div class="dh-cfg-row-hint">允许读取、发送邮件</div></div><div class="toggle" onclick="this.classList.toggle('on')"></div></div><div class="dh-cfg-warning">⚠️ 电子邮件未配置。请前往设置 > 通知渠道。</div></div>`
+
+// ── Tab switching ──
+function switchTab(idx) {
+  activeTab = idx
+  panels.forEach((p,i) => {
+    document.getElementById(p).classList.toggle('active', i === idx)
+  })
+  document.querySelectorAll('.tab-item').forEach((t,i) => t.classList.toggle('active', i === idx))
+  document.getElementById('topbar-title').textContent = tabTitles[idx]
+  if (idx === 3 && !document.getElementById('settings-body').innerHTML.trim()) {
+    switchSettingsTab(document.querySelector('.s-tab'), 'general')
+  }
+}
+
+function setHomeMode(mode) {
+  document.querySelectorAll('.demo-btn').forEach(b => b.classList.remove('active'))
+  event.target.classList.add('active')
+  document.getElementById('home-empty').style.display = mode === 'empty' ? '' : 'none'
+  document.getElementById('home-data').style.display = mode === 'data' ? '' : 'none'
+}
+
+function switchSettingsTab(el, tab) {
+  document.querySelectorAll('.s-tab').forEach(t => t.classList.remove('active'))
+  if (el) el.classList.add('active')
+  document.getElementById('settings-body').innerHTML = settingsContent[tab] || settingsContent.general
+}
+
+function toggleTheme() { isDark = !isDark; document.documentElement.classList.toggle('light', !isDark); document.getElementById('theme-btn').textContent = isDark ? '切换亮色' : '切换暗色' }
+
+// ── Space view ──
+function openSpace(icon, name) {
+  currentIcon = icon; currentName = name; closeView()
+  document.getElementById('sv-icon').textContent = icon
+  document.getElementById('sv-name').textContent = name
+  document.getElementById('topbar-title').textContent = name
+  document.getElementById('space-view').classList.add('active')
+  const msgs = document.getElementById('sv-chat-msgs')
+  if (!msgs.innerHTML.trim()) msgs.innerHTML = `<div style="text-align:center;padding:60px 0;color:hsl(var(--muted-foreground));font-size:13px"><div style="font-size:36px;margin-bottom:12px">${icon}</div><strong>${name}</strong> 空间</div>`
+}
+
+// ── DH view ──
+function openDH(icon, name, meta) {
+  currentIcon = icon; currentName = name; closeView()
+  document.getElementById('dh-avatar').textContent = icon
+  document.getElementById('dh-name').textContent = name
+  document.getElementById('dh-topbar-name').textContent = name
+  document.getElementById('dh-dot').className = 'dh-dot ' + meta.status
+  document.getElementById('dh-st-text').textContent = meta.statusText
+  document.getElementById('dh-freq').textContent = meta.freq
+  document.getElementById('dh-last-run').textContent = '上次运行: ' + meta.lastRun
+  document.getElementById('dh-space-link').innerHTML = meta.spaceIcon + ' ' + meta.space
+  dhPaused = false; document.getElementById('dh-pause-btn').textContent = '⏸ 暂停'
+  switchDHTab(document.querySelector('.dh-tab'), 'chat')
+  document.getElementById('dh-view').classList.add('active')
+}
+
+function closeView() {
+  document.querySelectorAll('.view-overlay').forEach(v => v.classList.remove('active'))
+  document.getElementById('topbar-title').textContent = tabTitles[activeTab]
+}
+
+function toggleDHPause() { dhPaused = !dhPaused; document.getElementById('dh-pause-btn').textContent = dhPaused ? '▶ 继续' : '⏸ 暂停'; document.getElementById('dh-dot').className = 'dh-dot ' + (dhPaused ? 'paused' : 'running'); document.getElementById('dh-st-text').textContent = dhPaused ? '已暂停' : '运行中' }
+
+function switchDHTab(el, tab) {
+  document.querySelectorAll('.dh-tab').forEach(t => t.classList.remove('active'))
+  if (el) el.classList.add('active')
+  const content = document.getElementById('dh-content')
+  const chatPanel = document.getElementById('dh-chat-panel')
+  if (tab === 'chat') {
+    content.innerHTML = ''; content.appendChild(chatPanel); chatPanel.style.display = ''
+  } else if (tab === 'activity') {
+    chatPanel.style.display = 'none'
+    const acts = dhActivityData[currentName] || dhActivityData['股票分析师']
+    content.innerHTML = `<div class="dh-activity">${acts.map(a => {
+      let b = ''
+      if (a.msg) b += `<div class="dh-act-msg">${a.msg}</div>`
+      if (a.error) b += `<div class="dh-act-err">${a.error}</div>`
+      if (a.canContinue) b += `<button class="dh-act-cont" onclick="alert('继续执行...')">▶ 继续</button>`
+      if (a.output) b += `<div class="dh-act-out"><div class="dh-act-out-t">${a.output.title}</div><div class="dh-act-out-b">${a.output.html}</div></div>`
+      return `<div class="dh-act-entry"><div class="dh-act-head"><span class="dh-act-ts">${a.time}</span><span class="dh-act-arrow">→</span><span class="dh-act-st ${a.status}">${a.statusText}</span><span class="dh-act-dur">${a.duration}</span></div>${b}</div>`
+    }).join('')}</div>`
+  } else if (tab === 'config') {
+    chatPanel.style.display = 'none'
+    content.innerHTML = `<div class="dh-cfg">${dhConfigContent.replace('cfg-name', 'cfg-name').replace('股票分析师', currentName)}</div>`
+  }
+}
+
+// ── Sheets ──
+function toggleArtSheet() { document.getElementById('art-sheet').classList.toggle('open') }
+function toggleConvSheet() { document.getElementById('conv-sheet').classList.toggle('open') }
+function selectConv(el) { el.parentNode.querySelectorAll('.conv-item').forEach(i => i.classList.remove('active')); el.classList.add('active'); toggleConvSheet() }
+
+// ── Canvas ──
+function openCanvas(url) {
+  document.getElementById('canvas-overlay').classList.add('active')
+  if (url) { document.getElementById('canvas-url').textContent = url; document.getElementById('canvas-content').innerHTML = `<div style="display:flex;flex-direction:column;align-items:center;justify-content:center;height:100%;color:hsl(var(--muted-foreground)/0.5);font-size:13px;gap:8px"><div style="font-size:28px">🌐</div>正在加载 ${url.split('/')[2] || url}...</div>` }
+}
+function closeCanvas() { document.getElementById('canvas-overlay').classList.remove('active') }
+
+// ── Chat ──
+function sendFromHome() {
+  const input = document.getElementById('main-input'); const text = input.value.trim(); if (!text) return
+  input.value = ''; document.querySelector('.input-send').classList.remove('active')
+  openSpace('✨', 'Halo')
+  const msgs = document.getElementById('sv-chat-msgs'); msgs.innerHTML = ''
+  addMsg(msgs, 'user', '🧑', text); setTimeout(() => addMsg(msgs, 'assistant', '✨', `收到你的消息：「${text.slice(0,20)}...」，我来分析一下。`), 800)
+}
+function sendChat(prefix) {
+  const ta = document.querySelector(`#${prefix === 'sv' ? 'space-view' : 'dh-chat-panel'} textarea`); const text = ta.value.trim(); if (!text) return
+  ta.value = ''; ta.nextElementSibling.classList.remove('active')
+  const msgs = document.getElementById(prefix === 'sv' ? 'sv-chat-msgs' : 'dh-chat-msgs')
+  addMsg(msgs, 'user', '🧑', text); setTimeout(() => addMsg(msgs, 'assistant', currentIcon, `收到你的消息：「${text.slice(0,20)}...」，我来分析一下。`), 800)
+}
+function addMsg(container, role, avatar, text) {
+  const div = document.createElement('div'); div.className = `msg ${role}`
+  div.innerHTML = `<div class="msg-avatar" style="background:${role==='user'?'hsl(var(--primary)/0.15)':'hsl(var(--secondary))'}">${avatar}</div><div class="msg-content"><div class="msg-bubble">${text}</div></div>`
+  container.appendChild(div); container.scrollTop = container.scrollHeight
+}
+
+// Init
+const hour = new Date().getHours()
+document.querySelector('#greeting h1').textContent = hour < 6 ? '夜深了' : hour < 12 ? '早上好' : hour < 18 ? '下午好' : '晚上好'
+switchSettingsTab(document.querySelector('.s-tab'), 'general')
+</script>
+</body>
+</html>
