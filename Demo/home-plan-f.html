@@ -365,8 +365,6 @@ body {
 <div class="demo-bar">
   <button class="demo-btn active" onclick="setHomeMode('empty')">空状态</button>
   <button class="demo-btn" onclick="setHomeMode('data')">有数据</button>
-  <div class="demo-sep"></div>
-  <button class="demo-btn" onclick="toggleTheme()" id="theme-btn">切换亮色</button>
 </div>
 
 <div class="app">
@@ -563,7 +561,7 @@ const tabTitles = ['Halo','空间','数字人','设置']
 
 // ── Settings content ──
 const settingsContent = {
-  general: `<div class="s-section"><div class="s-section-title">通用</div><div class="s-section-desc">基础配置</div><div class="s-row"><div class="s-row-left"><div class="s-label">语言</div></div><div class="s-row-right"><button class="pill">简体中文</button></div></div><div class="s-row"><div class="s-row-left"><div class="s-label">外观</div></div><div class="s-row-right"><button class="pill">跟随系统</button></div></div><div class="s-row"><div class="s-row-left"><div class="s-label">远程访问</div><div class="s-hint">允许通过手机/网页访问 Halo</div></div><div class="s-row-right"><div class="toggle" onclick="this.classList.toggle('on')"></div></div></div></div>`,
+  general: `<div class="s-section"><div class="s-section-title">通用</div><div class="s-section-desc">基础配置</div><div class="s-row"><div class="s-row-left"><div class="s-label">语言</div></div><div class="s-row-right"><button class="pill">简体中文</button></div></div><div class="s-row"><div class="s-row-left"><div class="s-label">外观</div><div class="s-hint" id="theme-hint">当前：暗色模式</div></div><div class="s-row-right"><button class="pill" id="theme-pill" onclick="toggleTheme()">切换亮色</button></div></div><div class="s-row"><div class="s-row-left"><div class="s-label">远程访问</div><div class="s-hint">允许通过手机/网页访问 Halo</div></div><div class="s-row-right"><div class="toggle" onclick="this.classList.toggle('on')"></div></div></div></div>`,
   ai: `<div class="s-section"><div class="s-section-title">AI 模型</div><div class="s-section-desc">配置 AI 提供商和模型</div><div class="s-row"><div class="s-row-left"><div class="s-label">当前提供商</div><div class="s-hint">Anthropic (Claude Sonnet 4)</div></div><div class="s-row-right"><button class="pill">切换</button></div></div><div class="s-row"><div class="s-row-left"><div class="s-label">最大上下文</div><div class="s-hint">每次对话的最大 token 数</div></div><div class="s-row-right"><button class="pill">128K</button></div></div></div>`,
   skills: `<div class="s-section"><div class="s-section-title">技能</div><div class="s-section-desc">AI 使用的工具扩展</div><div class="s-row"><div class="s-row-left"><div class="s-label">🌐 网页搜索</div><div class="s-hint">搜索互联网获取实时信息</div></div><div class="s-row-right"><div class="toggle on" onclick="this.classList.toggle('on')"></div></div></div><div class="s-row"><div class="s-row-left"><div class="s-label">🖥️ 浏览器操作</div><div class="s-hint">控制浏览器执行网页操作</div></div><div class="s-row-right"><div class="toggle on" onclick="this.classList.toggle('on')"></div></div></div></div>`,
   mcp: `<div class="s-section"><div class="s-section-title">MCP 服务器</div><div class="s-section-desc">工具服务器配置</div><div class="s-row"><div class="s-row-left"><div class="s-label">📁 filesystem</div><div class="s-hint">stdio · 文件系统</div></div><div class="s-row-right"><span class="status-ok">运行中</span></div></div><div class="s-row"><div class="s-row-left"><div class="s-label">🌐 fetch</div><div class="s-hint">stdio · HTTP 请求</div></div><div class="s-row-right"><span class="status-ok">运行中</span></div></div><div style="margin-top:12px"><button class="pill-action" onclick="alert('添加 MCP...')">添加服务器</button></div></div>`,
@@ -620,7 +618,14 @@ function switchSettingsTab(el, tab) {
   document.getElementById('settings-body').innerHTML = settingsContent[tab] || settingsContent.general
 }
 
-function toggleTheme() { isDark = !isDark; document.documentElement.classList.toggle('light', !isDark); document.getElementById('theme-btn').textContent = isDark ? '切换亮色' : '切换暗色' }
+function toggleTheme() {
+  isDark = !isDark
+  document.documentElement.classList.toggle('light', !isDark)
+  const pill = document.getElementById('theme-pill')
+  const hint = document.getElementById('theme-hint')
+  if (pill) pill.textContent = isDark ? '切换亮色' : '切换暗色'
+  if (hint) hint.textContent = isDark ? '当前：暗色模式' : '当前：亮色模式'
+}
 
 // ── Space view ──
 function openSpace(icon, name) {
