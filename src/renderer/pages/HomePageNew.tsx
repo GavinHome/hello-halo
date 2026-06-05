@@ -48,6 +48,10 @@ export function HomePageNew() {
   const isMobile = useIsMobile()
   // Digital humans layout: 'list' (1 col) or 'grid' (2 col). Mobile defaults to list, desktop to grid.
   const [dhLayout, setDhLayout] = useState<'list' | 'grid'>(() => isMobile ? 'list' : 'grid')
+  // Spaces layout: same toggle as digital humans
+  const [spaceLayout, setSpaceLayout] = useState<'list' | 'grid'>(() => isMobile ? 'list' : 'grid')
+  // Classic mode: always grid. Unified mode: respects spaceLayout state.
+  const effectiveSpaceLayout = viewMode === 'classic' ? 'grid' : spaceLayout
 
   // Dialog state
   const [showCreateDialog, setShowCreateDialog] = useState(false)
@@ -295,13 +299,18 @@ export function HomePageNew() {
         {/* Spaces Section */}
         <div className="mb-4 flex items-center justify-between">
           <h3 className="text-sm font-medium text-muted-foreground">{t('Dedicated Spaces')}</h3>
-          <button
-            onClick={() => setShowCreateDialog(true)}
-            className="flex items-center gap-1 px-3 py-1 text-sm text-primary hover:bg-primary/10 rounded-lg transition-colors"
-          >
-            <Plus className="w-4 h-4" />
-            {t('New')}
-          </button>
+          <div className="flex items-center gap-1">
+            {viewMode === 'unified' && (
+              <LayoutToggle value={spaceLayout} onChange={setSpaceLayout} />
+            )}
+            <button
+              onClick={() => setShowCreateDialog(true)}
+              className="flex items-center gap-1 px-3 py-1 text-sm text-primary hover:bg-primary/10 rounded-lg transition-colors"
+            >
+              <Plus className="w-4 h-4" />
+              {t('New')}
+            </button>
+          </div>
         </div>
 
         {/* Space Guide - always visible */}
@@ -312,11 +321,12 @@ export function HomePageNew() {
             <p className="text-sm">{t('No dedicated spaces yet')}</p>
           </div>
         ) : (
-          <div className="grid gap-4 grid-cols-2">
+          <div className={`grid gap-4 ${effectiveSpaceLayout === 'grid' ? 'grid-cols-2' : 'grid-cols-1'}`}>
             {spaces.map((space, i) => (
               <SpaceCard
                 key={`${space.id}-${i}`}
                 space={space}
+                layout={effectiveSpaceLayout}
                 onClick={() => handleSpaceClick(space)}
                 onEdit={(e) => handleEditSpace(e, space)}
                 onDelete={(e) => handleDeleteSpace(e, space.id)}
@@ -332,21 +342,7 @@ export function HomePageNew() {
             <div className="mb-4 flex items-center justify-between">
               <h3 className="text-sm font-medium text-muted-foreground">{t('Digital Humans')}</h3>
               <div className="flex items-center gap-1">
-                {/* Layout toggle */}
-                <button
-                  onClick={() => setDhLayout('list')}
-                  className={`p-1.5 rounded-lg transition-colors ${dhLayout === 'list' ? 'bg-secondary text-foreground' : 'text-muted-foreground hover:bg-secondary/50'}`}
-                  title={t('List view')}
-                >
-                  <List className="w-4 h-4" />
-                </button>
-                <button
-                  onClick={() => setDhLayout('grid')}
-                  className={`p-1.5 rounded-lg transition-colors ${dhLayout === 'grid' ? 'bg-secondary text-foreground' : 'text-muted-foreground hover:bg-secondary/50'}`}
-                  title={t('Grid view')}
-                >
-                  <LayoutGrid className="w-4 h-4" />
-                </button>
+                <LayoutToggle value={dhLayout} onChange={setDhLayout} />
                 {/* Create button */}
                 <button
                   onClick={() => {
@@ -828,20 +824,89 @@ function StudioSection({
 }
 
 // ──────────────────────────────────────────────
+// Layout Toggle — single button to switch list/grid
+// ──────────────────────────────────────────────
+
+interface LayoutToggleProps {
+  value: 'list' | 'grid'
+  onChange: (mode: 'list' | 'grid') => void
+}
+
+function LayoutToggle({ value, onChange }: LayoutToggleProps) {
+  const { t } = useTranslation()
+  const isList = value === 'list'
+  return (
+    <button
+      onClick={() => onChange(isList ? 'grid' : 'list')}
+      className="p-1.5 rounded-lg text-muted-foreground hover:bg-secondary/50 transition-colors"
+      title={isList ? t('Grid view') : t('List view')}
+    >
+      {isList ? <LayoutGrid className="w-4 h-4" /> : <List className="w-4 h-4" />}
+    </button>
+  )
+}
+
+// ──────────────────────────────────────────────
 // Space Card — supports list and grid layouts
 // ──────────────────────────────────────────────
 
 interface SpaceCardProps {
   space: Space
+  layout: 'list' | 'grid'
   onClick: () => void
   onEdit: (e: React.MouseEvent) => void
   onDelete: (e: React.MouseEvent) => void
   formatTimeAgo: (dateStr: string) => string
 }
 
-function SpaceCard({ space, onClick, onEdit, onDelete, formatTimeAgo }: SpaceCardProps) {
+function SpaceCard({ space, layout, onClick, onEdit, onDelete, formatTimeAgo }: SpaceCardProps) {
   const { t } = useTranslation()
   const isMissing = space.isMissing
+
+  if (layout === 'list') {
+    return (
+      <div
+        onClick={onClick}
+        className={`px-4 py-3 rounded-xl border border-border hover:border-primary/40 hover:bg-secondary/50 transition-all cursor-pointer group animate-fade-in ${
+          isMissing ? 'opacity-70 border-dashed' : ''
+        }`}
+      >
+        <div className="flex items-start justify-between">
+          <div className="flex items-center gap-2 min-w-0">
+            <SpaceIcon iconId={space.icon} size={20} />
+            <span className="font-medium truncate">{space.name}</span>
+            {isMissing && (
+              <span className="inline-flex items-center gap-1 rounded-full border border-border px-1.5 py-0.5 text-[10px] text-muted-foreground">
+                <Unplug className="w-3 h-3" />
+                {t('Unavailable')}
+              </span>
+            )}
+          </div>
+          <div className="flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-all">
+            <button
+              onClick={(e) => { e.stopPropagation(); onEdit(e) }}
+              className="p-1 hover:bg-secondary rounded transition-all"
+              title={t('Edit Space')}
+            >
+              <Pencil className="w-4 h-4 text-muted-foreground" />
+            </button>
+            <button
+              onClick={(e) => { e.stopPropagation(); onDelete(e) }}
+              className="p-1 hover:bg-destructive/20 rounded transition-all"
+              title={t('Delete space')}
+            >
+              <Trash2 className="w-4 h-4 text-destructive" />
+            </button>
+          </div>
+        </div>
+        <p className="text-xs text-muted-foreground mt-2">
+          {isMissing
+            ? t('Path unavailable. Reconnect the drive to open this space.')
+            : `${formatTimeAgo(space.lastActiveAt || space.updatedAt)}${t('active')}`}
+        </p>
+      </div>
+    )
+  }
 
   return (
     <div
