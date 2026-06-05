@@ -29,13 +29,14 @@ import { useAppsStore } from '../stores/apps.store'
 import { useAppsPageStore } from '../stores/apps-page.store'
 import type { InstalledApp } from '../../shared/apps/app-types'
 import type { AppType } from '../../shared/apps/spec-types'
+import { DigitalHumanDetailNew } from '../components/apps/DigitalHumanDetailNew'
 
 export function HomePageNew() {
   const { t } = useTranslation()
   const { setView } = useAppStore()
   const { haloSpace, spaces, loadSpaces, setCurrentSpace, refreshCurrentSpace, updateSpace, deleteSpace } = useSpaceStore()
   const { apps, loadApps } = useAppsStore()
-  const { setInitialAppId, setCurrentTab, setShowInstallDialog, openMarketplaceFilteredBy } = useAppsPageStore()
+  const { setCurrentTab, setShowInstallDialog, openMarketplaceFilteredBy } = useAppsPageStore()
 
   // Load apps on mount for the Apps card
   useEffect(() => {
@@ -56,6 +57,9 @@ export function HomePageNew() {
   const [editingSpace, setEditingSpace] = useState<Space | null>(null)
   const [editSpaceName, setEditSpaceName] = useState('')
   const [editSpaceIcon, setEditSpaceIcon] = useState<SpaceIconId>(DEFAULT_SPACE_ICON)
+
+  // Direct digital human detail view (replaces home content when set)
+  const [detailAppId, setDetailAppId] = useState<string | null>(null)
 
   // Filter automation apps for digital humans section
   const automationApps = apps.filter(a => a.spec.type === 'automation' && a.status !== 'uninstalled')
@@ -139,6 +143,11 @@ export function HomePageNew() {
     if (diffDays < 7) return t('{{count}} days ago', { count: diffDays })
     if (diffDays < 30) return t('{{count}} weeks ago', { count: Math.floor(diffDays / 7) })
     return t('{{count}} months ago', { count: Math.floor(diffDays / 30) })
+  }
+
+  // Direct digital human detail view
+  if (detailAppId) {
+    return <DigitalHumanDetailNew appId={detailAppId} onBack={() => setDetailAppId(null)} />
   }
 
   return (
@@ -226,8 +235,7 @@ export function HomePageNew() {
                   setView('apps')
                 }}
                 onSelectApp={(appId) => {
-                  setInitialAppId(appId)
-                  setView('apps')
+                  setDetailAppId(appId)
                 }}
                 onCreateAutomation={() => {
                   setCurrentTab('my-digital-humans')
@@ -372,12 +380,15 @@ export function HomePageNew() {
                     key={app.id}
                     app={app}
                     onClick={() => {
-                      setInitialAppId(app.id)
-                      setView('apps')
+                      setDetailAppId(app.id)
                     }}
                     onTogglePause={() => {
-                      const { togglePause } = useAppsStore.getState()
-                      togglePause(app.id, app.status === 'paused')
+                      const store = useAppsStore.getState()
+                      if (app.status === 'paused') {
+                        store.resumeApp(app.id)
+                      } else {
+                        store.pauseApp(app.id)
+                      }
                     }}
                   />
                 ))}
