@@ -65,6 +65,7 @@ export async function initCapacitorMobileShell(): Promise<void> {
   }
 
   installViewportResizeListener()
+  installInputFocusScroll()
 }
 
 /**
@@ -103,4 +104,51 @@ function installViewportResizeListener(): void {
   }
 
   window.visualViewport.addEventListener('resize', sync)
+}
+
+let _focusScrollInstalled = false
+
+/**
+ * On iOS WKWebView, the keyboard can cover focused inputs at the bottom
+ * of the page. This handler scrolls the focused element into view after
+ * the keyboard finishes its open animation.
+ */
+function installInputFocusScroll(): void {
+  if (_focusScrollInstalled) return
+  _focusScrollInstalled = true
+
+  const scrollIntoView = (el: HTMLElement) => {
+    // Wait for keyboard animation to settle
+    setTimeout(() => {
+      const vv = window.visualViewport
+      if (!vv) {
+        el.scrollIntoView({ behavior: 'smooth', block: 'center' })
+        return
+      }
+
+      const rect = el.getBoundingClientRect()
+      const viewportBottom = vv.height
+      const elBottom = rect.bottom
+      const elTop = rect.top
+
+      // Element is below the visible viewport (covered by keyboard)
+      if (elBottom > viewportBottom) {
+        const scrollY = window.scrollY || document.documentElement.scrollTop
+        const offset = elBottom - viewportBottom + 20
+        window.scrollTo({ top: scrollY + offset, behavior: 'smooth' })
+      }
+      // Element is above the visible viewport
+      else if (elTop < 0) {
+        const scrollY = window.scrollY || document.documentElement.scrollTop
+        window.scrollTo({ top: scrollY + elTop - 20, behavior: 'smooth' })
+      }
+    }, 400)
+  }
+
+  document.addEventListener('focusin', (e) => {
+    const el = e.target
+    if (el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement) {
+      scrollIntoView(el)
+    }
+  })
 }
