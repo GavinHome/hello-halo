@@ -22,8 +22,8 @@ const config: CapacitorConfig = {
       showSpinner: false
     },
     Keyboard: {
-      // Resize content when keyboard appears
-      resize: 'body' as any,
+      // Use native iOS keyboard avoidance — most reliable on WKWebView
+      resize: 'native' as any,
       resizeOnFullScreen: true
     },
     LocalNotifications: {
