@@ -18,7 +18,7 @@ import {
 import { Header } from '../components/layout/Header'
 import { SpaceGuide } from '../components/space/SpaceGuide'
 import { CreateSpaceDialog } from '../components/space/CreateSpaceDialog'
-import { Blocks, ArrowRight, AlertCircle, SendHorizontal, Unplug, Bot, LayoutGrid, List, Play, Pause } from 'lucide-react'
+import { Blocks, ArrowRight, AlertCircle, SendHorizontal, Unplug, Bot, LayoutGrid, List, Play, Pause, ChevronDown } from 'lucide-react'
 import Avatar from 'boring-avatars'
 import { useIsMobile } from '../hooks/useIsMobile'
 
@@ -48,8 +48,6 @@ export function HomePageNew() {
   const isMobile = useIsMobile()
   // Digital humans layout: 'list' (1 col) or 'grid' (2 col). Mobile defaults to list, desktop to grid.
   const [dhLayout, setDhLayout] = useState<'list' | 'grid'>(() => isMobile ? 'list' : 'grid')
-  // Spaces layout: same toggle as digital humans
-  const [spaceLayout, setSpaceLayout] = useState<'list' | 'grid'>(() => isMobile ? 'list' : 'grid')
 
   // Dialog state
   const [showCreateDialog, setShowCreateDialog] = useState(false)
@@ -63,6 +61,17 @@ export function HomePageNew() {
 
   // Filter automation apps for digital humans section
   const automationApps = apps.filter(a => a.spec.type === 'automation' && a.status !== 'uninstalled')
+
+  // Studio section: collapsed by default, persisted to localStorage
+  const [studioExpanded, setStudioExpanded] = useState(() => {
+    if (typeof window !== 'undefined') {
+      return localStorage.getItem('halo-studio-expanded') === 'true'
+    }
+    return false
+  })
+  useEffect(() => {
+    localStorage.setItem('halo-studio-expanded', String(studioExpanded))
+  }, [studioExpanded])
 
   // Load spaces on mount
   useEffect(() => {
@@ -286,29 +295,13 @@ export function HomePageNew() {
         {/* Spaces Section */}
         <div className="mb-4 flex items-center justify-between">
           <h3 className="text-sm font-medium text-muted-foreground">{t('Dedicated Spaces')}</h3>
-          <div className="flex items-center gap-1">
-            <button
-              onClick={() => setSpaceLayout('list')}
-              className={`p-1.5 rounded-lg transition-colors ${spaceLayout === 'list' ? 'bg-secondary text-foreground' : 'text-muted-foreground hover:bg-secondary/50'}`}
-              title={t('List view')}
-            >
-              <List className="w-4 h-4" />
-            </button>
-            <button
-              onClick={() => setSpaceLayout('grid')}
-              className={`p-1.5 rounded-lg transition-colors ${spaceLayout === 'grid' ? 'bg-secondary text-foreground' : 'text-muted-foreground hover:bg-secondary/50'}`}
-              title={t('Grid view')}
-            >
-              <LayoutGrid className="w-4 h-4" />
-            </button>
-            <button
-              onClick={() => setShowCreateDialog(true)}
-              className="flex items-center gap-1 px-3 py-1 text-sm text-primary hover:bg-primary/10 rounded-lg transition-colors"
-            >
-              <Plus className="w-4 h-4" />
-              {t('New')}
-            </button>
-          </div>
+          <button
+            onClick={() => setShowCreateDialog(true)}
+            className="flex items-center gap-1 px-3 py-1 text-sm text-primary hover:bg-primary/10 rounded-lg transition-colors"
+          >
+            <Plus className="w-4 h-4" />
+            {t('New')}
+          </button>
         </div>
 
         {/* Space Guide - always visible */}
@@ -319,12 +312,11 @@ export function HomePageNew() {
             <p className="text-sm">{t('No dedicated spaces yet')}</p>
           </div>
         ) : (
-          <div className={`grid gap-4 ${spaceLayout === 'grid' ? 'grid-cols-2' : 'grid-cols-1'}`}>
+          <div className="grid gap-4 grid-cols-2">
             {spaces.map((space, i) => (
               <SpaceCard
                 key={`${space.id}-${i}`}
                 space={space}
-                layout={spaceLayout}
                 onClick={() => handleSpaceClick(space)}
                 onEdit={(e) => handleEditSpace(e, space)}
                 onDelete={(e) => handleDeleteSpace(e, space.id)}
@@ -395,6 +387,33 @@ export function HomePageNew() {
               </div>
             )}
           </div>
+        )}
+
+        {/* Studio Section — collapsible, only in unified mode */}
+        {viewMode === 'unified' && (
+          <StudioSection
+            apps={apps}
+            expanded={studioExpanded}
+            onToggle={() => setStudioExpanded(v => !v)}
+            onOpenTab={(tab) => {
+              setCurrentTab(tab)
+              setView('apps')
+            }}
+            onSelectApp={(appId) => setDetailAppId(appId)}
+            onCreateAutomation={() => {
+              setCurrentTab('my-digital-humans')
+              setShowInstallDialog(true)
+              setView('apps')
+            }}
+            onBrowseSkillsMarket={() => {
+              setView('apps')
+              void openMarketplaceFilteredBy('skill')
+            }}
+            onBrowseMcpMarket={() => {
+              setView('apps')
+              void openMarketplaceFilteredBy('mcp')
+            }}
+          />
         )}
       </main>
 
@@ -707,66 +726,122 @@ function DigitalHumanCard({ app, onClick, onTogglePause }: DigitalHumanCardProps
 }
 
 // ──────────────────────────────────────────────
+// Studio Section — collapsible summary for unified layout
+// ──────────────────────────────────────────────
+
+interface StudioSectionProps {
+  apps: InstalledApp[]
+  expanded: boolean
+  onToggle: () => void
+  onOpenTab: (tab: 'my-digital-humans' | 'my-skills' | 'my-mcp') => void
+  onSelectApp: (appId: string) => void
+  onCreateAutomation: () => void
+  onBrowseSkillsMarket: () => void
+  onBrowseMcpMarket: () => void
+}
+
+function StudioSection({
+  apps,
+  expanded,
+  onToggle,
+  onOpenTab,
+  onSelectApp,
+  onCreateAutomation,
+  onBrowseSkillsMarket,
+  onBrowseMcpMarket,
+}: StudioSectionProps) {
+  const { t } = useTranslation()
+
+  const automationApps = apps.filter(a => a.spec.type === 'automation' && a.status !== 'uninstalled')
+  const skillApps = apps.filter(a => a.spec.type === 'skill' && a.status !== 'uninstalled')
+  const mcpApps = apps.filter(a => a.spec.type === 'mcp' && a.status !== 'uninstalled')
+
+  // Build summary string: "3 Digital Humans · 2 Skills · 1 MCP"
+  const parts: string[] = []
+  if (automationApps.length > 0) parts.push(`${automationApps.length} ${t('Digital Humans')}`)
+  if (skillApps.length > 0) parts.push(`${skillApps.length} ${t('Skills')}`)
+  if (mcpApps.length > 0) parts.push(`${mcpApps.length} ${t('MCP')}`)
+  const summary = parts.length > 0 ? parts.join(' · ') : t('No apps yet')
+
+  return (
+    <div className="mt-8 animate-fade-in">
+      {/* Collapsed title bar */}
+      <button
+        onClick={onToggle}
+        className="w-full flex items-center justify-between px-3 py-2.5 sm:px-4 rounded-lg bg-card border border-border hover:border-primary/30 transition-all group"
+      >
+        <div className="flex items-center gap-2 min-w-0">
+          <div className="w-6 h-6 rounded-md bg-primary/10 flex items-center justify-center flex-shrink-0">
+            <Blocks className="w-3.5 h-3.5 text-primary" />
+          </div>
+          <span className="text-sm font-medium flex-shrink-0">{t('Studio')}</span>
+          <span className="text-xs text-muted-foreground truncate">{summary}</span>
+        </div>
+        <ChevronDown
+          className={`w-4 h-4 text-muted-foreground transition-transform duration-200 flex-shrink-0 ${
+            expanded ? 'rotate-0' : '-rotate-90'
+          }`}
+        />
+      </button>
+
+      {/* Expanded content */}
+      {expanded && (
+        <div className="mt-2 rounded-lg bg-card border border-border overflow-hidden animate-slide-down">
+          <div className="p-3 sm:p-4 space-y-1">
+            <StudioRow
+              label={t('Digital Humans')}
+              type="automation"
+              apps={automationApps}
+              onOpenList={() => onOpenTab('my-digital-humans')}
+              onSelectApp={onSelectApp}
+              emptyAction={{ label: t('Create'), onAction: onCreateAutomation }}
+            />
+            <StudioRow
+              label={t('Skills')}
+              type="skill"
+              apps={skillApps}
+              onOpenList={() => onOpenTab('my-skills')}
+              onSelectApp={onSelectApp}
+              emptyAction={{ label: t('Add from marketplace'), onAction: onBrowseSkillsMarket }}
+            />
+            <StudioRow
+              label={t('MCP')}
+              type="mcp"
+              apps={mcpApps}
+              onOpenList={() => onOpenTab('my-mcp')}
+              onSelectApp={onSelectApp}
+              emptyAction={{ label: t('Add from marketplace'), onAction: onBrowseMcpMarket }}
+            />
+          </div>
+          <div className="px-3 py-2 border-t border-border/50 flex justify-end">
+            <button
+              onClick={() => onOpenTab('my-digital-humans')}
+              className="text-xs text-muted-foreground flex items-center gap-1 hover:text-foreground transition-colors"
+            >
+              {t('Open')} <ArrowRight className="w-3 h-3" />
+            </button>
+          </div>
+        </div>
+      )}
+    </div>
+  )
+}
+
+// ──────────────────────────────────────────────
 // Space Card — supports list and grid layouts
 // ──────────────────────────────────────────────
 
 interface SpaceCardProps {
   space: Space
-  layout: 'list' | 'grid'
   onClick: () => void
   onEdit: (e: React.MouseEvent) => void
   onDelete: (e: React.MouseEvent) => void
   formatTimeAgo: (dateStr: string) => string
 }
 
-function SpaceCard({ space, layout, onClick, onEdit, onDelete, formatTimeAgo }: SpaceCardProps) {
+function SpaceCard({ space, onClick, onEdit, onDelete, formatTimeAgo }: SpaceCardProps) {
   const { t } = useTranslation()
   const isMissing = space.isMissing
-
-  if (layout === 'list') {
-    return (
-      <div
-        onClick={onClick}
-        className={`px-4 py-3 rounded-xl border border-border hover:border-primary/40 hover:bg-secondary/50 transition-all cursor-pointer group animate-fade-in ${
-          isMissing ? 'opacity-70 border-dashed' : ''
-        }`}
-      >
-        <div className="flex items-start justify-between">
-          <div className="flex items-center gap-2 min-w-0">
-            <SpaceIcon iconId={space.icon} size={20} />
-            <span className="font-medium truncate">{space.name}</span>
-            {isMissing && (
-              <span className="inline-flex items-center gap-1 rounded-full border border-border px-1.5 py-0.5 text-[10px] text-muted-foreground">
-                <Unplug className="w-3 h-3" />
-                {t('Unavailable')}
-              </span>
-            )}
-          </div>
-          <div className="flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-all">
-            <button
-              onClick={(e) => { e.stopPropagation(); onEdit(e) }}
-              className="p-1 hover:bg-secondary rounded transition-all"
-              title={t('Edit Space')}
-            >
-              <Pencil className="w-4 h-4 text-muted-foreground" />
-            </button>
-            <button
-              onClick={(e) => { e.stopPropagation(); onDelete(e) }}
-              className="p-1 hover:bg-destructive/20 rounded transition-all"
-              title={t('Delete space')}
-            >
-              <Trash2 className="w-4 h-4 text-destructive" />
-            </button>
-          </div>
-        </div>
-        <p className="text-xs text-muted-foreground mt-2">
-          {isMissing
-            ? t('Path unavailable. Reconnect the drive to open this space.')
-            : `${formatTimeAgo(space.lastActiveAt || space.updatedAt)}${t('active')}`}
-        </p>
-      </div>
-    )
-  }
 
   return (
     <div
