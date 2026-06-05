@@ -888,8 +888,14 @@ body {
 }
 
 .halo-space-card:hover {
-  border-color: hsl(var(--primary));
-  box-shadow: 0 0 20px hsl(var(--primary) / 0.2);
+  /* Only apply hover on devices with pointer (avoid iOS double-tap) */
+}
+
+@media (hover: hover) {
+  .halo-space-card:hover {
+    border-color: hsl(var(--primary));
+    box-shadow: 0 0 20px hsl(var(--primary) / 0.2);
+  }
 }
 
 /* Conversation history panel styles */

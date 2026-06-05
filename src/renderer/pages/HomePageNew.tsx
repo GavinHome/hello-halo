@@ -517,7 +517,7 @@ function StudioCard({
   return (
     <div
       onClick={onOpenAutomationList}
-      className="p-5 rounded-xl cursor-pointer border border-border hover:border-primary/40 hover:bg-secondary/50 transition-colors flex flex-col gap-3 min-h-[160px]"
+      className="p-5 rounded-xl cursor-pointer border border-border sm:hover:border-primary/40 sm:hover:bg-secondary/50 transition-colors flex flex-col gap-3 min-h-[160px]"
     >
       <div className="flex items-center gap-2">
         <Blocks className="w-5 h-5 text-muted-foreground" />
@@ -670,7 +670,7 @@ function DigitalHumanCard({ app, onClick, onTogglePause }: DigitalHumanCardProps
   return (
     <div
       onClick={onClick}
-      className="p-4 rounded-xl border border-border hover:border-primary/40 hover:bg-secondary/50 transition-all cursor-pointer group animate-fade-in"
+      className="p-4 rounded-xl border border-border sm:hover:border-primary/40 sm:hover:bg-secondary/50 transition-all cursor-pointer group animate-fade-in"
     >
       <div className="flex items-start gap-3">
         {/* Avatar/Icon */}
@@ -696,7 +696,7 @@ function DigitalHumanCard({ app, onClick, onTogglePause }: DigitalHumanCardProps
               e.stopPropagation()
               onTogglePause()
             }}
-            className="p-1.5 rounded-lg opacity-0 group-hover:opacity-100 hover:bg-secondary transition-all"
+            className="p-1.5 rounded-lg opacity-100 sm:opacity-0 sm:group-hover:opacity-100 sm:hover:bg-secondary transition-all"
             title={app.status === 'active' ? t('Pause') : t('Resume')}
           >
             {app.status === 'active' ? (
@@ -764,7 +764,7 @@ function StudioSection({
       {/* Collapsed title bar */}
       <button
         onClick={onToggle}
-        className="w-full flex items-center justify-between px-3 py-2.5 sm:px-4 rounded-lg bg-card border border-border hover:border-primary/30 transition-all group"
+        className="w-full flex items-center justify-between px-3 py-2.5 sm:px-4 rounded-lg bg-card border border-border sm:hover:border-primary/30 transition-all group"
       >
         <div className="flex items-center gap-2 min-w-0">
           <div className="w-6 h-6 rounded-md bg-primary/10 flex items-center justify-center flex-shrink-0">
@@ -838,7 +838,7 @@ function LayoutToggle({ value, onChange }: LayoutToggleProps) {
   return (
     <button
       onClick={() => onChange(isList ? 'grid' : 'list')}
-      className="p-1.5 rounded-lg text-muted-foreground hover:bg-secondary/50 transition-colors"
+      className="p-1.5 rounded-lg text-muted-foreground sm:hover:bg-secondary/50 transition-colors"
       title={isList ? t('Grid view') : t('List view')}
     >
       {isList ? <LayoutGrid className="w-4 h-4" /> : <List className="w-4 h-4" />}
@@ -867,7 +867,7 @@ function SpaceCard({ space, layout, onClick, onEdit, onDelete, formatTimeAgo }: 
     return (
       <div
         onClick={onClick}
-        className={`px-4 py-3 rounded-xl border border-border hover:border-primary/40 hover:bg-secondary/50 transition-all cursor-pointer group animate-fade-in ${
+        className={`px-4 py-3 rounded-xl border border-border sm:hover:border-primary/40 sm:hover:bg-secondary/50 transition-all cursor-pointer group animate-fade-in ${
           isMissing ? 'opacity-70 border-dashed' : ''
         }`}
       >
@@ -882,17 +882,17 @@ function SpaceCard({ space, layout, onClick, onEdit, onDelete, formatTimeAgo }: 
               </span>
             )}
           </div>
-          <div className="flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-all">
+          <div className="flex items-center gap-1 opacity-100 sm:opacity-0 sm:group-hover:opacity-100 transition-all">
             <button
               onClick={(e) => { e.stopPropagation(); onEdit(e) }}
-              className="p-1 hover:bg-secondary rounded transition-all"
+              className="p-1 sm:hover:bg-secondary rounded transition-all"
               title={t('Edit Space')}
             >
               <Pencil className="w-4 h-4 text-muted-foreground" />
             </button>
             <button
               onClick={(e) => { e.stopPropagation(); onDelete(e) }}
-              className="p-1 hover:bg-destructive/20 rounded transition-all"
+              className="p-1 sm:hover:bg-destructive/20 rounded transition-all"
               title={t('Delete space')}
             >
               <Trash2 className="w-4 h-4 text-destructive" />
@@ -911,7 +911,7 @@ function SpaceCard({ space, layout, onClick, onEdit, onDelete, formatTimeAgo }: 
   return (
     <div
       onClick={onClick}
-      className={`p-4 rounded-xl border border-border hover:border-primary/40 hover:bg-secondary/50 transition-all cursor-pointer group animate-fade-in ${
+      className={`p-4 rounded-xl border border-border sm:hover:border-primary/40 sm:hover:bg-secondary/50 transition-all cursor-pointer group animate-fade-in ${
         isMissing ? 'opacity-70 border-dashed' : ''
       }`}
     >
@@ -926,7 +926,7 @@ function SpaceCard({ space, layout, onClick, onEdit, onDelete, formatTimeAgo }: 
             </span>
           )}
         </div>
-        <div className="flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-all">
+        <div className="flex items-center gap-1 opacity-100 sm:opacity-0 sm:group-hover:opacity-100 transition-all">
           <button
             onClick={(e) => { e.stopPropagation(); onEdit(e) }}
             className="p-1 hover:bg-secondary rounded transition-all"
