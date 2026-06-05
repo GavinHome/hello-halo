@@ -32,6 +32,7 @@ import { getCurrentSource, supportsVision } from '../../types'
 import { useTranslation } from '../../i18n'
 import { SlashCommandMenu, filterSlashCommands } from './SlashCommandMenu'
 import type { SlashCommandItem } from '../../types/slash-command'
+import { isCapacitor } from '../../api/transport'
 
 // ── @ mention helpers ──
 
@@ -342,12 +343,14 @@ export function InputArea({ onSend, onInject, onStop, isGenerating, placeholder,
     }
   }, [displayContent])
 
-  // Focus on mount
+  // Focus on mount — skip on mobile to avoid keyboard covering response content
+  const isMobileApp = useMemo(() => isCapacitor(), [])
   useEffect(() => {
+    if (isMobileApp) return
     if (!isGenerating && !isOnboardingSendStep) {
       textareaRef.current?.focus()
     }
-  }, [isGenerating, isOnboardingSendStep])
+  }, [isGenerating, isOnboardingSendStep, isMobileApp])
 
   // Slash-command helpers
 
