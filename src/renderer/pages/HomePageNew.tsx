@@ -2,7 +2,7 @@
  * Home Page - Space list view
  */
 
-import React, { useEffect, useState } from 'react'
+import React, { useEffect, useState, useRef } from 'react'
 import { useAppStore } from '../stores/app.store'
 import { useSpaceStore } from '../stores/space.store'
 import { SPACE_ICONS, DEFAULT_SPACE_ICON } from '../types'
@@ -33,10 +33,19 @@ import { DigitalHumanDetailNew } from '../components/apps/DigitalHumanDetailNew'
 
 export function HomePageNew() {
   const { t } = useTranslation()
-  const { setView } = useAppStore()
+  const { setView: setViewRaw } = useAppStore()
   const { haloSpace, spaces, loadSpaces, setCurrentSpace, refreshCurrentSpace, updateSpace, deleteSpace } = useSpaceStore()
   const { apps, loadApps } = useAppsStore()
   const { setCurrentTab, setShowInstallDialog, openMarketplaceFilteredBy } = useAppsPageStore()
+
+  // Wrapper for setView that saves scroll position before navigating away
+  const scrollRef = useRef<HTMLElement>(null)
+  const setView = (view: Parameters<typeof setViewRaw>[0]) => {
+    if (scrollRef.current) {
+      sessionStorage.setItem('halo-home-scroll-pos', String(scrollRef.current.scrollTop))
+    }
+    setViewRaw(view)
+  }
 
   // Load apps on mount for the Apps card
   useEffect(() => {
@@ -53,6 +62,22 @@ export function HomePageNew() {
   // Classic mode: always grid. Unified mode: respects spaceLayout state.
   const effectiveSpaceLayout = viewMode === 'classic' ? 'grid' : spaceLayout
 
+  // Restore scroll position on mount (from sessionStorage, for returning from space/settings)
+  useEffect(() => {
+    const saved = sessionStorage.getItem('halo-home-scroll-pos')
+    if (saved && scrollRef.current) {
+      const pos = parseInt(saved, 10)
+      if (pos > 0) {
+        requestAnimationFrame(() => {
+          if (scrollRef.current) {
+            scrollRef.current.scrollTop = pos
+          }
+        })
+      }
+      sessionStorage.removeItem('halo-home-scroll-pos')
+    }
+  }, [])
+
   // Dialog state
   const [showCreateDialog, setShowCreateDialog] = useState(false)
   // Edit dialog state
@@ -62,6 +87,26 @@ export function HomePageNew() {
 
   // Direct digital human detail view (replaces home content when set)
   const [detailAppId, setDetailAppId] = useState<string | null>(null)
+
+  // Save scroll position before navigating to detail view (keeps component mounted)
+  const savedScrollPos = useRef(0)
+  const navigateToDetail = (appId: string) => {
+    if (scrollRef.current) {
+      savedScrollPos.current = scrollRef.current.scrollTop
+    }
+    setDetailAppId(appId)
+  }
+
+  // Restore scroll position when returning from detail view
+  useEffect(() => {
+    if (detailAppId === null && scrollRef.current && savedScrollPos.current > 0) {
+      requestAnimationFrame(() => {
+        if (scrollRef.current) {
+          scrollRef.current.scrollTop = savedScrollPos.current
+        }
+      })
+    }
+  }, [detailAppId])
 
   // Filter automation apps for digital humans section
   const automationApps = apps.filter(a => a.spec.type === 'automation' && a.status !== 'uninstalled')
@@ -205,7 +250,7 @@ export function HomePageNew() {
       />
 
       {/* Content */}
-      <main className="flex-1 overflow-auto p-6">
+      <main ref={scrollRef} className="flex-1 overflow-auto p-6">
         {viewMode === 'classic' ? (
           <>
             {/* Classic Layout: Halo Space + Studio side by side */}
@@ -248,7 +293,7 @@ export function HomePageNew() {
                   setView('apps')
                 }}
                 onSelectApp={(appId) => {
-                  setDetailAppId(appId)
+                  navigateToDetail(appId)
                 }}
                 onCreateAutomation={() => {
                   setCurrentTab('my-digital-humans')
@@ -368,7 +413,7 @@ export function HomePageNew() {
                     key={app.id}
                     app={app}
                     onClick={() => {
-                      setDetailAppId(app.id)
+                      navigateToDetail(app.id)
                     }}
                     onTogglePause={() => {
                       const store = useAppsStore.getState()
@@ -395,7 +440,7 @@ export function HomePageNew() {
               setCurrentTab(tab)
               setView('apps')
             }}
-            onSelectApp={(appId) => setDetailAppId(appId)}
+            onSelectApp={(appId) => navigateToDetail(appId)}
             onCreateAutomation={() => {
               setCurrentTab('my-digital-humans')
               setShowInstallDialog(true)
