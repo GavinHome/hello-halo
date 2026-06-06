@@ -310,7 +310,7 @@ export function AppChatView({ appId, spaceId }: AppChatViewProps) {
     <div className="flex flex-col h-full">
       {/* Message area */}
       <div ref={scrollRef} className="flex-1 overflow-y-auto" onScroll={handleScroll}>
-        <div className="max-w-3xl mx-auto py-6 px-4">
+        <div className="sm:max-w-3xl sm:mx-auto py-6 px-2 sm:px-4">
           {/* Empty state hint */}
           {loadState === 'empty' && !hasStreamingContent && (
             <div className="flex items-center justify-center py-12">

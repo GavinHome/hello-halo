@@ -61,7 +61,7 @@ export const MessageRow = memo(function MessageRow({
   if (message.role === 'assistant' && (hasInlineThoughts || hasSeparatedThoughts)) {
     return (
       <div className={`flex justify-start pb-4 ${className}`}>
-        <div className="w-[85%]">
+        <div className="w-full sm:w-[85%]">
           {hasInlineThoughts ? (
             <CollapsedThoughtProcess
               thoughts={message.thoughts as Thought[]}
@@ -114,7 +114,7 @@ export const MessageRow = memo(function MessageRow({
     return (
       <div className={`pb-4 ${className}`}>
         <div className="flex justify-start">
-          <div className="w-[85%]">
+          <div className="w-full sm:w-[85%]">
             <MessageItem
               message={message}
               previousCost={previousCost}

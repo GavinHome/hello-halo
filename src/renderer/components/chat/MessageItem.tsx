@@ -294,7 +294,7 @@ export const MessageItem = memo(function MessageItem({ message, previousCost = 0
 
   // Message bubble content
   const bubble = isErrorOnly ? (
-    <div className={`${!isInContainer ? 'w-[85%]' : 'w-full'}`}>
+    <div className={`${!isInContainer ? 'w-full sm:w-[85%]' : 'w-full'}`}>
       <div className="rounded-2xl px-4 py-3 bg-destructive/10 border border-destructive/30">
         <div className="flex items-center gap-2 text-destructive">
           <svg className="w-4 h-4 shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
@@ -311,7 +311,7 @@ export const MessageItem = memo(function MessageItem({ message, previousCost = 0
     <div
       className={`rounded-2xl px-4 py-3 ${
         isUser ? 'message-user' : 'message-assistant'
-      } ${isStreaming ? 'streaming-message' : ''} ${isWorking ? 'message-working' : ''} ${!isInContainer ? 'max-w-[85%]' : 'w-full'}`}
+      } ${isStreaming ? 'streaming-message' : ''} ${isWorking ? 'message-working' : ''} ${!isInContainer ? (isUser ? 'max-w-[85%]' : 'w-full sm:max-w-[85%]') : 'w-full'}`}
     >
       {/* Working indicator - shows when AI is working */}
       {isWorking && !isUser && (
