@@ -30,13 +30,14 @@ import { useAppsPageStore } from '../stores/apps-page.store'
 import type { InstalledApp } from '../../shared/apps/app-types'
 import type { AppType } from '../../shared/apps/spec-types'
 import { DigitalHumanDetailNew } from '../components/apps/DigitalHumanDetailNew'
+import { AppInstallDialog } from '../components/apps/AppInstallDialog'
 
 export function HomePageNew() {
   const { t } = useTranslation()
   const { setView: setViewRaw } = useAppStore()
   const { haloSpace, spaces, loadSpaces, setCurrentSpace, refreshCurrentSpace, updateSpace, deleteSpace } = useSpaceStore()
   const { apps, loadApps } = useAppsStore()
-  const { setCurrentTab, setShowInstallDialog, openMarketplaceFilteredBy } = useAppsPageStore()
+  const { setCurrentTab, openMarketplaceFilteredBy } = useAppsPageStore()
 
   // Wrapper for setView that saves scroll position before navigating away
   const scrollRef = useRef<HTMLElement>(null)
@@ -80,6 +81,7 @@ export function HomePageNew() {
 
   // Dialog state
   const [showCreateDialog, setShowCreateDialog] = useState(false)
+  const [showInstallDialog, setShowInstallDialog] = useState(false)
   // Edit dialog state
   const [editingSpace, setEditingSpace] = useState<Space | null>(null)
   const [editSpaceName, setEditSpaceName] = useState('')
@@ -295,11 +297,7 @@ export function HomePageNew() {
                 onSelectApp={(appId) => {
                   navigateToDetail(appId)
                 }}
-                onCreateAutomation={() => {
-                  setCurrentTab('my-digital-humans')
-                  setShowInstallDialog(true)
-                  setView('apps')
-                }}
+                onCreateAutomation={() => setShowInstallDialog(true)}
                 onBrowseSkillsMarket={() => {
                   setView('apps')
                   void openMarketplaceFilteredBy('skill')
@@ -390,10 +388,7 @@ export function HomePageNew() {
                 <LayoutToggle value={dhLayout} onChange={setDhLayout} />
                 {/* Create button */}
                 <button
-                  onClick={() => {
-                    setCurrentTab('my-digital-humans')
-                    setView('apps')
-                  }}
+                  onClick={() => setShowInstallDialog(true)}
                   className="flex items-center gap-1 px-3 py-1 text-sm text-primary hover:bg-primary/10 rounded-lg transition-colors"
                 >
                   <Plus className="w-4 h-4" />
@@ -441,11 +436,7 @@ export function HomePageNew() {
               setView('apps')
             }}
             onSelectApp={(appId) => navigateToDetail(appId)}
-            onCreateAutomation={() => {
-              setCurrentTab('my-digital-humans')
-              setShowInstallDialog(true)
-              setView('apps')
-            }}
+            onCreateAutomation={() => setShowInstallDialog(true)}
             onBrowseSkillsMarket={() => {
               setView('apps')
               void openMarketplaceFilteredBy('skill')
@@ -463,6 +454,10 @@ export function HomePageNew() {
           onClose={() => setShowCreateDialog(false)}
           onCreated={() => setShowCreateDialog(false)}
         />
+      )}
+
+      {showInstallDialog && (
+        <AppInstallDialog onClose={() => setShowInstallDialog(false)} />
       )}
 
       {/* Edit Space Dialog */}
@@ -577,6 +572,7 @@ function StudioCard({
           onOpenList={onOpenAutomationList}
           onSelectApp={onSelectApp}
           emptyAction={{ label: t('Create'), onAction: onCreateAutomation }}
+          createAction={onCreateAutomation}
         />
         <StudioRow
           label={t('Skills')}
@@ -612,11 +608,12 @@ interface StudioRowProps {
   onOpenList: () => void
   onSelectApp: (appId: string) => void
   emptyAction: { label: string; onAction: () => void }
+  createAction?: () => void
 }
 
 const PREVIEW_COUNT = 3
 
-function StudioRow({ label, type, apps, onOpenList, onSelectApp, emptyAction }: StudioRowProps) {
+function StudioRow({ label, type, apps, onOpenList, onSelectApp, emptyAction, createAction }: StudioRowProps) {
   const isEmpty = apps.length === 0
   const previewApps = apps.slice(0, PREVIEW_COUNT)
   const extraCount = Math.max(0, apps.length - PREVIEW_COUNT)
@@ -624,35 +621,51 @@ function StudioRow({ label, type, apps, onOpenList, onSelectApp, emptyAction }: 
   const showStatusDot = type === 'automation'
 
   return (
-    <div
-      onClick={e => {
-        e.stopPropagation()
-        if (isEmpty) emptyAction.onAction()
-        else onOpenList()
-      }}
-      className="flex items-center gap-2 py-1 px-1 -mx-1 rounded hover:bg-secondary/60 transition-colors cursor-pointer"
-    >
-      <span className="text-xs font-medium text-foreground flex-shrink-0">{label}</span>
-      <span className="text-[11px] text-muted-foreground flex-shrink-0 tabular-nums">{apps.length}</span>
+    <div className="flex items-center gap-2 py-1 px-1 -mx-1 rounded">
+      <div
+        onClick={e => {
+          e.stopPropagation()
+          if (isEmpty) emptyAction.onAction()
+          else onOpenList()
+        }}
+        className="flex items-center gap-2 flex-1 min-w-0 cursor-pointer hover:bg-secondary/60 transition-colors rounded px-1"
+      >
+        <span className="text-xs font-medium text-foreground flex-shrink-0">{label}</span>
+        <span className="text-[11px] text-muted-foreground flex-shrink-0 tabular-nums">{apps.length}</span>
 
-      {isEmpty ? (
-        <span className="text-xs text-muted-foreground/80 truncate flex-1 min-w-0">
-          {emptyAction.label}
-        </span>
-      ) : (
-        <span className="flex items-center gap-1.5 flex-1 min-w-0 overflow-hidden">
-          {previewApps.map(app => (
-            <AppPreviewChip
-              key={app.id}
-              app={app}
-              showStatusDot={showStatusDot}
-              onSelect={() => onSelectApp(app.id)}
-            />
-          ))}
-          {extraCount > 0 && (
-            <span className="text-[11px] text-muted-foreground flex-shrink-0">+{extraCount}</span>
-          )}
-        </span>
+        {isEmpty ? (
+          <span className="text-xs text-muted-foreground/80 truncate flex-1 min-w-0">
+            {emptyAction.label}
+          </span>
+        ) : (
+          <span className="flex items-center gap-1.5 flex-1 min-w-0 overflow-hidden">
+            {previewApps.map(app => (
+              <AppPreviewChip
+                key={app.id}
+                app={app}
+                showStatusDot={showStatusDot}
+                onSelect={() => onSelectApp(app.id)}
+              />
+            ))}
+            {extraCount > 0 && (
+              <span className="text-[11px] text-muted-foreground flex-shrink-0">+{extraCount}</span>
+            )}
+          </span>
+        )}
+      </div>
+
+      {/* Create button - always visible for automation type */}
+      {createAction && (
+        <button
+          onClick={e => {
+            e.stopPropagation()
+            createAction()
+          }}
+          className="p-1 rounded sm:hover:bg-secondary/60 transition-colors flex-shrink-0"
+          title="Create"
+        >
+          <Plus className="w-3.5 h-3.5 text-muted-foreground" />
+        </button>
       )}
     </div>
   )
@@ -836,6 +849,7 @@ function StudioSection({
               onOpenList={() => onOpenTab('my-digital-humans')}
               onSelectApp={onSelectApp}
               emptyAction={{ label: t('Create'), onAction: onCreateAutomation }}
+              createAction={onCreateAutomation}
             />
             <StudioRow
               label={t('Skills')}
