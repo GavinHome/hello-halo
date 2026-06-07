@@ -582,7 +582,10 @@ export function GuidePage() {
   const goNext = useCallback(() => {
     setStep(prev => {
       const idx = STEPS.indexOf(prev)
-      return STEPS[Math.min(idx + 1, STEPS.length - 1)]
+      let next = STEPS[Math.min(idx + 1, STEPS.length - 1)]
+      // Skip wechat step (deferred — will be added back later)
+      if (next === 'wechat') next = STEPS[Math.min(idx + 2, STEPS.length - 1)]
+      return next
     })
   }, [])
 
@@ -594,10 +597,10 @@ export function GuidePage() {
         setAiSubStep('select')
         return 'aiModel'
       }
-      // qrScan is a post-completion step — back goes to wechat (last real step)
-      if (prev === 'qrScan') return 'wechat'
-      // done step back goes to wechat
-      if (prev === 'done') return 'wechat'
+      // qrScan is a post-completion step — back goes to remote
+      if (prev === 'qrScan') return 'remote'
+      // done step back goes to remote (wechat is skipped)
+      if (prev === 'done') return 'remote'
       return STEPS[Math.max(idx - 1, 0)]
     })
   }, [aiSubStep])
@@ -673,9 +676,16 @@ export function GuidePage() {
     } catch { /* best-effort */ }
   }, [updateConfig, setView])
 
-  // Navigate from done step to qrScan or finish
-  const handleDone = useCallback(() => {
+  // Navigate from done step to qrScan or finish.
+  // When going to qrScan, we must set isFirstLaunch=false in the backend
+  // BEFORE showing the QR code, so the phone won't enter the guide after scanning.
+  // But we must NOT call updateConfig() here — otherwise App.tsx would unmount
+  // the GuidePage (since config.isFirstLaunch becomes false in the store).
+  const handleDone = useCallback(async () => {
     if (remoteEnabled) {
+      try {
+        await api.setConfig({ isFirstLaunch: false })
+      } catch { /* best-effort */ }
       setStep('qrScan')
     } else {
       handleFinishGuide()
