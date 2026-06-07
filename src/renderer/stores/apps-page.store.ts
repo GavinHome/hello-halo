@@ -177,7 +177,7 @@ export const useAppsPageStore = create<AppsPageState>()(
   availableUpdates: [],
 
   // ── IM Session Panel ────────────────────────
-  imPanelOpen: true,
+  imPanelOpen: false,
   selectedImSession: null,
   imSessions: [],
   imSessionsAppId: null,
@@ -206,7 +206,7 @@ export const useAppsPageStore = create<AppsPageState>()(
     set({ selectedAppId: appId, detailView: { type: 'session-detail', appId, runId, sessionKey } }),
 
   openAppChat: (appId, spaceId) =>
-    set({ selectedAppId: appId, detailView: { type: 'app-chat', appId, spaceId }, lastAutomationTab: 'chat' }),
+    set({ selectedAppId: appId, detailView: { type: 'app-chat', appId, spaceId }, lastAutomationTab: 'chat', imPanelOpen: false }),
 
   openAppConfig: (appId) =>
     set({ selectedAppId: appId, detailView: { type: 'app-config', appId }, lastAutomationTab: 'config' }),
@@ -239,7 +239,7 @@ export const useAppsPageStore = create<AppsPageState>()(
     initialAppId: null,
     showInstallDialog: false,
     currentTab: 'my-digital-humans',
-    imPanelOpen: true,
+    imPanelOpen: false,
     selectedImSession: null,
     imSessions: [],
     imSessionsAppId: null,

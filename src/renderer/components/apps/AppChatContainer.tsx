@@ -104,8 +104,8 @@ export function AppChatContainer({ appId, spaceId }: AppChatContainerProps) {
       {/* Right panel — session list */}
       {imPanelOpen && (
         <div className="
-          fixed inset-0 z-50 bg-background
-          sm:relative sm:inset-auto sm:z-auto sm:w-64 sm:border-l sm:border-border
+          fixed inset-0 z-50 bg-background pt-[var(--sat)]
+          sm:relative sm:inset-auto sm:z-auto sm:pt-0 sm:w-64 sm:border-l sm:border-border
         ">
           <ImSessionPanel
             appId={appId}

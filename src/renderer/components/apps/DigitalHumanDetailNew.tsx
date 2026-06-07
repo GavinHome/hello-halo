@@ -35,6 +35,7 @@ export function DigitalHumanDetailNew({ appId, onBack }: DigitalHumanDetailNewPr
     selectApp,
     clearSelection,
     openActivityThread,
+    openAppChat,
   } = useAppsPageStore()
 
   // Resolve the app and space name
@@ -52,10 +53,16 @@ export function DigitalHumanDetailNew({ appId, onBack }: DigitalHumanDetailNewPr
   // Initialize the page store state for this app
   useEffect(() => {
     if (app) {
-      selectApp(app.id, app.status === 'uninstalled' ? 'uninstalled' : app.spec.type, app.spaceId ?? undefined)
+      const appType = app.status === 'uninstalled' ? 'uninstalled' : app.spec.type
+      // For automation apps with spaceId, always open Native Chat directly
+      if (appType === 'automation' && app.spaceId) {
+        openAppChat(app.id, app.spaceId)
+      } else {
+        selectApp(app.id, appType, app.spaceId ?? undefined)
+      }
     }
     return () => { clearSelection() }
-  }, [app, selectApp, clearSelection])
+  }, [app, selectApp, clearSelection, openAppChat])
 
   // Login notice logic
   const resolvedSpec = useMemo(
