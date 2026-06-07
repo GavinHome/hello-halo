@@ -30,7 +30,7 @@ import type { AppView } from '../types'
 
 // ── Types ────────────────────────────────────────────────────────
 
-type GuideStep = 'welcome' | 'language' | 'appearance' | 'aiModel' | 'remote' | 'wechat' | 'done' | 'qrScan'
+type GuideStep = 'welcome' | 'language' | 'appearance' | 'aiModel' | 'remote' | 'qrScan' | 'done' | 'wechat'
 
 type Appearance = 'system' | 'light' | 'dark'
 
@@ -48,7 +48,7 @@ const APPEARANCES: { value: Appearance; icon: typeof Sun; labelKey: 'appearanceS
 
 // ── Component ────────────────────────────────────────────────────
 
-const STEPS: GuideStep[] = ['welcome', 'language', 'appearance', 'aiModel', 'remote', 'wechat', 'done', 'qrScan']
+const STEPS: GuideStep[] = ['welcome', 'language', 'appearance', 'aiModel', 'remote', 'qrScan', 'done', 'wechat']
 
 const ICON_MAP: Record<string, typeof Brain> = {
   'log-in': ArrowRight,
@@ -579,15 +579,24 @@ export function GuidePage() {
     updateConfig({ appearance: { theme: value } })
   }, [])
 
-  const goNext = useCallback(() => {
-    setStep(prev => {
-      const idx = STEPS.indexOf(prev)
-      let next = STEPS[Math.min(idx + 1, STEPS.length - 1)]
-      // Skip wechat step (deferred — will be added back later)
-      if (next === 'wechat') next = STEPS[Math.min(idx + 2, STEPS.length - 1)]
-      return next
-    })
-  }, [])
+  const goNext = useCallback(async () => {
+    const prev = step
+    const idx = STEPS.indexOf(prev)
+    let next = STEPS[Math.min(idx + 1, STEPS.length - 1)]
+    // Skip wechat step (deferred)
+    if (next === 'wechat') next = STEPS[Math.min(idx + 2, STEPS.length - 1)]
+    // Skip qrScan if remote not enabled
+    if (prev === 'remote' && !remoteEnabled) {
+      next = 'done'
+    }
+    // When entering qrScan, set isFirstLaunch=false so phone won't enter guide
+    if (next === 'qrScan') {
+      try {
+        await api.setConfig({ isFirstLaunch: false })
+      } catch { /* best-effort */ }
+    }
+    setStep(next)
+  }, [remoteEnabled, step])
 
   const goBack = useCallback(() => {
     setStep(prev => {
@@ -597,13 +606,13 @@ export function GuidePage() {
         setAiSubStep('select')
         return 'aiModel'
       }
-      // qrScan is a post-completion step — back goes to remote
+      // done step back goes to qrScan (if remote) or remote
+      if (prev === 'done') return remoteEnabled ? 'qrScan' : 'remote'
+      // qrScan back goes to remote
       if (prev === 'qrScan') return 'remote'
-      // done step back goes to remote (wechat is skipped)
-      if (prev === 'done') return 'remote'
       return STEPS[Math.max(idx - 1, 0)]
     })
-  }, [aiSubStep])
+  }, [aiSubStep, remoteEnabled])
 
   const handleSelectProvider = useCallback(async (providerType: string) => {
     // OAuth providers (e.g. claude) require the full SetupPage flow with
@@ -676,21 +685,10 @@ export function GuidePage() {
     } catch { /* best-effort */ }
   }, [updateConfig, setView])
 
-  // Navigate from done step to qrScan or finish.
-  // When going to qrScan, we must set isFirstLaunch=false in the backend
-  // BEFORE showing the QR code, so the phone won't enter the guide after scanning.
-  // But we must NOT call updateConfig() here — otherwise App.tsx would unmount
-  // the GuidePage (since config.isFirstLaunch becomes false in the store).
-  const handleDone = useCallback(async () => {
-    if (remoteEnabled) {
-      try {
-        await api.setConfig({ isFirstLaunch: false })
-      } catch { /* best-effort */ }
-      setStep('qrScan')
-    } else {
-      handleFinishGuide()
-    }
-  }, [remoteEnabled, handleFinishGuide])
+  // Navigate from done step to finish.
+  const handleDone = useCallback(() => {
+    handleFinishGuide()
+  }, [handleFinishGuide])
 
   // ── Step renderers ────────────────────────────────────────────
 
@@ -886,28 +884,32 @@ export function GuidePage() {
       </div>
 
       {qrCode ? (
-        <div className="flex flex-col items-center gap-6">
-          <div className="bg-white p-3 rounded-xl">
-            <img src={qrCode} alt="QR Code" className="w-48 h-48" />
+        <div className="flex items-center gap-6">
+          {/* Left: QR code */}
+          <div className="bg-white p-3 rounded-xl shrink-0">
+            <img src={qrCode} alt="QR Code" className="w-40 h-40" />
           </div>
-          {remoteStatus?.server?.token && (
-            <div className="flex flex-col items-center gap-1">
-              <span className="text-sm text-muted-foreground">
-                {lang === 'zh-CN' ? '访问密码' : 'Access Password'}
-              </span>
-              <code className="text-lg bg-muted px-4 py-2 rounded-lg font-mono">
-                {remoteStatus.server.token}
-              </code>
-            </div>
-          )}
-          {remoteStatus?.server?.lanUrl && (
-            <div className="text-center text-sm">
-              <p className="text-muted-foreground mb-1">{t.qrScanAddressLabel}:</p>
-              <code className="text-sm bg-muted px-3 py-1 rounded">
-                {remoteStatus.server.lanUrl}
-              </code>
-            </div>
-          )}
+          {/* Right: password + address */}
+          <div className="flex flex-col gap-4 min-w-0">
+            {remoteStatus?.server?.token && (
+              <div>
+                <span className="text-xs text-muted-foreground">
+                  {lang === 'zh-CN' ? '访问密码' : 'Access Password'}
+                </span>
+                <div className="text-base bg-muted px-3 py-1.5 rounded-lg font-mono mt-0.5">
+                  {remoteStatus.server.token}
+                </div>
+              </div>
+            )}
+            {remoteStatus?.server?.lanUrl && (
+              <div>
+                <span className="text-xs text-muted-foreground">{t.qrScanAddressLabel}:</span>
+                <div className="text-xs bg-muted px-3 py-1.5 rounded mt-0.5 break-all">
+                  {remoteStatus.server.lanUrl}
+                </div>
+              </div>
+            )}
+          </div>
         </div>
       ) : (
         <div className="flex items-center justify-center py-12">
@@ -915,12 +917,12 @@ export function GuidePage() {
         </div>
       )}
 
-      <div className="flex flex-col gap-3">
-        <button
-          onClick={handleFinishGuide}
-          className="flex items-center justify-center gap-2 px-8 py-3 bg-primary text-primary-foreground rounded-xl font-medium hover:opacity-90 transition-opacity"
-        >
-          {t.doneButton} <ArrowRight className="w-4 h-4" />
+      <div className="flex gap-3">
+        <button onClick={goBack} className="flex items-center gap-1 px-4 py-2 text-sm text-muted-foreground hover:text-foreground">
+          <ChevronLeft className="w-4 h-4" /> {t.back}
+        </button>
+        <button onClick={goNext} className="flex items-center gap-2 px-6 py-2 bg-primary text-primary-foreground rounded-xl font-medium ml-auto hover:opacity-90">
+          {t.next} <ArrowRight className="w-4 h-4" />
         </button>
       </div>
     </div>
@@ -1010,7 +1012,7 @@ export function GuidePage() {
         {/* Progress — hide on welcome, done, and qrScan (post-completion) */}
         {step !== 'welcome' && step !== 'done' && step !== 'qrScan' && (
           <div className="flex items-center justify-center gap-1.5 mb-12">
-            {STEPS.slice(1, -2).map(s => (
+            {STEPS.slice(1, -2).filter(s => s !== 'wechat').map(s => (
               <div
                 key={s}
                 className={`h-1 rounded-full transition-all ${
