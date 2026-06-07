@@ -30,7 +30,7 @@ import type { AppView } from '../types'
 
 // ── Types ────────────────────────────────────────────────────────
 
-type GuideStep = 'welcome' | 'language' | 'appearance' | 'aiModel' | 'remote' | 'wechat' | 'done'
+type GuideStep = 'welcome' | 'language' | 'appearance' | 'aiModel' | 'remote' | 'wechat' | 'done' | 'qrScan'
 
 type Appearance = 'system' | 'light' | 'dark'
 
@@ -48,7 +48,7 @@ const APPEARANCES: { value: Appearance; icon: typeof Sun; labelKey: 'appearanceS
 
 // ── Component ────────────────────────────────────────────────────
 
-const STEPS: GuideStep[] = ['welcome', 'language', 'appearance', 'aiModel', 'remote', 'wechat', 'done']
+const STEPS: GuideStep[] = ['welcome', 'language', 'appearance', 'aiModel', 'remote', 'wechat', 'done', 'qrScan']
 
 const ICON_MAP: Record<string, typeof Brain> = {
   'log-in': ArrowRight,
@@ -557,6 +557,8 @@ export function GuidePage() {
     return (config?.appearance?.theme as Appearance) || 'system'
   })
   const [remoteEnabled, setRemoteEnabled] = useState(false)
+  const [qrCode, setQrCode] = useState<string | null>(null)
+  const [remoteStatus, setRemoteStatus] = useState<any>(null)
   const [wechatEnabled, setWechatEnabled] = useState(false)
   const [saving, setSaving] = useState(false)
 
@@ -592,6 +594,10 @@ export function GuidePage() {
         setAiSubStep('select')
         return 'aiModel'
       }
+      // qrScan is a post-completion step — back goes to wechat (last real step)
+      if (prev === 'qrScan') return 'wechat'
+      // done step back goes to wechat
+      if (prev === 'done') return 'wechat'
       return STEPS[Math.max(idx - 1, 0)]
     })
   }, [aiSubStep])
@@ -626,15 +632,18 @@ export function GuidePage() {
     setPresetProvider(null)
   }, [])
 
+  // Save appearance config (without setting isFirstLaunch=false yet).
+  // isFirstLaunch is set to false only when the user fully exits the guide
+  // (via handleDone or handleGetStarted), ensuring the done/qrScan steps
+  // remain visible while the guide is still mounted.
   const handleSave = useCallback(async () => {
     setSaving(true)
     try {
-      // 只保存外观设置，不设置 isFirstLaunch: false，这样 GuidePage 会继续显示
       await api.setConfig({
         appearance: { theme: appearance },
       })
 
-      // 完整刷新并同步配置，确保 config.aiSources 是最新的
+      // Refresh and sync config
       const configResult = await api.getConfig()
       if (configResult.success && configResult.data) {
         updateConfig(configResult.data)
@@ -644,29 +653,34 @@ export function GuidePage() {
     }
     setSaving(false)
 
-    // Stay on done step so user sees the success message
-    // The "Get Started" button on done step advances to home
+    // Go to done step
     setStep('done')
-  }, [appearance])
+  }, [appearance, updateConfig])
 
-  const handleGetStarted = async () => {
-    try {
-      // 设置 isFirstLaunch: false
-      await api.setConfig({
-        isFirstLaunch: false,
-      })
-
-      // 刷新配置
-      const result = await api.getConfig()
-      if (result.success && result.data) {
-        updateConfig(result.data)
-      }
-    } catch {
-      // Continue even if save fails
-    }
-    // 直接设置 view 为 home
+  // Mark guide as fully complete and navigate away.
+  // This is the ONLY place that sets isFirstLaunch=false, so App.tsx
+  // won't unmount GuidePage until the user has seen all steps.
+  const handleFinishGuide = useCallback(async () => {
+    // Set view to 'home' BEFORE updating config, so when App.tsx switches
+    // from <GuidePage> to renderView(), the view is already 'home'.
     setView('home')
-  }
+    try {
+      await api.setConfig({ isFirstLaunch: false })
+      const configResult = await api.getConfig()
+      if (configResult.success && configResult.data) {
+        updateConfig(configResult.data)
+      }
+    } catch { /* best-effort */ }
+  }, [updateConfig, setView])
+
+  // Navigate from done step to qrScan or finish
+  const handleDone = useCallback(() => {
+    if (remoteEnabled) {
+      setStep('qrScan')
+    } else {
+      handleFinishGuide()
+    }
+  }, [remoteEnabled, handleFinishGuide])
 
   // ── Step renderers ────────────────────────────────────────────
 
@@ -788,46 +802,115 @@ export function GuidePage() {
     />
   )
 
-  const renderRemote = () => (
+  const renderRemote = () => {
+    const handleEnableRemote = async () => {
+      setRemoteEnabled(true)
+      try {
+        // Enable remote access
+        const response = await api.enableRemoteAccess()
+        if (response.success && response.data) {
+          setRemoteStatus(response.data)
+          // Generate QR code with token
+          const qrResponse = await api.getRemoteQRCode(true)
+          if (qrResponse.success && qrResponse.data) {
+            setQrCode((qrResponse.data as any).qrCode)
+          }
+        }
+      } catch (error) {
+        console.error('[GuidePage] Failed to enable remote access:', error)
+      }
+    }
+
+    return (
+      <div className="flex flex-col gap-8">
+        <div>
+          <Wifi className="w-10 h-10 text-primary mb-4" />
+          <h2 className="text-2xl font-semibold mb-2">{t.remoteStepTitle}</h2>
+          <p className="text-muted-foreground">{t.remoteStepSubtitle}</p>
+        </div>
+        <div className="space-y-3">
+          <button
+            onClick={handleEnableRemote}
+            className={`w-full flex items-center justify-between p-5 rounded-xl border-2 transition-all text-left
+              ${remoteEnabled ? 'border-primary bg-primary/5' : 'border-border hover:border-primary/30 bg-card'}`}
+          >
+            <div>
+              <div className="font-medium mb-1">{t.remoteEnableTitle}</div>
+              <div className="text-sm text-muted-foreground">{t.remoteEnableDescription}</div>
+            </div>
+            <div className={`w-5 h-5 rounded-full border-2 flex items-center justify-center ${remoteEnabled ? 'border-primary bg-primary' : 'border-muted-foreground/30'}`}>
+              {remoteEnabled && <Check className="w-3 h-3 text-primary-foreground" />}
+            </div>
+          </button>
+          <button
+            onClick={() => setRemoteEnabled(false)}
+            className={`w-full flex items-center p-5 rounded-xl border-2 transition-all text-left
+              ${!remoteEnabled ? 'border-primary bg-primary/5' : 'border-border hover:border-primary/30 bg-card'}`}
+          >
+            <div className="flex items-center gap-2">
+              <div className={`w-5 h-5 rounded-full border-2 flex items-center justify-center ${!remoteEnabled ? 'border-primary bg-primary' : 'border-muted-foreground/30'}`}>
+                {!remoteEnabled && <Check className="w-3 h-3 text-primary-foreground" />}
+              </div>
+              <span className="font-medium">{t.remoteSkipOption}</span>
+            </div>
+          </button>
+        </div>
+        <div className="flex gap-3">
+          <button onClick={goBack} className="flex items-center gap-1 px-4 py-2 text-sm text-muted-foreground hover:text-foreground">
+            <ChevronLeft className="w-4 h-4" /> {t.back}
+          </button>
+          <button onClick={goNext} className="flex items-center gap-2 px-6 py-2 bg-primary text-primary-foreground rounded-xl font-medium ml-auto hover:opacity-90">
+            {t.next} <ArrowRight className="w-4 h-4" />
+          </button>
+        </div>
+      </div>
+    )
+  }
+
+  const renderQRScan = () => (
     <div className="flex flex-col gap-8">
       <div>
         <Wifi className="w-10 h-10 text-primary mb-4" />
-        <h2 className="text-2xl font-semibold mb-2">{t.remoteStepTitle}</h2>
-        <p className="text-muted-foreground">{t.remoteStepSubtitle}</p>
+        <h2 className="text-2xl font-semibold mb-2">{t.qrScanStepTitle}</h2>
+        <p className="text-muted-foreground">{t.qrScanStepSubtitle}</p>
       </div>
-      <div className="space-y-3">
-        <button
-          onClick={() => setRemoteEnabled(true)}
-          className={`w-full flex items-center justify-between p-5 rounded-xl border-2 transition-all text-left
-            ${remoteEnabled ? 'border-primary bg-primary/5' : 'border-border hover:border-primary/30 bg-card'}`}
-        >
-          <div>
-            <div className="font-medium mb-1">{t.remoteEnableTitle}</div>
-            <div className="text-sm text-muted-foreground">{t.remoteEnableDescription}</div>
+
+      {qrCode ? (
+        <div className="flex flex-col items-center gap-6">
+          <div className="bg-white p-3 rounded-xl">
+            <img src={qrCode} alt="QR Code" className="w-48 h-48" />
           </div>
-          <div className={`w-5 h-5 rounded-full border-2 flex items-center justify-center ${remoteEnabled ? 'border-primary bg-primary' : 'border-muted-foreground/30'}`}>
-            {remoteEnabled && <Check className="w-3 h-3 text-primary-foreground" />}
-          </div>
-        </button>
-        <button
-          onClick={() => setRemoteEnabled(false)}
-          className={`w-full flex items-center p-5 rounded-xl border-2 transition-all text-left
-            ${!remoteEnabled ? 'border-primary bg-primary/5' : 'border-border hover:border-primary/30 bg-card'}`}
-        >
-          <div className="flex items-center gap-2">
-            <div className={`w-5 h-5 rounded-full border-2 flex items-center justify-center ${!remoteEnabled ? 'border-primary bg-primary' : 'border-muted-foreground/30'}`}>
-              {!remoteEnabled && <Check className="w-3 h-3 text-primary-foreground" />}
+          {remoteStatus?.server?.token && (
+            <div className="flex flex-col items-center gap-1">
+              <span className="text-sm text-muted-foreground">
+                {lang === 'zh-CN' ? '访问密码' : 'Access Password'}
+              </span>
+              <code className="text-lg bg-muted px-4 py-2 rounded-lg font-mono">
+                {remoteStatus.server.token}
+              </code>
             </div>
-            <span className="font-medium">{t.remoteSkipOption}</span>
-          </div>
-        </button>
-      </div>
-      <div className="flex gap-3">
-        <button onClick={goBack} className="flex items-center gap-1 px-4 py-2 text-sm text-muted-foreground hover:text-foreground">
-          <ChevronLeft className="w-4 h-4" /> {t.back}
-        </button>
-        <button onClick={goNext} className="flex items-center gap-2 px-6 py-2 bg-primary text-primary-foreground rounded-xl font-medium ml-auto hover:opacity-90">
-          {t.next} <ArrowRight className="w-4 h-4" />
+          )}
+          {remoteStatus?.server?.lanUrl && (
+            <div className="text-center text-sm">
+              <p className="text-muted-foreground mb-1">{t.qrScanAddressLabel}:</p>
+              <code className="text-sm bg-muted px-3 py-1 rounded">
+                {remoteStatus.server.lanUrl}
+              </code>
+            </div>
+          )}
+        </div>
+      ) : (
+        <div className="flex items-center justify-center py-12">
+          <div className="w-6 h-6 border-2 border-primary/30 border-t-primary rounded-full animate-spin" />
+        </div>
+      )}
+
+      <div className="flex flex-col gap-3">
+        <button
+          onClick={handleFinishGuide}
+          className="flex items-center justify-center gap-2 px-8 py-3 bg-primary text-primary-foreground rounded-xl font-medium hover:opacity-90 transition-opacity"
+        >
+          {t.doneButton} <ArrowRight className="w-4 h-4" />
         </button>
       </div>
     </div>
@@ -888,7 +971,7 @@ export function GuidePage() {
         <p className="text-muted-foreground text-lg">{t.doneSubtitle}</p>
       </div>
       <button
-        onClick={handleGetStarted}
+        onClick={handleDone}
         className="flex items-center gap-2 px-8 py-3 bg-primary text-primary-foreground rounded-xl font-medium hover:opacity-90 transition-opacity"
       >
         {t.doneButton} <ArrowRight className="w-4 h-4" />
@@ -904,6 +987,7 @@ export function GuidePage() {
     appearance: renderAppearance,
     aiModel: renderAIModel,
     remote: renderRemote,
+    qrScan: renderQRScan,
     wechat: renderWechat,
     done: renderDone,
   }
@@ -913,10 +997,10 @@ export function GuidePage() {
   return (
     <div className="h-full w-full flex items-center justify-center bg-background">
       <div className="w-full max-w-lg px-6 py-12">
-        {/* Progress */}
-        {step !== 'welcome' && step !== 'done' && (
+        {/* Progress — hide on welcome, done, and qrScan (post-completion) */}
+        {step !== 'welcome' && step !== 'done' && step !== 'qrScan' && (
           <div className="flex items-center justify-center gap-1.5 mb-12">
-            {STEPS.slice(1, -1).map(s => (
+            {STEPS.slice(1, -2).map(s => (
               <div
                 key={s}
                 className={`h-1 rounded-full transition-all ${

@@ -37,6 +37,10 @@ interface GuideTranslations {
   remoteEnableTitle: string
   remoteEnableDescription: string
   remoteSkipOption: string
+  qrScanStepTitle: string
+  qrScanStepSubtitle: string
+  qrScanInstructions: string
+  qrScanAddressLabel: string
   wechatStepTitle: string
   wechatStepSubtitle: string
   wechatEnableTitle: string
@@ -70,6 +74,10 @@ const EN: GuideTranslations = {
   remoteEnableTitle: 'Enable remote access',
   remoteEnableDescription: 'Using Cloudflare tunnel or local network connection',
   remoteSkipOption: 'Not now, maybe later',
+  qrScanStepTitle: 'Scan to Connect',
+  qrScanStepSubtitle: 'Scan the QR code with your phone to add this server',
+  qrScanInstructions: 'Open Halo on your phone and scan this QR code',
+  qrScanAddressLabel: 'Server Address',
   wechatStepTitle: 'Connect WeChat',
   wechatStepSubtitle: 'Send messages to Halo in WeChat and assign tasks from your phone',
   wechatEnableTitle: 'Connect WeCom bot',
@@ -103,6 +111,10 @@ const ZH_CN: GuideTranslations = {
   remoteEnableTitle: '开启远程访问',
   remoteEnableDescription: '通过 Cloudflare 隧道或局域网连接',
   remoteSkipOption: '暂不开启,稍后再说',
+  qrScanStepTitle: '扫码连接',
+  qrScanStepSubtitle: '用手机扫描二维码添加此服务器',
+  qrScanInstructions: '在手机上打开 Halo 并扫描此二维码',
+  qrScanAddressLabel: '服务器地址',
   wechatStepTitle: '连接微信',
   wechatStepSubtitle: '在微信中给 Halo 发消息,随时在手机上派发任务',
   wechatEnableTitle: '连接企业微信机器人',
@@ -136,6 +148,10 @@ const ZH_TW: GuideTranslations = {
   remoteEnableTitle: '開啟遠端存取',
   remoteEnableDescription: '透過 Cloudflare 隧道或區域網路連線',
   remoteSkipOption: '暫不開啟,稍後再說',
+  qrScanStepTitle: '掃碼連接',
+  qrScanStepSubtitle: '用手機掃描二維碼添加此伺服器',
+  qrScanInstructions: '在手機上開啟 Halo並掃描此二維碼',
+  qrScanAddressLabel: '伺服器地址',
   wechatStepTitle: '連接微信',
   wechatStepSubtitle: '在微信中給 Halo 發送訊息,隨時在手機上派發任務',
   wechatEnableTitle: '連接企業微信機器人',
@@ -169,6 +185,10 @@ const JA: GuideTranslations = {
   remoteEnableTitle: 'リモートアクセスを有効化',
   remoteEnableDescription: 'Cloudflareトンネルまたはローカルネットワーク接続を使用',
   remoteSkipOption: '今はしない,また後で',
+  qrScanStepTitle: 'スキャンして接続',
+  qrScanStepSubtitle: 'スマホでQRコードをスキャンしてこのサーバーを追加',
+  qrScanInstructions: 'スマホでHaloを開き、このQRコードをスキャンしてください',
+  qrScanAddressLabel: 'サーバーアドレス',
   wechatStepTitle: 'WeChatを接続',
   wechatStepSubtitle: 'WeChatでHaloにメッセージを送信,スマホでタスクを割り当て',
   wechatEnableTitle: 'WeComボットを接続',
@@ -202,6 +222,10 @@ const DE: GuideTranslations = {
   remoteEnableTitle: 'Fernzugriff aktivieren',
   remoteEnableDescription: 'Mit Cloudflare-Tunnel oder lokaler Netzwerkverbindung',
   remoteSkipOption: 'Nicht jetzt, vielleicht später',
+  qrScanStepTitle: 'Scannen zum Verbinden',
+  qrScanStepSubtitle: 'Scannen Sie den QR-Code mit Ihrem Telefon, um diesen Server hinzuzufügen',
+  qrScanInstructions: 'Öffnen Sie Halo auf Ihrem Telefon und scannen Sie diesen QR-Code',
+  qrScanAddressLabel: 'Serveradresse',
   wechatStepTitle: 'WeChat verbinden',
   wechatStepSubtitle: 'Senden Sie Nachrichten an Halo in WeChat und weisen Sie Aufgaben von Ihrem Telefon zu',
   wechatEnableTitle: 'WeCom-Bot verbinden',
@@ -235,6 +259,10 @@ const ES: GuideTranslations = {
   remoteEnableTitle: 'Habilitar acceso remoto',
   remoteEnableDescription: 'Usando túnel de Cloudflare o conexión de red local',
   remoteSkipOption: 'Ahora no, quizás después',
+  qrScanStepTitle: 'Escanea para conectar',
+  qrScanStepSubtitle: 'Escanea el código QR con tu teléfono para añadir este servidor',
+  qrScanInstructions: 'Abre Halo en tu teléfono y escanea este código QR',
+  qrScanAddressLabel: 'Dirección del servidor',
   wechatStepTitle: 'Conectar WeChat',
   wechatStepSubtitle: 'Envía mensajes a Halo en WeChat y asigna tareas desde tu teléfono',
   wechatEnableTitle: 'Conectar bot de WeCom',
@@ -268,6 +296,10 @@ const FR: GuideTranslations = {
   remoteEnableTitle: 'Activer l\'accès à distance',
   remoteEnableDescription: 'Utilisant le tunnel Cloudflare ou la connexion réseau local',
   remoteSkipOption: 'Pas maintenant, peut-être plus tard',
+  qrScanStepTitle: 'Scanner pour connecter',
+  qrScanStepSubtitle: 'Scannez le code QR avec votre téléphone pour ajouter ce serveur',
+  qrScanInstructions: 'Ouvrez Halo sur votre téléphone et scannez ce code QR',
+  qrScanAddressLabel: 'Adresse du serveur',
   wechatStepTitle: 'Connecter WeChat',
   wechatStepSubtitle: 'Envoyez des messages à Halo dans WeChat et assignez des tâches depuis votre téléphone',
   wechatEnableTitle: 'Connecter le bot WeCom',
