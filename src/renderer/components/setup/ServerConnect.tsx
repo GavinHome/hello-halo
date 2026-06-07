@@ -14,6 +14,7 @@ import { useState, useRef, useEffect, useCallback } from 'react'
 import { Wifi, QrCode, ArrowRight, Loader2, AlertCircle, X, Server, ArrowLeft } from 'lucide-react'
 import { api } from '../../api'
 import { useTranslation } from '../../i18n'
+import { ScanLocalNetwork } from './ScanLocalNetwork'
 
 /** Info returned to the caller after a successful connection */
 export interface ServerAddedInfo {
@@ -422,6 +423,8 @@ export function ServerConnect({ onServerAdded, onBack }: ServerConnectProps) {
               <QrCode className="w-4 h-4" />
               {t('Scan QR Code')}
             </button>
+
+            <ScanLocalNetwork onSelect={(url) => { setServerUrl(url); setError(null) }} />
           </div>
         )}
 
