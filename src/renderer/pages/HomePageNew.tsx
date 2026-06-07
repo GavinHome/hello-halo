@@ -18,7 +18,7 @@ import {
 import { Header } from '../components/layout/Header'
 import { SpaceGuide } from '../components/space/SpaceGuide'
 import { CreateSpaceDialog } from '../components/space/CreateSpaceDialog'
-import { Blocks, ArrowRight, AlertCircle, SendHorizontal, Unplug, Bot, LayoutGrid, List, Play, Pause, ChevronDown } from 'lucide-react'
+import { Blocks, ArrowRight, AlertCircle, SendHorizontal, Unplug, Bot, LayoutGrid, List, Play, Pause, ChevronDown, AlignJustify, MessageSquare, HelpCircle, Clock } from 'lucide-react'
 import Avatar from 'boring-avatars'
 import { useIsMobile } from '../hooks/useIsMobile'
 
@@ -27,10 +27,37 @@ import { api } from '../api'
 import { useTranslation } from '../i18n'
 import { useAppsStore } from '../stores/apps.store'
 import { useAppsPageStore } from '../stores/apps-page.store'
-import type { InstalledApp } from '../../shared/apps/app-types'
+import type { InstalledApp, AppStatus } from '../../shared/apps/app-types'
 import type { AppType } from '../../shared/apps/spec-types'
+import type { ConversationMeta } from '../types'
 import { DigitalHumanDetailNew } from '../components/apps/DigitalHumanDetailNew'
 import { AppInstallDialog } from '../components/apps/AppInstallDialog'
+
+// Layout mode for space and digital human card sections
+type LayoutMode = 'list' | 'grid' | 'detail'
+
+// Filter out auto-generated empty conversation titles like "Chat 6-7 10:46"
+const AUTO_TITLE_PATTERN = /^Chat \d{1,2}-\d{1,2} \d{1,2}:\d{2}$/
+function isMeaningfulConversation(c: ConversationMeta): boolean {
+  if (!c.title || AUTO_TITLE_PATTERN.test(c.title)) return false
+  if (c.messageCount < 2) return false
+  return true
+}
+
+// Persistent storage keys for layout preferences
+const SPACE_LAYOUT_KEY = 'halo-space-layout'
+const DH_LAYOUT_KEY = 'halo-dh-layout'
+
+function readLayout(key: string, fallback: LayoutMode, isMobile: boolean): LayoutMode {
+  const valid: LayoutMode[] = ['grid', 'list', 'detail']
+  const saved = localStorage.getItem(key)
+  if (saved && valid.includes(saved as LayoutMode)) return saved as LayoutMode
+  return isMobile ? 'list' : fallback
+}
+
+function writeLayout(key: string, value: LayoutMode) {
+  localStorage.setItem(key, value)
+}
 
 export function HomePageNew() {
   const { t } = useTranslation()
@@ -56,12 +83,74 @@ export function HomePageNew() {
   // View mode: 'classic' (Halo+Studio side by side) or 'unified' (stacked sections)
   const [viewMode, setViewMode] = useState<'classic' | 'unified'>('unified')
   const isMobile = useIsMobile()
-  // Digital humans layout: 'list' (1 col) or 'grid' (2 col). Mobile defaults to list, desktop to grid.
-  const [dhLayout, setDhLayout] = useState<'list' | 'grid'>(() => isMobile ? 'list' : 'grid')
-  // Spaces layout: same toggle as digital humans
-  const [spaceLayout, setSpaceLayout] = useState<'list' | 'grid'>(() => isMobile ? 'list' : 'grid')
+  // Digital humans layout: 'list' (1 col), 'grid' (2 col), or 'detail' (1 col expanded)
+  const [dhLayout, setDhLayoutState] = useState<LayoutMode>(() => readLayout(DH_LAYOUT_KEY, 'grid', isMobile))
+  const setDhLayout = (v: LayoutMode) => { setDhLayoutState(v); writeLayout(DH_LAYOUT_KEY, v) }
+  // Spaces layout: 'list' (1 col), 'grid' (2 col), or 'detail' (1 col expanded with more info)
+  const [spaceLayout, setSpaceLayoutState] = useState<LayoutMode>(() => readLayout(SPACE_LAYOUT_KEY, 'grid', isMobile))
+  const setSpaceLayout = (v: LayoutMode) => { setSpaceLayoutState(v); writeLayout(SPACE_LAYOUT_KEY, v) }
+  // Space guide visibility: collapsed by default in list/detail modes
+  const [showSpaceGuide, setShowSpaceGuide] = useState(false)
   // Classic mode: always grid. Unified mode: respects spaceLayout state.
   const effectiveSpaceLayout = viewMode === 'classic' ? 'grid' : spaceLayout
+
+  // Fetch latest meaningful conversation per space for detail mode
+  const [latestConversations, setLatestConversations] = useState<Record<string, ConversationMeta | null>>({})
+  useEffect(() => {
+    if (effectiveSpaceLayout !== 'detail' || spaces.length === 0) return
+    const fetchAll = async () => {
+      const results: Record<string, ConversationMeta | null> = {}
+      await Promise.all(spaces.map(async (space) => {
+        if (space.isMissing) {
+          results[space.id] = null
+          return
+        }
+        try {
+          const res = await api.listConversations(space.id)
+          if (res.success && Array.isArray(res.data)) {
+            const meaningful = (res.data as ConversationMeta[]).find(c => isMeaningfulConversation(c))
+            results[space.id] = meaningful ?? null
+          } else {
+            results[space.id] = null
+          }
+        } catch {
+          results[space.id] = null
+        }
+      }))
+      setLatestConversations(results)
+    }
+    fetchAll()
+  }, [spaces, effectiveSpaceLayout])
+
+  // Fetch latest meaningful conversation per digital human for detail mode
+  const [dhLatestConversations, setDhLatestConversations] = useState<Record<string, ConversationMeta | null>>({})
+  useEffect(() => {
+    if (dhLayout !== 'detail') return
+    const dhApps = apps.filter(a => a.spec.type === 'automation' && a.status !== 'uninstalled' && a.spaceId)
+    if (dhApps.length === 0) return
+    const fetchAll = async () => {
+      const results: Record<string, ConversationMeta | null> = {}
+      await Promise.all(dhApps.map(async (app) => {
+        if (!app.spaceId) {
+          results[app.id] = null
+          return
+        }
+        try {
+          const res = await api.listConversations(app.spaceId)
+          if (res.success && Array.isArray(res.data)) {
+            const meaningful = (res.data as ConversationMeta[]).find(c => isMeaningfulConversation(c))
+            results[app.id] = meaningful ?? null
+          } else {
+            results[app.id] = null
+          }
+        } catch {
+          results[app.id] = null
+        }
+      }))
+      setDhLatestConversations(results)
+    }
+    fetchAll()
+  }, [apps, dhLayout])
 
   // Restore scroll position on mount (from sessionStorage, for returning from space/settings)
   useEffect(() => {
@@ -341,7 +430,18 @@ export function HomePageNew() {
 
         {/* Spaces Section */}
         <div className="mb-4 flex items-center justify-between">
-          <h3 className="text-sm font-medium text-muted-foreground">{t('Dedicated Spaces')}</h3>
+          <div className="flex items-center gap-1.5">
+            <h3 className="text-sm font-medium text-muted-foreground">{t('Dedicated Spaces')}</h3>
+            {effectiveSpaceLayout !== 'grid' && (
+              <button
+                onClick={() => setShowSpaceGuide(v => !v)}
+                className="p-0.5 rounded-full text-muted-foreground/60 hover:text-muted-foreground hover:bg-secondary transition-colors"
+                title={t('What is a space?')}
+              >
+                <HelpCircle className="w-3.5 h-3.5" />
+              </button>
+            )}
+          </div>
           <div className="flex items-center gap-1">
             {viewMode === 'unified' && (
               <LayoutToggle value={spaceLayout} onChange={setSpaceLayout} />
@@ -356,8 +456,8 @@ export function HomePageNew() {
           </div>
         </div>
 
-        {/* Space Guide - always visible */}
-        <SpaceGuide />
+        {/* Space Guide - always in grid mode, toggleable in list/detail modes */}
+        {(effectiveSpaceLayout === 'grid' || showSpaceGuide) && <SpaceGuide />}
 
         {spaces.length === 0 ? (
           <div className="text-center py-8 text-muted-foreground">
@@ -365,17 +465,23 @@ export function HomePageNew() {
           </div>
         ) : (
           <div className={`grid gap-4 ${effectiveSpaceLayout === 'grid' ? 'grid-cols-2' : 'grid-cols-1'}`}>
-            {spaces.map((space, i) => (
-              <SpaceCard
-                key={`${space.id}-${i}`}
-                space={space}
-                layout={effectiveSpaceLayout}
-                onClick={() => handleSpaceClick(space)}
-                onEdit={(e) => handleEditSpace(e, space)}
-                onDelete={(e) => handleDeleteSpace(e, space.id)}
-                formatTimeAgo={formatTimeAgo}
-              />
-            ))}
+            {spaces.map((space, i) => {
+              const spaceApps = apps.filter(a => a.spaceId === space.id && a.status !== 'uninstalled')
+              const latestConv = latestConversations[space.id] ?? null
+              return (
+                <SpaceCard
+                  key={`${space.id}-${i}`}
+                  space={space}
+                  layout={effectiveSpaceLayout}
+                  onClick={() => handleSpaceClick(space)}
+                  onEdit={(e) => handleEditSpace(e, space)}
+                  onDelete={(e) => handleDeleteSpace(e, space.id)}
+                  formatTimeAgo={formatTimeAgo}
+                  spaceApps={spaceApps}
+                  latestConversation={latestConv}
+                />
+              )
+            })}
           </div>
         )}
 
@@ -403,23 +509,31 @@ export function HomePageNew() {
               </div>
             ) : (
               <div className={`grid gap-4 ${dhLayout === 'grid' ? 'grid-cols-2' : 'grid-cols-1'}`}>
-                {automationApps.map((app) => (
-                  <DigitalHumanCard
-                    key={app.id}
-                    app={app}
-                    onClick={() => {
-                      navigateToDetail(app.id)
-                    }}
-                    onTogglePause={() => {
-                      const store = useAppsStore.getState()
-                      if (app.status === 'paused') {
-                        store.resumeApp(app.id)
-                      } else {
-                        store.pauseApp(app.id)
-                      }
-                    }}
-                  />
-                ))}
+                {automationApps.map((app) => {
+                  const associatedSpace = app.spaceId ? spaces.find(s => s.id === app.spaceId) : undefined
+                  const latestConv = dhLatestConversations[app.id] ?? null
+                  return (
+                    <DigitalHumanCard
+                      key={app.id}
+                      app={app}
+                      layout={dhLayout}
+                      associatedSpace={associatedSpace}
+                      latestConversation={latestConv}
+                      formatTimeAgo={formatTimeAgo}
+                      onClick={() => {
+                        navigateToDetail(app.id)
+                      }}
+                      onTogglePause={() => {
+                        const store = useAppsStore.getState()
+                        if (app.status === 'paused') {
+                          store.resumeApp(app.id)
+                        } else {
+                          store.pauseApp(app.id)
+                        }
+                      }}
+                    />
+                  )
+                })}
               </div>
             )}
           </div>
@@ -708,6 +822,10 @@ function AppPreviewChip({ app, showStatusDot, onSelect }: AppPreviewChipProps) {
 
 interface DigitalHumanCardProps {
   app: InstalledApp
+  layout?: LayoutMode
+  associatedSpace?: Space
+  latestConversation?: ConversationMeta | null
+  formatTimeAgo?: (dateStr: string) => string
   onClick: () => void
   onTogglePause: () => void
 }
@@ -721,10 +839,111 @@ const STATUS_CONFIG = {
   uninstalled: { dot: 'border border-muted-foreground/40', label: 'Uninstalled' },
 } as const
 
-function DigitalHumanCard({ app, onClick, onTogglePause }: DigitalHumanCardProps) {
+function DigitalHumanCard({ app, layout = 'grid', associatedSpace, latestConversation, formatTimeAgo, onClick, onTogglePause }: DigitalHumanCardProps) {
   const { t } = useTranslation()
   const statusInfo = STATUS_CONFIG[app.status] || STATUS_CONFIG.active
 
+  // Detail layout: expanded card with more info
+  if (layout === 'detail') {
+    return (
+      <div
+        onClick={onClick}
+        className="p-4 rounded-xl border border-border sm:hover:border-primary/40 sm:hover:bg-secondary/50 transition-all cursor-pointer group animate-fade-in"
+      >
+        <div className="flex items-start gap-3">
+          {/* Avatar/Icon */}
+          <div className="w-10 h-10 rounded-lg overflow-hidden flex-shrink-0">
+            <Avatar size={40} name={app.spec.name || app.id} variant="beam" colors={AVATAR_COLORS} />
+          </div>
+
+          {/* Content */}
+          <div className="flex-1 min-w-0">
+            <div className="flex items-center gap-2">
+              <span className={`w-1.5 h-1.5 rounded-full flex-shrink-0 ${statusInfo.dot}`} />
+              <span className="font-medium text-sm truncate">{app.spec.name}</span>
+            </div>
+            <p className="text-xs text-muted-foreground mt-1 line-clamp-2">
+              {app.spec.description || t('No description')}
+            </p>
+          </div>
+
+          {/* Actions */}
+          {(app.status === 'active' || app.status === 'paused') && (
+            <button
+              onClick={e => {
+                e.stopPropagation()
+                onTogglePause()
+              }}
+              className="p-1.5 rounded-lg opacity-100 sm:opacity-0 sm:group-hover:opacity-100 sm:hover:bg-secondary transition-all"
+              title={app.status === 'active' ? t('Pause') : t('Resume')}
+            >
+              {app.status === 'active' ? (
+                <Pause className="w-4 h-4 text-muted-foreground" />
+              ) : (
+                <Play className="w-4 h-4 text-primary" />
+              )}
+            </button>
+          )}
+        </div>
+
+        {/* Footer: status label */}
+        <div className="mt-3 pt-2 border-t border-border/50 flex items-center justify-between">
+          <span className="text-[11px] text-muted-foreground">{t(statusInfo.label)}</span>
+          {app.lastRunAt && (
+            <span className="text-[11px] text-muted-foreground/70">
+              {t('Last run')}: {new Date(app.lastRunAt).toLocaleDateString()}
+            </span>
+          )}
+        </div>
+
+        {/* Detail mode: additional info below */}
+        {/* Associated Space */}
+        {associatedSpace && (
+          <div className="mt-2 flex items-center gap-2">
+            <SpaceIcon iconId={associatedSpace.icon} size={14} />
+            <span className="text-xs truncate">{associatedSpace.name}</span>
+          </div>
+        )}
+
+        {/* Recent Conversation */}
+        {latestConversation && (
+          <div className="mt-2 flex items-start gap-2">
+            <MessageSquare className="w-3.5 h-3.5 text-primary/60 mt-0.5 shrink-0" />
+            <div className="min-w-0 flex-1">
+              <div className="text-sm truncate">{latestConversation.title || t('Untitled')}</div>
+              {latestConversation.preview && (
+                <div className="text-xs text-muted-foreground truncate mt-0.5">
+                  {latestConversation.preview}
+                </div>
+              )}
+            </div>
+            {formatTimeAgo && (
+              <span className="text-[10px] text-muted-foreground/60 shrink-0">
+                {formatTimeAgo(latestConversation.updatedAt)}
+              </span>
+            )}
+          </div>
+        )}
+
+        {/* Last Run Info */}
+        {app.lastRunAt && (
+          <div className="mt-2 flex items-center gap-2">
+            <Clock className="w-3.5 h-3.5 text-muted-foreground/60 shrink-0" />
+            <span className="text-xs">
+              {formatTimeAgo ? formatTimeAgo(new Date(app.lastRunAt).toISOString()) : new Date(app.lastRunAt).toLocaleDateString()}
+              {app.lastRunOutcome && (
+                <span className={`ml-1 ${app.lastRunOutcome === 'ok' ? 'text-green-600' : 'text-red-500'}`}>
+                  ({app.lastRunOutcome})
+                </span>
+              )}
+            </span>
+          </div>
+        )}
+      </div>
+    )
+  }
+
+  // Default: grid/list layout (original rendering)
   return (
     <div
       onClick={onClick}
@@ -883,44 +1102,185 @@ function StudioSection({
 }
 
 // ──────────────────────────────────────────────
-// Layout Toggle — single button to switch list/grid
+// Layout Toggle — single button to cycle list/grid/detail
 // ──────────────────────────────────────────────
 
 interface LayoutToggleProps {
-  value: 'list' | 'grid'
-  onChange: (mode: 'list' | 'grid') => void
+  value: LayoutMode
+  onChange: (mode: LayoutMode) => void
 }
+
+const LAYOUT_CYCLE: LayoutMode[] = ['grid', 'list', 'detail']
 
 function LayoutToggle({ value, onChange }: LayoutToggleProps) {
   const { t } = useTranslation()
-  const isList = value === 'list'
+  const cycle = () => {
+    const idx = LAYOUT_CYCLE.indexOf(value)
+    onChange(LAYOUT_CYCLE[(idx + 1) % LAYOUT_CYCLE.length])
+  }
+  const icons: Record<LayoutMode, React.ReactNode> = {
+    grid: <LayoutGrid className="w-4 h-4" />,
+    list: <List className="w-4 h-4" />,
+    detail: <AlignJustify className="w-4 h-4" />,
+  }
+  const titles: Record<LayoutMode, string> = {
+    grid: t('Grid view'),
+    list: t('List view'),
+    detail: t('Detail view'),
+  }
   return (
     <button
-      onClick={() => onChange(isList ? 'grid' : 'list')}
+      onClick={cycle}
       className="p-1.5 rounded-lg text-muted-foreground sm:hover:bg-secondary/50 transition-colors"
-      title={isList ? t('Grid view') : t('List view')}
+      title={titles[value]}
     >
-      {isList ? <LayoutGrid className="w-4 h-4" /> : <List className="w-4 h-4" />}
+      {icons[value]}
     </button>
   )
 }
 
 // ──────────────────────────────────────────────
-// Space Card — supports list and grid layouts
+// Status helpers for space card detail mode
+// ──────────────────────────────────────────────
+
+function StatusDot({ status }: { status: AppStatus }) {
+  const colors: Record<AppStatus, string> = {
+    active: 'bg-green-500',
+    paused: 'bg-yellow-500',
+    error: 'bg-red-500',
+    needs_login: 'bg-orange-500',
+    waiting_user: 'bg-blue-500',
+    uninstalled: 'bg-gray-300',
+  }
+  return <span className={`inline-block w-1.5 h-1.5 rounded-full ${colors[status] || 'bg-gray-400'}`} />
+}
+
+function getAppsStatusSummary(apps: { status: AppStatus }[], t: (key: string) => string): string {
+  const counts: Record<string, number> = {}
+  apps.forEach(app => {
+    const s = app.status === 'active' ? 'running' : app.status === 'paused' ? 'paused' : 'idle'
+    counts[s] = (counts[s] || 0) + 1
+  })
+  const parts: string[] = []
+  if (counts.running) parts.push(`${counts.running} ${t('running')}`)
+  if (counts.paused) parts.push(`${counts.paused} ${t('paused')}`)
+  if (counts.idle) parts.push(`${counts.idle} ${t('idle')}`)
+  return parts.join(' · ')
+}
+
+// ──────────────────────────────────────────────
+// Space Card — supports list, grid, and detail layouts
 // ──────────────────────────────────────────────
 
 interface SpaceCardProps {
   space: Space
-  layout: 'list' | 'grid'
+  layout: LayoutMode
   onClick: () => void
   onEdit: (e: React.MouseEvent) => void
   onDelete: (e: React.MouseEvent) => void
   formatTimeAgo: (dateStr: string) => string
+  spaceApps?: InstalledApp[]
+  latestConversation?: ConversationMeta | null
 }
 
-function SpaceCard({ space, layout, onClick, onEdit, onDelete, formatTimeAgo }: SpaceCardProps) {
+function SpaceCard({ space, layout, onClick, onEdit, onDelete, formatTimeAgo, spaceApps = [], latestConversation }: SpaceCardProps) {
   const { t } = useTranslation()
   const isMissing = space.isMissing
+
+  // Detail layout: expanded card with conversations and digital humans
+  if (layout === 'detail') {
+    return (
+      <div
+        onClick={onClick}
+        className={`px-4 py-3 rounded-xl border border-border sm:hover:border-primary/40 sm:hover:bg-secondary/50 transition-all cursor-pointer group animate-fade-in ${
+          isMissing ? 'opacity-70 border-dashed' : ''
+        }`}
+      >
+        {/* Title row */}
+        <div className="flex items-start justify-between">
+          <div className="flex items-center gap-2 min-w-0">
+            <SpaceIcon iconId={space.icon} size={20} />
+            <span className="font-medium truncate">{space.name}</span>
+            {isMissing && (
+              <span className="inline-flex items-center gap-1 rounded-full border border-border px-1.5 py-0.5 text-[10px] text-muted-foreground">
+                <Unplug className="w-3 h-3" />
+                {t('Unavailable')}
+              </span>
+            )}
+          </div>
+          <div className="flex items-center gap-1 opacity-100 sm:opacity-0 sm:group-hover:opacity-100 transition-all">
+            <button
+              onClick={(e) => { e.stopPropagation(); onEdit(e) }}
+              className="p-1 sm:hover:bg-secondary rounded transition-all"
+              title={t('Edit Space')}
+            >
+              <Pencil className="w-4 h-4 text-muted-foreground" />
+            </button>
+            <button
+              onClick={(e) => { e.stopPropagation(); onDelete(e) }}
+              className="p-1 sm:hover:bg-destructive/20 rounded transition-all"
+              title={t('Delete space')}
+            >
+              <Trash2 className="w-4 h-4 text-destructive" />
+            </button>
+          </div>
+        </div>
+
+        {/* Last active time - right below title */}
+        <p className="text-xs text-muted-foreground mt-1">
+          {isMissing
+            ? t('Path unavailable. Reconnect the drive to open this space.')
+            : `${formatTimeAgo(space.lastActiveAt || space.updatedAt)}${t('active')}`}
+        </p>
+
+        {/* Detail info section - below divider */}
+        {(latestConversation || spaceApps.length > 0) && (
+          <div className="mt-3 pt-2 border-t border-border/50">
+            {/* Recent conversation */}
+            {latestConversation && (
+              <div className="flex items-start gap-2">
+                <MessageSquare className="w-3.5 h-3.5 text-primary/60 mt-0.5 shrink-0" />
+                <div className="min-w-0 flex-1">
+                  <div className="text-sm truncate">{latestConversation.title || t('Untitled')}</div>
+                  {latestConversation.preview && (
+                    <div className="text-xs text-muted-foreground truncate mt-0.5">
+                      {latestConversation.preview}
+                    </div>
+                  )}
+                </div>
+                <span className="text-[10px] text-muted-foreground/60 shrink-0">
+                  {formatTimeAgo(latestConversation.updatedAt)}
+                </span>
+              </div>
+            )}
+
+            {/* Associated digital humans */}
+            {spaceApps.length > 0 && (
+              <div className={`${latestConversation ? 'mt-2' : ''}`}>
+                {/* Icon + status summary on one line */}
+                <div className="flex items-center gap-2">
+                  <Bot className="w-3.5 h-3.5 text-muted-foreground/60 shrink-0" />
+                  <span className="text-[11px] text-muted-foreground/70">
+                    {getAppsStatusSummary(spaceApps, t)}
+                  </span>
+                </div>
+                {/* Digital human names below - aligned with status text */}
+                <div className="mt-1.5 pl-5.5 flex items-center gap-2 flex-wrap min-w-0" style={{ paddingLeft: '22px' }}>
+                  {spaceApps.map(app => (
+                    <span key={app.id} className="text-xs inline-flex items-center gap-1">
+                      <Avatar size={14} name={app.spec.name || app.id} variant="beam" colors={AVATAR_COLORS} />
+                      <span className="truncate max-w-[100px]">{app.spec.name}</span>
+                      <StatusDot status={app.status} />
+                    </span>
+                  ))}
+                </div>
+              </div>
+            )}
+          </div>
+        )}
+      </div>
+    )
+  }
 
   if (layout === 'list') {
     return (
