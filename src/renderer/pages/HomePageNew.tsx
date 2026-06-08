@@ -19,10 +19,8 @@ import { Header } from '../components/layout/Header'
 import { SpaceGuide } from '../components/space/SpaceGuide'
 import { CreateSpaceDialog } from '../components/space/CreateSpaceDialog'
 import { Blocks, ArrowRight, AlertCircle, SendHorizontal, Unplug, Bot, LayoutGrid, List, Play, Pause, ChevronDown, AlignJustify, MessageSquare, HelpCircle, Clock } from 'lucide-react'
-import Avatar from 'boring-avatars'
+import { AppAvatar } from '../components/apps/AppAvatar'
 import { useIsMobile } from '../hooks/useIsMobile'
-
-const AVATAR_COLORS = ['#84B9EF', '#6C8EBF', '#3D5A80', '#98C1D9', '#E0FBFC']
 import { api } from '../api'
 import { useTranslation } from '../i18n'
 import { useAppsStore } from '../stores/apps.store'
@@ -853,7 +851,7 @@ function DigitalHumanCard({ app, layout = 'grid', associatedSpace, latestConvers
         <div className="flex items-start gap-3">
           {/* Avatar/Icon */}
           <div className="w-10 h-10 rounded-lg overflow-hidden flex-shrink-0">
-            <Avatar size={40} name={app.spec.name || app.id} variant="beam" colors={AVATAR_COLORS} />
+            <AppAvatar size={40} name={app.spec.name || app.id} />
           </div>
 
           {/* Content */}
@@ -952,7 +950,7 @@ function DigitalHumanCard({ app, layout = 'grid', associatedSpace, latestConvers
       <div className="flex items-start gap-3">
         {/* Avatar/Icon */}
         <div className="w-10 h-10 rounded-lg overflow-hidden flex-shrink-0">
-          <Avatar size={40} name={app.spec.name || app.id} variant="beam" colors={AVATAR_COLORS} />
+          <AppAvatar size={40} name={app.spec.name || app.id} />
         </div>
 
         {/* Content */}
@@ -1268,7 +1266,7 @@ function SpaceCard({ space, layout, onClick, onEdit, onDelete, formatTimeAgo, sp
                 <div className="mt-1.5 pl-5.5 flex items-center gap-2 flex-wrap min-w-0" style={{ paddingLeft: '22px' }}>
                   {spaceApps.map(app => (
                     <span key={app.id} className="text-xs inline-flex items-center gap-1">
-                      <Avatar size={14} name={app.spec.name || app.id} variant="beam" colors={AVATAR_COLORS} />
+                      <AppAvatar size={14} name={app.spec.name || app.id} />
                       <span className="truncate max-w-[100px]">{app.spec.name}</span>
                       <StatusDot status={app.status} />
                     </span>
