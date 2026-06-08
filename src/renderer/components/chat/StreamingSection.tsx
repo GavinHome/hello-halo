@@ -67,7 +67,7 @@ export function StreamingSection({
 }: StreamingSectionProps) {
   return (
     <div className={`flex justify-start animate-fade-in pb-4 ${className}`}>
-      <div className="w-[85%] relative">
+      <div className="w-full sm:w-[85%] relative">
         {/* Real-time thought process */}
         {(thoughts.length > 0 || isThinking) && (
           <ThoughtProcess thoughts={thoughts} isThinking={isThinking} />

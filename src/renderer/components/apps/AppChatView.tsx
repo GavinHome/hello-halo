@@ -352,7 +352,7 @@ export function AppChatView({ appId, spaceId }: AppChatViewProps) {
           {/* Generic error */}
           {!isGenerating && error && errorType !== 'interrupted' && (
             <div className="flex justify-start animate-fade-in pb-4">
-              <div className="w-[85%]">
+              <div className="w-full sm:w-[85%]">
                 <div className="rounded-2xl px-4 py-3 bg-destructive/10 border border-destructive/30">
                   <div className="flex items-center gap-2 text-destructive">
                     <AlertCircle className="w-4 h-4" />
