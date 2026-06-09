@@ -12,6 +12,7 @@ import { FileIcon } from '../icons/ToolIcons'
 import { ExternalLink, Download, Eye } from 'lucide-react'
 import { useTranslation } from '../../i18n'
 import { canOpenInCanvas } from '../../constants/file-types'
+import { isCapacitor, getRemoteServerUrl } from '../../api/transport'
 
 // Check if running in web mode
 const isWebMode = api.isRemoteMode()
@@ -51,6 +52,12 @@ export function ArtifactCard({ artifact, onShowContextMenu }: ArtifactCardProps)
   const handleClick = async () => {
     // Try to open in Canvas first for viewable files
     if (canViewInCanvas) {
+      // Capacitor: PDF must open via system browser (no BrowserView support)
+      if (isCapacitor() && artifact.extension === 'pdf') {
+        const url = `${getRemoteServerUrl()}${api.getArtifactDownloadUrl(artifact.path)}`
+        window.open(url, '_blank')
+        return
+      }
       openFile(artifact.path, artifact.name)
       return
     }

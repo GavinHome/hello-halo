@@ -19,6 +19,7 @@ import { FileIcon } from '../icons/ToolIcons'
 import { ChevronRight, ChevronDown, Download, Eye, Loader2, FilePlus, FolderPlus, Edit3, Trash2, FolderOpen, Copy, RefreshCw } from 'lucide-react'
 import { useTranslation } from '../../i18n'
 import { canOpenInCanvas } from '../../constants/file-types'
+import { isCapacitor, getRemoteServerUrl } from '../../api/transport'
 import { ContextMenu, type ContextMenuItem } from '../ui/ContextMenu'
 import { useConfirmDialog } from '../../hooks/useConfirmDialog'
 import { useNotificationStore } from '../../stores/notification.store'
@@ -928,6 +929,12 @@ function TreeNodeComponent({ node, style, dragHandle }: NodeRendererProps<Artifa
     }
 
     if (canViewInCanvas && openFile) {
+      // Capacitor: PDF must open via system browser (no BrowserView support)
+      if (isCapacitor() && data.extension === 'pdf') {
+        const url = `${getRemoteServerUrl()}${api.getArtifactDownloadUrl(data.path)}`
+        window.open(url, '_blank')
+        return
+      }
       openFile(data.path, data.name)
       return
     }

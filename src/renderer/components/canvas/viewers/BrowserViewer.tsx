@@ -506,6 +506,8 @@ export function BrowserViewer({ tab }: BrowserViewerProps) {
  * Shows a message when browser features are not available
  */
 export function BrowserViewerFallback({ tab }: BrowserViewerProps) {
+  const { t } = useTranslation()
+
   const openExternal = () => {
     if (tab.url) {
       window.open(tab.url, '_blank')
