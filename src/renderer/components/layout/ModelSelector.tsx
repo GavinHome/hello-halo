@@ -7,7 +7,7 @@
  */
 
 import { useState, useRef, useEffect } from 'react'
-import { ChevronDown, Plus, Sparkles, X, Check, RefreshCw } from 'lucide-react'
+import { ChevronDown, Plus, Cpu, Sparkles, X, Check, RefreshCw } from 'lucide-react'
 import { useAppStore } from '../../stores/app.store'
 import { api } from '../../api'
 import {
@@ -295,8 +295,8 @@ export function ModelSelector() {
         className="flex items-center gap-1 sm:gap-1.5 px-2 sm:px-3 py-1.5 text-sm text-muted-foreground hover:text-foreground hover:bg-secondary/80 rounded-lg transition-colors"
         title={currentModelName}
       >
-        {/* Mobile: show Sparkles icon */}
-        <Sparkles className="w-4 h-4 sm:hidden" />
+        {/* Mobile: show Cpu icon */}
+        <Cpu className="w-4 h-4 sm:hidden" />
         {/* Desktop: show model name */}
         <span className="hidden sm:inline max-w-[140px] truncate">{currentModelName}</span>
         <ChevronDown className={`w-3.5 h-3.5 transition-transform ${isOpen ? 'rotate-180' : ''}`} />
