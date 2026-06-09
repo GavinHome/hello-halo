@@ -28,6 +28,7 @@ import { Header } from '../components/layout/Header'
 import { SidebarToggle } from '../components/layout/SidebarToggle'
 import { SpaceSelector } from '../components/layout/SpaceSelector'
 import { ModelSelector } from '../components/layout/ModelSelector'
+import { SpaceMobileHeader } from '../components/layout/SpaceMobileHeaderNew'
 import { ContentCanvas } from '../components/canvas'
 import { GitBashWarningBanner } from '../components/setup/GitBashWarningBanner'
 import { api } from '../api'
@@ -319,6 +320,8 @@ export function SpacePage() {
           className="h-11 flex-shrink-0 bg-background"
           style={{ WebkitAppRegion: 'drag' } as React.CSSProperties}
         />
+      ) : isMobile ? (
+        <SpaceMobileHeader />
       ) : (
       <Header
         left={
