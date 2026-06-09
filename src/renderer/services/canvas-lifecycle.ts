@@ -432,6 +432,7 @@ class CanvasLifecycle {
     // Check if file is already open
     for (const [tabId, tab] of this.tabs) {
       if (tab.path === path) {
+        this.setOpen(true)
         await this.switchTab(tabId)
         return tabId
       }
