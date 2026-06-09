@@ -481,7 +481,7 @@ export function SpacePage() {
 
       {/* Mobile Canvas Overlay */}
       {isMobile && isCanvasOpen && (
-        <div className="fixed inset-0 z-50 flex flex-col bg-background animate-slide-in-right-full">
+        <div className="fixed inset-0 z-50 flex flex-col bg-background pt-[var(--sat)] animate-slide-in-right-full">
           {/* Mobile Canvas Header */}
           <div className="flex items-center justify-between px-3 py-2 border-b border-border bg-card/80 backdrop-blur-sm">
             <button
