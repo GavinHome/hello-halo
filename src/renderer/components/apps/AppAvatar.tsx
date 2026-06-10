@@ -8,6 +8,7 @@
  */
 
 import { useMemo } from 'react'
+import { generateAvatarSvg } from './avatar-styles'
 
 interface BrandDef {
   keywords: string[]
@@ -72,18 +73,31 @@ interface AppAvatarProps {
   name: string
   size?: number
   className?: string
+  description?: string
+  systemPrompt?: string
 }
 
-export function AppAvatar({ name, size = 40, className }: AppAvatarProps) {
-  const { char, from, to } = useMemo(() => {
+export function AppAvatar({ name, size = 40, className, description, systemPrompt }: AppAvatarProps) {
+  const { char, from, to, svg } = useMemo(() => {
     const brand = matchBrand(name)
-    if (brand) return { char: brand.char, from: brand.from, to: brand.to }
-    const h = hashName(name)
-    const [from, to] = FALLBACK_GRADIENTS[h % FALLBACK_GRADIENTS.length]
-    return { char: getDisplayChar(name), from, to }
-  }, [name])
+    const f = brand?.from ?? FALLBACK_GRADIENTS[hashName(name) % FALLBACK_GRADIENTS.length][0]
+    const t = brand?.to ?? FALLBACK_GRADIENTS[hashName(name) % FALLBACK_GRADIENTS.length][1]
+    const c = brand?.char ?? getDisplayChar(name)
+    const s = size > 20 ? generateAvatarSvg(name, f, t, description, systemPrompt) : null
+    return { char: c, from: f, to: t, svg: s }
+  }, [name, size, description, systemPrompt])
 
   const fontSize = Math.round(size * 0.45)
+
+  if (svg) {
+    return (
+      <div
+        className={`rounded-xl shrink-0 overflow-hidden ${className ?? ''}`}
+        style={{ width: size, height: size }}
+        dangerouslySetInnerHTML={{ __html: svg }}
+      />
+    )
+  }
 
   return (
     <div

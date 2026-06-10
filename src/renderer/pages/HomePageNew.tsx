@@ -851,7 +851,12 @@ function DigitalHumanCard({ app, layout = 'grid', associatedSpace, latestConvers
         <div className="flex items-start gap-3">
           {/* Avatar/Icon */}
           <div className="w-10 h-10 rounded-lg overflow-hidden flex-shrink-0">
-            <AppAvatar size={40} name={app.spec.name || app.id} />
+            <AppAvatar
+              size={40}
+              name={app.spec.name || app.id}
+              description={app.spec.description}
+              systemPrompt={app.spec.type === 'automation' ? app.spec.system_prompt : undefined}
+            />
           </div>
 
           {/* Content */}
@@ -950,7 +955,12 @@ function DigitalHumanCard({ app, layout = 'grid', associatedSpace, latestConvers
       <div className="flex items-start gap-3">
         {/* Avatar/Icon */}
         <div className="w-10 h-10 rounded-lg overflow-hidden flex-shrink-0">
-          <AppAvatar size={40} name={app.spec.name || app.id} />
+          <AppAvatar
+            size={40}
+            name={app.spec.name || app.id}
+            description={app.spec.description}
+            systemPrompt={app.spec.type === 'automation' ? app.spec.system_prompt : undefined}
+          />
         </div>
 
         {/* Content */}
