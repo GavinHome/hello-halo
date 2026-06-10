@@ -856,6 +856,7 @@ function DigitalHumanCard({ app, layout = 'grid', associatedSpace, latestConvers
               name={app.spec.name || app.id}
               description={app.spec.description}
               systemPrompt={app.spec.type === 'automation' ? app.spec.system_prompt : undefined}
+              status={app.status}
             />
           </div>
 
@@ -960,6 +961,7 @@ function DigitalHumanCard({ app, layout = 'grid', associatedSpace, latestConvers
             name={app.spec.name || app.id}
             description={app.spec.description}
             systemPrompt={app.spec.type === 'automation' ? app.spec.system_prompt : undefined}
+            status={app.status}
           />
         </div>
 

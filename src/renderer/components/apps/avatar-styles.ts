@@ -49,13 +49,36 @@ function hrand(h: number, i: number): number {
 }
 
 function gradientDef(from: string, to: string, id: string): string {
-  return `<defs><linearGradient id="${id}" x1="0" y1="0" x2="1" y2="1"><stop offset="0%" stop-color="${from}"/><stop offset="100%" stop-color="${to}"/></linearGradient></defs><rect width="100" height="100" fill="url(#${id})"/>`
+  return `<defs><linearGradient id="${id}" x1="0" y1="0" x2="1" y2="1"><stop offset="0%" stop-color="${from}"/><stop offset="100%" stop-color="${to}"/></linearGradient></defs><rect class="bg" width="100" height="100" fill="url(#${id})"/>`
+}
+
+function animCSS(status: string): string {
+  const dur = status === 'running' ? '3s' : status === 'paused' ? '7s' : status === 'error' ? '6s' : '5s'
+  return `<style>` +
+    `@keyframes ab{0%,88%,100%{transform:scaleY(1)}94%{transform:scaleY(.1)}}` +
+    `@keyframes abg{0%,100%{opacity:1}50%{opacity:.78}}` +
+    `@keyframes ask{0%,100%{transform:translateX(0)}25%{transform:translateX(-2px)}75%{transform:translateX(2px)}}` +
+    `@keyframes arot{to{transform:rotate(360deg)}}` +
+    `.ae{transform-box:fill-box;transform-origin:center;animation:ab ${dur} ease-in-out infinite}` +
+    `.bg{animation:abg 4s ease-in-out infinite}` +
+    `.am{transform-box:fill-box;transform-origin:center}` +
+    `.ac{transform-box:fill-box;transform-origin:center}` +
+    (status === 'running'
+      ? `.am{animation:ab 1.5s ease-in-out infinite}.ac{animation:abg 2s ease-in-out infinite}`
+      : status === 'paused'
+      ? `.am,.ac{opacity:.45}`
+      : status === 'error'
+      ? `.am{animation:ask .5s ease-in-out infinite}.ac{animation:abg 1s ease-in-out infinite}.bg{animation:abg 2s ease-in-out infinite}`
+      : status === 'queued'
+      ? `.ac{animation:arot 3s linear infinite}`
+      : '') +
+    `</style>`
 }
 
 // ── A. Geometric Face ──
 // Bold symmetric eyes + mouth, clearly recognizable at 40px
 
-function generateGeometric(name: string, from: string, to: string): string {
+function generateGeometric(name: string, from: string, to: string, status: string): string {
   const h = hashName(name)
   const v = h % 3
   const ey = 34 + (h % 4) * 2
@@ -67,22 +90,22 @@ function generateGeometric(name: string, from: string, to: string): string {
   if (v === 0) {
     // Round eyes with bright pupils
     eyes = [
-      `<circle cx="${lx}" cy="${ey}" r="${ER}" fill="white" fill-opacity=".55"/>`,
+      `<circle class="ae" cx="${lx}" cy="${ey}" r="${ER}" fill="white" fill-opacity=".55"/>`,
       `<circle cx="${lx}" cy="${ey}" r="${ER * .45}" fill="white" fill-opacity=".9"/>`,
-      `<circle cx="${rx}" cy="${ey}" r="${ER}" fill="white" fill-opacity=".55"/>`,
+      `<circle class="ae" cx="${rx}" cy="${ey}" r="${ER}" fill="white" fill-opacity=".55"/>`,
       `<circle cx="${rx}" cy="${ey}" r="${ER * .45}" fill="white" fill-opacity=".9"/>`,
     ].join('')
   } else if (v === 1) {
     // Diamond eyes
     const d = (cx: number, cy: number) =>
-      `<polygon points="${cx},${cy - ER} ${cx + ER * .75},${cy} ${cx},${cy + ER} ${cx - ER * .75},${cy}" fill="white" fill-opacity=".5"/>` +
+      `<polygon class="ae" points="${cx},${cy - ER} ${cx + ER * .75},${cy} ${cx},${cy + ER} ${cx - ER * .75},${cy}" fill="white" fill-opacity=".5"/>` +
       `<circle cx="${cx}" cy="${cy}" r="${ER * .3}" fill="white" fill-opacity=".9"/>`
     eyes = d(lx, ey) + d(rx, ey)
   } else {
     // Wide elliptical eyes
     eyes = [
-      `<ellipse cx="${lx}" cy="${ey}" rx="${ER * 1.2}" ry="${ER * .6}" fill="white" fill-opacity=".5"/>`,
-      `<ellipse cx="${rx}" cy="${ey}" rx="${ER * 1.2}" ry="${ER * .6}" fill="white" fill-opacity=".5"/>`,
+      `<ellipse class="ae" cx="${lx}" cy="${ey}" rx="${ER * 1.2}" ry="${ER * .6}" fill="white" fill-opacity=".5"/>`,
+      `<ellipse class="ae" cx="${rx}" cy="${ey}" rx="${ER * 1.2}" ry="${ER * .6}" fill="white" fill-opacity=".5"/>`,
       `<circle cx="${lx}" cy="${ey}" r="${ER * .3}" fill="white" fill-opacity=".9"/>`,
       `<circle cx="${rx}" cy="${ey}" r="${ER * .3}" fill="white" fill-opacity=".9"/>`,
     ].join('')
@@ -90,28 +113,28 @@ function generateGeometric(name: string, from: string, to: string): string {
 
   const my = 62 + (h % 4)
   let mouth: string
-  if (v === 0) mouth = `<path d="M32 ${my}Q50 ${my + 16} 68 ${my}" fill="none" stroke="white" stroke-opacity=".6" stroke-width="3.5" stroke-linecap="round"/>`
-  else if (v === 1) mouth = `<rect x="35" y="${my - 2}" width="30" height="8" rx="4" fill="white" fill-opacity=".35"/>`
-  else mouth = `<line x1="34" y1="${my}" x2="66" y2="${my}" stroke="white" stroke-opacity=".55" stroke-width="3" stroke-linecap="round"/>`
+  if (v === 0) mouth = `<path class="am" d="M32 ${my}Q50 ${my + 16} 68 ${my}" fill="none" stroke="white" stroke-opacity=".6" stroke-width="3.5" stroke-linecap="round"/>`
+  else if (v === 1) mouth = `<rect class="am" x="35" y="${my - 2}" width="30" height="8" rx="4" fill="white" fill-opacity=".35"/>`
+  else mouth = `<line class="am" x1="34" y1="${my}" x2="66" y2="${my}" stroke="white" stroke-opacity=".55" stroke-width="3" stroke-linecap="round"/>`
 
   // Nose accent
   const nose = `<circle cx="50" cy="${ey + 12}" r="2.5" fill="white" fill-opacity=".3"/>`
 
-  return `<svg viewBox="0 0 100 100" xmlns="http://www.w3.org/2000/svg">${gradientDef(from, to, `g${h}`)}${eyes}${nose}${mouth}</svg>`
+  return `<svg class="${status}" viewBox="0 0 100 100" xmlns="http://www.w3.org/2000/svg">${animCSS(status)}${gradientDef(from, to, `g${h}`)}${eyes}${nose}${mouth}</svg>`
 }
 
 // ── B. Organic Cell ──
 // Central hub with satellite nodes, thick organic curves
 
-function generateOrganic(name: string, from: string, to: string): string {
+function generateOrganic(name: string, from: string, to: string, status: string): string {
   const h = hashName(name)
   const n = 4 + (h % 3)
 
   // Central hub
   const hubR = 10 + (h % 3) * 2
   const hub = [
-    `<circle cx="50" cy="50" r="${hubR}" fill="white" fill-opacity=".2"/>`,
-    `<circle cx="50" cy="50" r="${hubR * .5}" fill="white" fill-opacity=".6"/>`,
+    `<circle class="ac" cx="50" cy="50" r="${hubR}" fill="white" fill-opacity=".2"/>`,
+    `<circle class="ac" cx="50" cy="50" r="${hubR * .5}" fill="white" fill-opacity=".6"/>`,
   ].join('')
 
   // Satellite nodes arranged around center
@@ -128,7 +151,7 @@ function generateOrganic(name: string, from: string, to: string): string {
   const curves = satellites.map(s => {
     const cx = (50 + s.x) / 2 + (hrand(h, Math.round(s.x)) - 0.5) * 16
     const cy = (50 + s.y) / 2 + (hrand(h, Math.round(s.y)) - 0.5) * 16
-    return `<path d="M50 50Q${cx.toFixed(1)} ${cy.toFixed(1)} ${s.x.toFixed(1)} ${s.y.toFixed(1)}" fill="none" stroke="white" stroke-opacity=".4" stroke-width="2.5" stroke-linecap="round"/>`
+    return `<path class="ac" d="M50 50Q${cx.toFixed(1)} ${cy.toFixed(1)} ${s.x.toFixed(1)} ${s.y.toFixed(1)}" fill="none" stroke="white" stroke-opacity=".4" stroke-width="2.5" stroke-linecap="round"/>`
   }).join('')
 
   // Satellite dots
@@ -136,13 +159,13 @@ function generateOrganic(name: string, from: string, to: string): string {
     `<circle cx="${s.x.toFixed(1)}" cy="${s.y.toFixed(1)}" r="${s.r.toFixed(1)}" fill="white" fill-opacity=".45"/><circle cx="${s.x.toFixed(1)}" cy="${s.y.toFixed(1)}" r="${(s.r * .4).toFixed(1)}" fill="white" fill-opacity=".85"/>`
   ).join('')
 
-  return `<svg viewBox="0 0 100 100" xmlns="http://www.w3.org/2000/svg">${gradientDef(from, to, `o${h}`)}${curves}${hub}${dots}</svg>`
+  return `<svg class="${status}" viewBox="0 0 100 100" xmlns="http://www.w3.org/2000/svg">${animCSS(status)}${gradientDef(from, to, `o${h}`)}${curves}${hub}${dots}</svg>`
 }
 
 // ── C. Crystal Structure ──
 // Bold polygonal gem with strong facet lines
 
-function generateCrystal(name: string, from: string, to: string): string {
+function generateCrystal(name: string, from: string, to: string, status: string): string {
   const h = hashName(name)
   const sides = 5 + (h % 2)
   const rot = (h % 360) * Math.PI / 180
@@ -161,7 +184,7 @@ function generateCrystal(name: string, from: string, to: string): string {
     const a = rot + Math.PI / sides + (2 * Math.PI * i) / sides - Math.PI / 2
     return { x: cx + innerR * Math.cos(a), y: cy + innerR * Math.sin(a) }
   })
-  const inner = `<polygon points="${innerPts.map(p => `${p.x.toFixed(1)},${p.y.toFixed(1)}`).join(' ')}" fill="white" fill-opacity=".1" stroke="white" stroke-opacity=".5" stroke-width="1.5"/>`
+  const inner = `<polygon class="ac" points="${innerPts.map(p => `${p.x.toFixed(1)},${p.y.toFixed(1)}`).join(' ')}" fill="white" fill-opacity=".1" stroke="white" stroke-opacity=".5" stroke-width="1.5"/>`
 
   // Facet lines: outer vertices → center
   const facets = pts.map(p =>
@@ -174,15 +197,15 @@ function generateCrystal(name: string, from: string, to: string): string {
   ).join('')
 
   // Bright center gem
-  const core = `<circle cx="${cx}" cy="${cy}" r="6" fill="white" fill-opacity=".3"/><circle cx="${cx}" cy="${cy}" r="2.5" fill="white" fill-opacity=".8"/>`
+  const core = `<circle class="ac" cx="${cx}" cy="${cy}" r="6" fill="white" fill-opacity=".3"/><circle cx="${cx}" cy="${cy}" r="2.5" fill="white" fill-opacity=".8"/>`
 
-  return `<svg viewBox="0 0 100 100" xmlns="http://www.w3.org/2000/svg">${gradientDef(from, to, `c${h}`)}${outer}${inner}${facets}${cross}${core}</svg>`
+  return `<svg class="${status}" viewBox="0 0 100 100" xmlns="http://www.w3.org/2000/svg">${animCSS(status)}${gradientDef(from, to, `c${h}`)}${outer}${inner}${facets}${cross}${core}</svg>`
 }
 
 // ── D. Flowing Energy ──
 // Bold sinusoidal ribbons with visible particles
 
-function generateFlowing(name: string, from: string, to: string): string {
+function generateFlowing(name: string, from: string, to: string, status: string): string {
   const h = hashName(name)
   const wn = 3 + (h % 2)
   const amp0 = 12 + hrand(h, 0) * 10
@@ -200,7 +223,7 @@ function generateFlowing(name: string, from: string, to: string): string {
       const y = yb + Math.sin((x / 100) * Math.PI * 2.5 + ph) * amp
       d += `L${x} ${y.toFixed(1)}`
     }
-    waves += `<path d="${d}" fill="none" stroke="white" stroke-opacity="${op}" stroke-width="${sw.toFixed(1)}" stroke-linecap="round"/>`
+    waves += `<path class="aw" d="${d}" fill="none" stroke="white" stroke-opacity="${op}" stroke-width="${sw.toFixed(1)}" stroke-linecap="round"/>`
   }
 
   // Flowing particles
@@ -211,13 +234,13 @@ function generateFlowing(name: string, from: string, to: string): string {
     return `<circle cx="${x.toFixed(1)}" cy="${y.toFixed(1)}" r="${r.toFixed(1)}" fill="white" fill-opacity=".4"/>`
   }).join('')
 
-  return `<svg viewBox="0 0 100 100" xmlns="http://www.w3.org/2000/svg">${gradientDef(from, to, `f${h}`)}${waves}${dots}</svg>`
+  return `<svg class="${status}" viewBox="0 0 100 100" xmlns="http://www.w3.org/2000/svg">${animCSS(status)}${gradientDef(from, to, `f${h}`)}${waves}${dots}</svg>`
 }
 
 // ── E. Aura Totem ──
 // Bold concentric rings + radial petals + bright core mandala
 
-function generateAura(name: string, from: string, to: string): string {
+function generateAura(name: string, from: string, to: string, status: string): string {
   const h = hashName(name)
   const cx = 50, cy = 50
 
@@ -227,7 +250,7 @@ function generateAura(name: string, from: string, to: string): string {
     const r = 14 + i * (30 / rn)
     const sw = 2 + hrand(h, i) * 1.5
     const op = (0.2 + (rn - i) * 0.12).toFixed(2)
-    return `<circle cx="${cx}" cy="${cy}" r="${r.toFixed(1)}" fill="none" stroke="white" stroke-opacity="${op}" stroke-width="${sw.toFixed(1)}"/>`
+    return `<circle class="ar" cx="${cx}" cy="${cy}" r="${r.toFixed(1)}" fill="none" stroke="white" stroke-opacity="${op}" stroke-width="${sw.toFixed(1)}"/>`
   }).join('')
 
   // Radial rays
@@ -248,14 +271,14 @@ function generateAura(name: string, from: string, to: string): string {
   }).join('')
 
   // Bright core
-  const core = `<circle cx="${cx}" cy="${cy}" r="8" fill="white" fill-opacity=".25"/><circle cx="${cx}" cy="${cy}" r="3.5" fill="white" fill-opacity=".8"/>`
+  const core = `<circle class="ac" cx="${cx}" cy="${cy}" r="8" fill="white" fill-opacity=".25"/><circle cx="${cx}" cy="${cy}" r="3.5" fill="white" fill-opacity=".8"/>`
 
-  return `<svg viewBox="0 0 100 100" xmlns="http://www.w3.org/2000/svg">${gradientDef(from, to, `a${h}`)}${rings}${rays}${petals}${core}</svg>`
+  return `<svg class="${status}" viewBox="0 0 100 100" xmlns="http://www.w3.org/2000/svg">${animCSS(status)}${gradientDef(from, to, `a${h}`)}${rings}${rays}${petals}${core}</svg>`
 }
 
 // ── Public API ──
 
-const GENERATORS: Record<Exclude<AvatarStyle, 'fallback'>, (name: string, from: string, to: string) => string> = {
+const GENERATORS: Record<Exclude<AvatarStyle, 'fallback'>, (name: string, from: string, to: string, status: string) => string> = {
   geometric: generateGeometric,
   organic: generateOrganic,
   crystal: generateCrystal,
@@ -270,8 +293,9 @@ export function generateAvatarSvg(
   to: string,
   description?: string,
   systemPrompt?: string,
+  status?: string,
 ): string | null {
   const style = matchStyle(name, description, systemPrompt)
   if (style === 'fallback') return null
-  return GENERATORS[style](name, from, to)
+  return GENERATORS[style](name, from, to, status ?? 'idle')
 }

@@ -155,6 +155,7 @@ export function AutomationHeader({ appId, spaceName }: AutomationHeaderProps) {
             name={name || appId}
             description={app.spec.description}
             systemPrompt={'system_prompt' in app.spec ? app.spec.system_prompt : undefined}
+            status={status}
           />
         </div>
 

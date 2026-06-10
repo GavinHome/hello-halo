@@ -75,17 +75,18 @@ interface AppAvatarProps {
   className?: string
   description?: string
   systemPrompt?: string
+  status?: string
 }
 
-export function AppAvatar({ name, size = 40, className, description, systemPrompt }: AppAvatarProps) {
+export function AppAvatar({ name, size = 40, className, description, systemPrompt, status }: AppAvatarProps) {
   const { char, from, to, svg } = useMemo(() => {
     const brand = matchBrand(name)
     const f = brand?.from ?? FALLBACK_GRADIENTS[hashName(name) % FALLBACK_GRADIENTS.length][0]
     const t = brand?.to ?? FALLBACK_GRADIENTS[hashName(name) % FALLBACK_GRADIENTS.length][1]
     const c = brand?.char ?? getDisplayChar(name)
-    const s = size > 20 ? generateAvatarSvg(name, f, t, description, systemPrompt) : null
+    const s = size > 20 ? generateAvatarSvg(name, f, t, description, systemPrompt, status) : null
     return { char: c, from: f, to: t, svg: s }
-  }, [name, size, description, systemPrompt])
+  }, [name, size, description, systemPrompt, status])
 
   const fontSize = Math.round(size * 0.45)
 
