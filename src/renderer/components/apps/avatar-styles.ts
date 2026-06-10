@@ -17,11 +17,11 @@ export type AvatarStyle = 'geometric' | 'organic' | 'crystal' | 'flowing' | 'aur
 // ── Style matching ──
 
 const STYLE_KEYWORDS: [string[], AvatarStyle][] = [
-  [['助手', '助理', '秘书', '顾问', '客服', 'chat', 'assistant', 'helper', 'support'], 'geometric'],
   [['股票', '金融', '分析', '数据', '量化', '复盘', 'finance', 'stock', 'market', 'quant', 'analyst'], 'organic'],
   [['技术', '开发', '系统', '运维', '代码', 'monitor', 'devops', 'code', 'deploy', 'infra', 'engineer'], 'crystal'],
   [['创意', '写作', '内容', '设计', '运营', '文案', '小红书', 'creative', 'writer', 'content', 'design'], 'flowing'],
   [['养生', '瑜伽', '心灵', '教育', '医疗', '健康', 'wellness', 'health', 'yoga', 'mindful', 'heal'], 'aura'],
+  [['助手', '助理', '秘书', '顾问', '客服', 'chat', 'assistant', 'helper', 'support'], 'geometric'],
 ]
 
 export function matchStyle(name: string, description?: string, systemPrompt?: string): AvatarStyle {
@@ -59,19 +59,29 @@ function animCSS(status: string): string {
     `@keyframes abg{0%,100%{opacity:1}50%{opacity:.78}}` +
     `@keyframes ask{0%,100%{transform:translateX(0)}25%{transform:translateX(-2px)}75%{transform:translateX(2px)}}` +
     `@keyframes arot{to{transform:rotate(360deg)}}` +
+    `@keyframes aop{0%,100%{transform:scale(1);opacity:.45}50%{transform:scale(1.25);opacity:.8}}` +
+    `@keyframes ash{0%,100%{stroke-opacity:.7}50%{stroke-opacity:.2}}` +
+    `@keyframes aro{from{transform:rotate(0)}}` +
+    `@keyframes aex{0%,100%{transform:scale(1);opacity:.2}50%{transform:scale(1.08);opacity:.4}}` +
+    `@keyframes adf{to{stroke-dashoffset:0}}` +
     `.ae{transform-box:fill-box;transform-origin:center;animation:ab ${dur} ease-in-out infinite}` +
     `.bg{animation:abg 4s ease-in-out infinite}` +
     `.am{transform-box:fill-box;transform-origin:center}` +
     `.ac{transform-box:fill-box;transform-origin:center}` +
+    `.ao{transform-box:fill-box;transform-origin:center;animation:aop 4s ease-in-out infinite}` +
+    `.ax{transform-box:fill-box;transform-origin:center;animation:ash 6s ease-in-out infinite}` +
+    `.aw{stroke-dasharray:8 4;stroke-dashoffset:24;animation:adf 3s linear infinite}` +
+    `.ar{transform-box:fill-box;transform-origin:center;animation:aex 5s ease-in-out infinite}` +
+    `.at{transform-box:fill-box;transform-origin:center}` +
     (status === 'running'
-      ? `.am{animation:ab 1.5s ease-in-out infinite}.ac{animation:abg 2s ease-in-out infinite}`
+      ? `.am{animation:ab 1.5s ease-in-out infinite}.ac{animation:abg 2s ease-in-out infinite}.ao{animation-duration:2s}.ax{animation-duration:3s}.aw{animation-duration:1.5s}.ar{animation-duration:2.5s}.at{animation:aro 4s linear infinite}`
       : status === 'paused'
-      ? `.am,.ac{opacity:.45}`
+      ? `.am,.ac{opacity:.45}.ao,.ar{animation-play-state:paused}`
       : status === 'error'
-      ? `.am{animation:ask .5s ease-in-out infinite}.ac{animation:abg 1s ease-in-out infinite}.bg{animation:abg 2s ease-in-out infinite}`
+      ? `.am{animation:ask .5s ease-in-out infinite}.ac{animation:abg 1s ease-in-out infinite}.bg{animation:abg 2s ease-in-out infinite}.ax{animation-duration:2s}.ao{animation:ask .4s ease-in-out infinite}`
       : status === 'queued'
-      ? `.ac{animation:arot 3s linear infinite}`
-      : '') +
+      ? `.ac{animation:arot 3s linear infinite}.at{animation:aro 5s linear infinite}`
+      : `.at{animation:aro 12s linear infinite}`) +
     `</style>`
 }
 
@@ -155,8 +165,8 @@ function generateOrganic(name: string, from: string, to: string, status: string)
   }).join('')
 
   // Satellite dots
-  const dots = satellites.map(s =>
-    `<circle cx="${s.x.toFixed(1)}" cy="${s.y.toFixed(1)}" r="${s.r.toFixed(1)}" fill="white" fill-opacity=".45"/><circle cx="${s.x.toFixed(1)}" cy="${s.y.toFixed(1)}" r="${(s.r * .4).toFixed(1)}" fill="white" fill-opacity=".85"/>`
+  const dots = satellites.map((s, i) =>
+    `<circle class="ao" cx="${s.x.toFixed(1)}" cy="${s.y.toFixed(1)}" r="${s.r.toFixed(1)}" fill="white" fill-opacity=".45" style="animation-delay:${(i * 0.8).toFixed(1)}s"/><circle cx="${s.x.toFixed(1)}" cy="${s.y.toFixed(1)}" r="${(s.r * .4).toFixed(1)}" fill="white" fill-opacity=".85"/>`
   ).join('')
 
   return `<svg class="${status}" viewBox="0 0 100 100" xmlns="http://www.w3.org/2000/svg">${animCSS(status)}${gradientDef(from, to, `o${h}`)}${curves}${hub}${dots}</svg>`
@@ -176,7 +186,7 @@ function generateCrystal(name: string, from: string, to: string, status: string)
     const a = rot + (2 * Math.PI * i) / sides - Math.PI / 2
     return { x: cx + R * Math.cos(a), y: cy + R * Math.sin(a) }
   })
-  const outer = `<polygon points="${pts.map(p => `${p.x.toFixed(1)},${p.y.toFixed(1)}`).join(' ')}" fill="white" fill-opacity=".12" stroke="white" stroke-opacity=".7" stroke-width="2.5"/>`
+  const outer = `<polygon class="ax" points="${pts.map(p => `${p.x.toFixed(1)},${p.y.toFixed(1)}`).join(' ')}" fill="white" fill-opacity=".12" stroke="white" stroke-opacity=".7" stroke-width="2.5"/>`
 
   // Inner polygon (rotated)
   const innerR = R * 0.45
@@ -231,7 +241,7 @@ function generateFlowing(name: string, from: string, to: string, status: string)
     const x = hrand(h, i + 50) * 80 + 10
     const y = hrand(h, i + 60) * 80 + 10
     const r = 2 + hrand(h, i + 70) * 4
-    return `<circle cx="${x.toFixed(1)}" cy="${y.toFixed(1)}" r="${r.toFixed(1)}" fill="white" fill-opacity=".4"/>`
+    return `<circle class="ap" cx="${x.toFixed(1)}" cy="${y.toFixed(1)}" r="${r.toFixed(1)}" fill="white" fill-opacity=".4"/>`
   }).join('')
 
   return `<svg class="${status}" viewBox="0 0 100 100" xmlns="http://www.w3.org/2000/svg">${animCSS(status)}${gradientDef(from, to, `f${h}`)}${waves}${dots}</svg>`
@@ -250,7 +260,7 @@ function generateAura(name: string, from: string, to: string, status: string): s
     const r = 14 + i * (30 / rn)
     const sw = 2 + hrand(h, i) * 1.5
     const op = (0.2 + (rn - i) * 0.12).toFixed(2)
-    return `<circle class="ar" cx="${cx}" cy="${cy}" r="${r.toFixed(1)}" fill="none" stroke="white" stroke-opacity="${op}" stroke-width="${sw.toFixed(1)}"/>`
+    return `<circle class="ar" cx="${cx}" cy="${cy}" r="${r.toFixed(1)}" fill="none" stroke="white" stroke-opacity="${op}" stroke-width="${sw.toFixed(1)}" style="animation-delay:${(i * 0.7).toFixed(1)}s"/>`
   }).join('')
 
   // Radial rays
@@ -267,7 +277,7 @@ function generateAura(name: string, from: string, to: string, status: string): s
     const a = (2 * Math.PI * i) / pn
     const x = cx + 14 * Math.cos(a)
     const y = cy + 14 * Math.sin(a)
-    return `<ellipse cx="${x.toFixed(1)}" cy="${y.toFixed(1)}" rx="6" ry="3.5" transform="rotate(${(a * 180 / Math.PI).toFixed(1)} ${x.toFixed(1)} ${y.toFixed(1)})" fill="white" fill-opacity=".3"/>`
+    return `<ellipse class="at" cx="${x.toFixed(1)}" cy="${y.toFixed(1)}" rx="6" ry="3.5" transform="rotate(${(a * 180 / Math.PI).toFixed(1)} ${x.toFixed(1)} ${y.toFixed(1)})" fill="white" fill-opacity=".3"/>`
   }).join('')
 
   // Bright core
