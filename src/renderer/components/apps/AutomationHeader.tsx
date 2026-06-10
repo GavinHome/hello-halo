@@ -153,8 +153,6 @@ export function AutomationHeader({ appId, spaceName }: AutomationHeaderProps) {
           <AppAvatar
             size={44}
             name={name || appId}
-            description={app.spec.description}
-            systemPrompt={'system_prompt' in app.spec ? app.spec.system_prompt : undefined}
             status={status}
           />
         </div>

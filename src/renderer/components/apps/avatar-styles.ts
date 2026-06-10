@@ -1,35 +1,34 @@
 /**
  * Digital Life Avatar style system.
  *
- * 5 SVG styles auto-matched from name/description/systemPrompt keywords:
- *   geometric — assistant, consultant, service
- *   organic   — finance, data, analysis
- *   crystal   — tech, dev, system
- *   flowing   — creative, writing, design
- *   aura      — wellness, education, health
+ * Visual style is driven by runtime status — the avatar's appearance
+ * changes as the digital human transitions between states, giving
+ * immediate visual feedback about what it's doing.
  *
- * Each style has 3 hash-driven variants for visual diversity.
- * All SVGs: viewBox="0 0 100 100", gradient background, white overlay patterns.
+ *   idle        → Geometric Face   (calm, structured, waiting)
+ *   running     → Flowing Energy   (dynamic, active, flowing)
+ *   paused      → Aura Totem       (still, meditative, suspended)
+ *   error       → Crystal Structure (sharp, fractured, alerting)
+ *   queued      → Organic Cell     (processing, pulsing, alive)
  */
 
 export type AvatarStyle = 'geometric' | 'organic' | 'crystal' | 'flowing' | 'aura' | 'fallback'
 
-// ── Style matching ──
+// ── Status → Style mapping ──
 
-const STYLE_KEYWORDS: [string[], AvatarStyle][] = [
-  [['股票', '金融', '分析', '数据', '量化', '复盘', 'finance', 'stock', 'market', 'quant', 'analyst'], 'organic'],
-  [['技术', '开发', '系统', '运维', '代码', 'monitor', 'devops', 'code', 'deploy', 'infra', 'engineer'], 'crystal'],
-  [['创意', '写作', '内容', '设计', '运营', '文案', '小红书', 'creative', 'writer', 'content', 'design'], 'flowing'],
-  [['养生', '瑜伽', '心灵', '教育', '医疗', '健康', 'wellness', 'health', 'yoga', 'mindful', 'heal'], 'aura'],
-  [['助手', '助理', '秘书', '顾问', '客服', 'chat', 'assistant', 'helper', 'support'], 'geometric'],
-]
+const STATUS_STYLE: Record<string, AvatarStyle> = {
+  idle: 'geometric',
+  active: 'geometric',
+  running: 'flowing',
+  paused: 'aura',
+  error: 'crystal',
+  queued: 'organic',
+  waiting_user: 'geometric',
+}
 
-export function matchStyle(name: string, description?: string, systemPrompt?: string): AvatarStyle {
-  const text = [name, description, systemPrompt].filter(Boolean).join(' ').toLowerCase()
-  for (const [keywords, style] of STYLE_KEYWORDS) {
-    if (keywords.some(k => text.includes(k))) return style
-  }
-  return 'fallback'
+export function styleForStatus(status?: string): AvatarStyle {
+  if (!status) return 'geometric'
+  return STATUS_STYLE[status] ?? 'geometric'
 }
 
 // ── Utilities ──
@@ -296,16 +295,14 @@ const GENERATORS: Record<Exclude<AvatarStyle, 'fallback'>, (name: string, from: 
   aura: generateAura,
 }
 
-/** Returns SVG string for matched style, or null if fallback (use existing letter+gradient). */
+/** Returns SVG string with status-driven style, or null for fallback (letter+gradient). */
 export function generateAvatarSvg(
   name: string,
   from: string,
   to: string,
-  description?: string,
-  systemPrompt?: string,
   status?: string,
 ): string | null {
-  const style = matchStyle(name, description, systemPrompt)
+  const style = styleForStatus(status)
   if (style === 'fallback') return null
   return GENERATORS[style](name, from, to, status ?? 'idle')
 }
