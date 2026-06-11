@@ -74,6 +74,7 @@ interface MessageRecord {
   role: 'user' | 'assistant'
   content: string
   timestamp: string
+  images?: Array<{ id: string; type: 'image'; mediaType: string; data: string; name?: string }>
   thoughts?: ThoughtRecord[]
   thoughtsSummary?: ThoughtsSummaryRecord
 }
@@ -82,11 +83,21 @@ interface MessageRecord {
 // Writer
 // ============================================
 
+/** Image shape accepted by writeTrigger — matches both renderer ImageAttachment and API format */
+interface TriggerImage {
+  id?: string
+  type: string
+  mediaType?: string   // camelCase (renderer / backend ImageAttachment)
+  media_type?: string  // snake_case (IPC wire format from appChatSend)
+  data: string
+  name?: string
+}
+
 export interface SessionWriter {
   /** Append a raw SDK stream event */
   writeEvent(event: Record<string, unknown>): void
   /** Write the initial trigger message (before stream starts) */
-  writeTrigger(content: string): void
+  writeTrigger(content: string, images?: TriggerImage[]): void
 }
 
 /** Get the directory for run session files */
@@ -127,12 +138,26 @@ export function openSessionWriter(spacePath: string, appId: string, runId: strin
       appendLine({ _ts: new Date().toISOString(), ...event } as StoredEvent)
     },
 
-    writeTrigger(content: string): void {
+    writeTrigger(content: string, images?: TriggerImage[]): void {
+      // Build content blocks: always include text, plus image blocks when images are provided
+      const contentBlocks: Array<Record<string, unknown>> = [{ type: 'text', text: content }]
+      if (images && images.length > 0) {
+        for (const img of images) {
+          const mediaType = img.mediaType || img.media_type || 'image/jpeg'
+          contentBlocks.push({
+            type: 'image',
+            source: { type: 'base64', media_type: mediaType, data: img.data },
+            // Preserve id and name for round-trip extraction
+            _imageId: img.id,
+            _imageName: img.name,
+          })
+        }
+      }
       appendLine({
         _ts: new Date().toISOString(),
         type: 'user',
         _isTrigger: true,
-        message: { role: 'user', content: [{ type: 'text', text: content }] },
+        message: { role: 'user', content: contentBlocks },
       })
     },
   }
@@ -298,13 +323,18 @@ export function convertEventsToMessages(events: StoredEvent[]): MessageRecord[] 
         // Flush the current turn before showing the user message.
         flush()
         const textContent = extractTextContent(content)
-        if (textContent) {
-          messages.push({
+        const images = extractImages(content)
+        if (textContent || images.length > 0) {
+          const msg: MessageRecord = {
             id: `session-msg-${++msgIdx}`,
             role: 'user',
             content: textContent,
             timestamp: ts,
-          })
+          }
+          if (images.length > 0) {
+            msg.images = images
+          }
+          messages.push(msg)
         }
       }
       continue
@@ -611,6 +641,25 @@ function extractTextContent(content: unknown): string {
     .filter((b: any) => b.type === 'text')
     .map((b: any) => b.text || '')
     .join('')
+}
+
+/**
+ * Extract image attachments from content blocks (reverse of writeTrigger's content block build).
+ * Content blocks are in Anthropic API format: { type: 'image', source: { type: 'base64', media_type, data } }
+ * Output matches renderer's ImageAttachment format: { id, type, mediaType, data, name }
+ */
+function extractImages(content: unknown): Array<{ id: string; type: 'image'; mediaType: string; data: string; name?: string }> {
+  if (!Array.isArray(content)) return []
+  let idx = 0
+  return content
+    .filter((b: any) => b.type === 'image' && b.source?.data)
+    .map((b: any) => ({
+      id: b._imageId || `img-${++idx}`,
+      type: 'image' as const,
+      mediaType: b.source.media_type || 'image/jpeg',
+      data: b.source.data,
+      ...(b._imageName ? { name: b._imageName } : {}),
+    }))
 }
 
 function extractToolResults(content: unknown): Array<{ toolUseId: string; output: string; isError: boolean }> {

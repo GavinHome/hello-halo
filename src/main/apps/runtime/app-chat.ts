@@ -528,9 +528,9 @@ export async function sendAppChatMessage(
       ? openSessionWriter(spacePath, appId, chatRunId)
       : undefined
 
-    // Write user message to JSONL for reload recovery
+    // Write user message to JSONL for reload recovery (including images for UI display)
     if (sessionWriter) {
-      sessionWriter.writeTrigger(message)
+      sessionWriter.writeTrigger(message, images)
     }
 
     // ── 8. Process stream ──────────────────────────────

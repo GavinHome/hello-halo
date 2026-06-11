@@ -193,6 +193,7 @@ export function AppChatView({ appId, spaceId }: AppChatViewProps) {
       role: 'user',
       content,
       timestamp: new Date().toISOString(),
+      images: images && images.length > 0 ? images : undefined,  // Include images for display
     }
     setMessages(prev => [...prev, userMsg])
     setLoadState('loaded')
