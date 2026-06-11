@@ -102,7 +102,7 @@ export async function startHttpServer(
   expressApp = express()
 
   // Middleware
-  expressApp.use(express.json())
+  expressApp.use(express.json({ limit: '50mb' }))
   expressApp.use(express.urlencoded({ extended: true }))
 
   // CORS for remote access
