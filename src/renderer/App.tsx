@@ -137,7 +137,16 @@ export default function App() {
       if (savedUrl && hasToken) {
         // Has saved connection — try to initialize immediately
         console.log('[App] Capacitor: saved connection found, initializing...')
-        initialize().then(() => initializeOnboarding())
+
+        // Timeout fallback: if server is unreachable, don't stay on splash forever
+        const capacitorTimeout = setTimeout(() => {
+          if (useAppStore.getState().view === 'splash') {
+            console.warn('[App] Capacitor: init timeout after 5s, showing server list')
+            setView('serverList')
+          }
+        }, 5_000)
+
+        initialize().then(() => initializeOnboarding()).finally(() => clearTimeout(capacitorTimeout))
       } else {
         // No saved connection — check if we have servers in the list
         const { servers } = useServerStore.getState()
