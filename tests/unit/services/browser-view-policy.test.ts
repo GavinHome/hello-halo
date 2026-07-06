@@ -9,12 +9,12 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest'
 
 // Mock the product config loader so each test controls the browser policy.
-vi.mock('../../../src/main/services/ai-sources/auth-loader', () => ({
+vi.mock('../../../src/main/foundation/product-config', () => ({
   loadProductConfig: vi.fn(),
 }))
 
-import { loadProductConfig } from '../../../src/main/services/ai-sources/auth-loader'
-import { isUrlAllowedByPolicy } from '../../../src/main/services/browser-view.service'
+import { loadProductConfig } from '../../../src/main/foundation/product-config'
+import { isUrlAllowedByPolicy } from '../../../src/main/services/browser-policy.service'
 
 const mockLoadProductConfig = vi.mocked(loadProductConfig)
 

@@ -27,8 +27,9 @@ import { registerOnboardingHandlers } from '../ipc/onboarding'
 import { registerRemoteHandlers } from '../ipc/remote'
 import { registerSecurityHandlers } from '../ipc/security'
 import { enableRemoteAccess } from '../services/remote.service'
-import { getConfig } from '../services/config.service'
+import { getConfig, migrateCredentialEncryption } from '../foundation/config.service'
 import { registerBrowserHandlers } from '../ipc/browser'
+import { registerBrowserPolicyHandlers } from '../ipc/browser-policy'
 import { cleanupAIBrowser } from '../services/ai-browser'
 import { registerOverlayHandlers, cleanupOverlayHandlers } from '../ipc/overlay'
 import { initializeSearchHandlers, cleanupSearchHandlers } from '../ipc/search'
@@ -38,15 +39,18 @@ import { cleanupAllCaches } from '../services/artifact-cache.service'
 import { flushSpaceActivity } from '../services/space.service'
 import { disposeSearchContext } from '../services/web-search'
 import { markExtendedServicesReady } from './state'
-import { getMainWindow, sendToRenderer } from '../services/window.service'
+import { getMainWindow, sendToRenderer } from '../foundation/window.service'
 import { initializeHealthSystem, setSessionCleanupFn } from '../services/health'
 import { closeAllV2Sessions } from '../services/agent/session-manager'
 import { registerHealthHandlers } from '../ipc/health'
-import { initBackground, shutdownBackground, getBackgroundService } from '../platform/background'
+import { initBackground, shutdownBackground, getBackgroundService, setDaemonStealthInjector } from '../platform/background'
+import { injectStealthScripts } from '../services/stealth'
 import { initStore, shutdownStore } from '../platform/store'
 import type { DatabaseManager } from '../platform/store'
 import { initScheduler, shutdownScheduler } from '../platform/scheduler'
 import { initMemory } from '../platform/memory'
+import { setMemorySdk } from '../platform/memory/sdk'
+import { tool as sdkTool, createSdkMcpServer as sdkCreateMcpServer } from '../services/agent/resolved-sdk'
 import { initAppManager, shutdownAppManager } from '../apps/manager'
 import { initAppRuntime, shutdownAppRuntime } from '../apps/runtime'
 import { installAppsSubscribers } from '../services/analytics/subscribers/apps.subscriber'
@@ -63,6 +67,7 @@ import { registerCliConfigHandlers } from '../ipc/cli-config'
 import { registerModelCapabilitiesHandlers } from '../ipc/model-capabilities'
 import { registerWeixinIlinkHandlers } from '../ipc/weixin-ilink'
 import { initRegistryService, shutdownRegistryService } from '../store'
+import { startUpgradeScheduler, stopUpgradeScheduler } from '../store/upgrade.service'
 import { cleanupImChannelTempFiles } from '../apps/runtime/im-channels'
 import { registerIdleTask, startIdleDrain } from './idle-queue'
 import { seedDefaultAppIfNeeded } from '../apps/manager/seed'
@@ -105,6 +110,12 @@ async function initPlatformAndApps(): Promise<void> {
     initMemory(),
   ])
 
+  // Inject the resolved agent-SDK MCP primitives into the memory tier, so
+  // platform/memory builds its MCP server without importing the services
+  // tier. The SDK is already initialized (see index.ts) and these refs are
+  // only invoked later, when a session's memory MCP server is built.
+  setMemorySdk({ tool: sdkTool, createSdkMcpServer: sdkCreateMcpServer })
+
   // Get the background service singleton (already initialized by initBackground())
   const background = getBackgroundService()
   if (!background) {
@@ -114,7 +125,7 @@ async function initPlatformAndApps(): Promise<void> {
   // ── Phase 2: App Manager ─────────────────────────────────────────────────
   const appManager = await initAppManager({ db })
 
-  // ── Phase 2.5: Migrate legacy config.mcpServers → DB ────────────────────
+  // ── Migrate legacy config.mcpServers → DB ───────────────────────────────
   // One-time migration: config.json mcpServers (dead storage from Issue #74)
   // are imported into the App Manager DB where getDbMcpServers() can read them.
   try {
@@ -129,13 +140,18 @@ async function initPlatformAndApps(): Promise<void> {
   // (FileWatcherSource, WebhookSource), activates Apps, and starts the router.
   const runtime = await initAppRuntime({ db, appManager, scheduler, memory, background })
 
-  // ── Phase 3.5: Analytics subscribers ────────────────────────────────────
+  // ── Analytics subscribers ───────────────────────────────────────────────
   // Wire lifecycle events (install/uninstall/run) into the analytics pipeline.
   // Must come after both appManager and runtime are ready.
   installAppsSubscribers(appManager, runtime)
 
   // ── Phase 4: Registry Service (App Store) ─────────────────────────────
   initRegistryService({ db })
+
+  // ── Upgrade Scheduler ─────────────────────────────────────────────────
+  // 6h periodic check + auto-apply for patch/minor on 'auto' strategy.
+  // Surfaces 'store:upgrade-available' events for major/notify/manual.
+  startUpgradeScheduler()
 
   // ── Start timer loops AFTER all wiring is complete ──────────────────────
   // This ensures no events fire before subscriptions are registered.
@@ -191,6 +207,19 @@ export function initializeExtendedServices(): void {
   // gate features (e.g. Tunnel section visibility under tunnelSafe).
   registerSecurityHandlers()
 
+  // Move credentials still under the legacy machine key (or plaintext) onto the
+  // persisted master key. No-op on open-source and already-migrated installs.
+  registerIdleTask('migrate-credential-encryption', async () => {
+    try {
+      migrateCredentialEncryption()
+    } catch (err) {
+      console.warn(
+        '[Bootstrap] Credential encryption migration failed:',
+        (err as Error).message,
+      )
+    }
+  })
+
   // Auto-restore so paired devices keep working without manual re-enable.
   // CF tunnel is intentionally not restored — its Quick Tunnel URL changes per
   // run, which would break any previously shared link.
@@ -216,6 +245,9 @@ export function initializeExtendedServices(): void {
   // Browser: Embedded BrowserView for Content Canvas
   // Note: BrowserView is created lazily when Canvas is opened
   registerBrowserHandlers(mainWindow)
+
+  // Browser Policy: user-extensible allowlist (Settings + blocked-page action)
+  registerBrowserPolicyHandlers()
 
   // AI Browser: No startup registration needed.
   // Initialization is self-contained in createAIBrowserMcpServer() (called on
@@ -245,6 +277,11 @@ export function initializeExtendedServices(): void {
   // and access a shared hidden BrowserWindow with stealth injection
   const backgroundService = initBackground()
   backgroundService.initTray()
+
+  // Wire browser-domain stealth injection into the platform daemon browser
+  // without the platform tier importing services (keeps platform → services
+  // direction clean). Best-effort: the daemon window runs without it if unset.
+  setDaemonStealthInjector(injectStealthScripts)
 
   // Analytics: fire-and-forget IPC channel for renderer telemetry
   registerAnalyticsHandlers()
@@ -328,6 +365,9 @@ export function initializeExtendedServices(): void {
 export async function cleanupExtendedServices(): Promise<void> {
   // Space: Flush any throttled activity timestamps to disk before teardown
   flushSpaceActivity()
+
+  // Store: Stop upgrade scheduler before tearing down registry / app manager
+  stopUpgradeScheduler()
 
   // Store: Shutdown registry service (before app manager)
   shutdownRegistryService()

@@ -16,7 +16,7 @@ import { useState, useCallback, useRef, useEffect } from 'react'
 import {
   Mail, MessageSquare, Bell, Webhook, Loader2,
   CheckCircle, XCircle, ChevronDown, RefreshCw, Bot,
-  Plus, Trash2, MoreVertical, Smartphone, AlertTriangle,
+  Plus, Trash2, MoreVertical, Smartphone, Info,
   QrCode,
 } from 'lucide-react'
 import { useTranslation } from '../../i18n'
@@ -35,6 +35,7 @@ import type {
 } from '../../../shared/types/im-channel'
 import { WeixinIlinkInstanceCard } from './WeixinIlinkInstanceCard'
 import { WecomScanAuthDialog } from './WecomScanAuthDialog'
+import { Popover, PopoverTrigger, PopoverContent } from '../ui/Popover'
 
 /** Product-level permission defaults (from IPC). Mirrors auth-loader.ImChannelsPermissionDefaults. */
 interface PermissionDefaults {
@@ -365,20 +366,6 @@ function InstanceCard({
 
   const [showMenu, setShowMenu] = useState(false)
   const [showDeleteConfirm, setShowDeleteConfirm] = useState(false)
-  const menuRef = useRef<HTMLDivElement>(null)
-
-  // Close menu on outside click
-  useEffect(() => {
-    if (!showMenu) return
-    const handler = (e: MouseEvent) => {
-      if (menuRef.current && !menuRef.current.contains(e.target as Node)) {
-        setShowMenu(false)
-        setShowDeleteConfirm(false)
-      }
-    }
-    document.addEventListener('mousedown', handler)
-    return () => document.removeEventListener('mousedown', handler)
-  }, [showMenu])
 
   // Debounced save for config fields.
   // pendingSaveRef always holds the most-recent unsaved value so we can
@@ -470,20 +457,24 @@ function InstanceCard({
           </div>
         </div>
         <div className="flex items-center gap-1.5 flex-shrink-0">
-          {/* Context menu */}
-          <div className="relative" ref={menuRef}>
-            <button
-              type="button"
-              onClick={(e) => { e.stopPropagation(); setShowMenu(!showMenu) }}
-              className="p-1 rounded hover:bg-muted transition-colors"
+          {/* Context menu. Popover renders the panel through a portal so it
+              escapes this card's `overflow-hidden`, which previously clipped
+              the dropdown. The wrapper stops clicks from toggling the header. */}
+          <div onClick={(e) => e.stopPropagation()}>
+            <Popover
+              open={showMenu}
+              onOpenChange={(open) => {
+                setShowMenu(open)
+                if (!open) setShowDeleteConfirm(false)
+              }}
             >
-              <MoreVertical className="w-3.5 h-3.5 text-muted-foreground" />
-            </button>
-            {showMenu && (
-              <div className="absolute right-0 top-full mt-1 bg-popover border border-border rounded-lg shadow-lg z-10 min-w-[140px] py-1">
+              <PopoverTrigger className="p-1 rounded hover:bg-muted transition-colors">
+                <MoreVertical className="w-3.5 h-3.5 text-muted-foreground" />
+              </PopoverTrigger>
+              <PopoverContent align="end" className="min-w-[140px] py-1">
                 <button
                   type="button"
-                  onClick={(e) => { e.stopPropagation(); setShowMenu(false); onReconnect() }}
+                  onClick={() => { setShowMenu(false); onReconnect() }}
                   className="w-full text-left px-3 py-1.5 text-sm hover:bg-muted transition-colors flex items-center gap-2"
                   disabled={!isEnabled}
                 >
@@ -497,14 +488,14 @@ function InstanceCard({
                     <div className="flex items-center gap-2">
                       <button
                         type="button"
-                        onClick={(e) => { e.stopPropagation(); setShowMenu(false); setShowDeleteConfirm(false); onDelete() }}
+                        onClick={() => { setShowMenu(false); setShowDeleteConfirm(false); onDelete() }}
                         className="flex-1 px-2 py-1 text-xs rounded bg-destructive/10 text-destructive hover:bg-destructive/20 transition-colors"
                       >
                         {t('Confirm')}
                       </button>
                       <button
                         type="button"
-                        onClick={(e) => { e.stopPropagation(); setShowDeleteConfirm(false) }}
+                        onClick={() => setShowDeleteConfirm(false)}
                         className="flex-1 px-2 py-1 text-xs rounded hover:bg-muted text-muted-foreground transition-colors"
                       >
                         {t('Cancel')}
@@ -514,15 +505,15 @@ function InstanceCard({
                 ) : (
                   <button
                     type="button"
-                    onClick={(e) => { e.stopPropagation(); setShowDeleteConfirm(true) }}
+                    onClick={() => setShowDeleteConfirm(true)}
                     className="w-full text-left px-3 py-1.5 text-sm hover:bg-muted text-destructive transition-colors flex items-center gap-2"
                   >
                     <Trash2 className="w-3.5 h-3.5" />
                     {t('Delete')}
                   </button>
                 )}
-              </div>
-            )}
+              </PopoverContent>
+            </Popover>
           </div>
           <ChevronDown
             className={`w-3.5 h-3.5 text-muted-foreground transition-transform duration-200 ${isExpanded ? 'rotate-180' : ''}`}
@@ -747,15 +738,6 @@ function PermissionSection({ instance, onChange, onDebouncedChange, permissionDe
   const guestPolicy = instance.guestPolicy
   const guestAccessEnabled = hasOwners && guestPolicy !== undefined
 
-  // Pending owner auto-claim — only meaningful for wecom-bot scan-auth bots.
-  // While true, the WeCom Intelligent Bot provider is waiting for the first
-  // inbound message to bind its sender as the sole owner. We surface this
-  // state in the UI so the empty owners list does not look broken; the
-  // existing "no owners set" warning is suppressed because the bot is in a
-  // deliberate, expected interim state.
-  const pendingOwnerClaim =
-    instance.type === 'wecom-bot' && instance.pendingOwnerClaim === true
-
   // Load installed MCP apps for the user MCP whitelist
   const { apps } = useAppsStore()
   const mcpApps = apps.filter(a => a.spec.type === 'mcp')
@@ -785,9 +767,6 @@ function PermissionSection({ instance, onChange, onDebouncedChange, permissionDe
     onDebouncedChange({
       ...instance,
       owners: parsed.length > 0 ? parsed : undefined,
-      // Manual edit cancels the wecom-bot auto-claim: the user has taken
-      // explicit control. No-op for instances that never had the flag.
-      ...(pendingOwnerClaim ? { pendingOwnerClaim: false } : {}),
     })
   }
 
@@ -881,24 +860,13 @@ function PermissionSection({ instance, onChange, onDebouncedChange, permissionDe
             </p>
           </div>
 
-          {/* Pending owner auto-claim hint (wecom-bot scan-auth only) — shown
-              instead of the empty-owners warning because this is an expected
-              interim state, not a misconfiguration. */}
-          {!hasOwners && pendingOwnerClaim && (
+          {/* No owners yet — auto-claim is active, so this is an expected
+              interim state rather than a misconfiguration. */}
+          {!hasOwners && (
             <div className="flex items-center gap-2 rounded-lg bg-primary/10 border border-primary/30 px-3 py-2">
-              <QrCode className="w-4 h-4 text-primary shrink-0" />
+              <Info className="w-4 h-4 text-primary shrink-0" />
               <p className="text-xs text-foreground/80">
-                {t('Send any message to this bot in WeCom — your user ID will be registered as the owner automatically. No manual lookup needed.')}
-              </p>
-            </div>
-          )}
-
-          {/* Warning: no owners set (suppressed during pending claim) */}
-          {!hasOwners && !pendingOwnerClaim && (
-            <div className="flex items-center gap-2 rounded-lg bg-yellow-500/10 border border-yellow-500/30 px-3 py-2">
-              <AlertTriangle className="w-4 h-4 text-yellow-600 dark:text-yellow-400 shrink-0" />
-              <p className="text-xs text-yellow-700 dark:text-yellow-300">
-                {t('No Owner IDs set. All users are treated as guests and cannot use any tools — chat only.')}
+                {t('No owner bound yet. The first user to send this bot a direct message will be bound as the owner automatically. Until then, all users are deny-all guests.')}
               </p>
             </div>
           )}
@@ -1271,12 +1239,11 @@ export function MessageChannelsSection({ config, setConfig }: MessageChannelsSec
   }, [])
 
   // Subscribe to main-initiated instance config updates (currently only used
-  // by the wecom-bot scan-auth owner auto-claim flow). When the user sends
-  // their first message in WeCom while this settings panel is open, the
-  // backend writes owners=[userid] + pendingOwnerClaim=false and broadcasts
-  // this event — we patch the local config so the owner ID and pending hint
-  // refresh without requiring a manual reload. configRef avoids re-subscribing
-  // on every config change.
+  // by the IM owner auto-claim flow). When the first direct message binds its
+  // sender as owner while this settings panel is open, the backend writes
+  // owners=[userid] and broadcasts this event — we patch the local config so
+  // the owner ID refreshes without requiring a manual reload. configRef
+  // avoids re-subscribing on every config change.
   const configRef = useRef(config)
   useEffect(() => { configRef.current = config }, [config])
   useEffect(() => {
@@ -1376,16 +1343,12 @@ export function MessageChannelsSection({ config, setConfig }: MessageChannelsSec
   const handleScanComplete = useCallback(async (result: {
     botId: string; secret: string; appId: string; appName: string
   }) => {
-    // Scan-auth path: force permission control ON and mark the instance as
-    // awaiting one-shot owner auto-claim. The WeCom Intelligent Bot scan
-    // protocol does not return the scanner's userid, so the wecom-bot
-    // provider will bind the first inbound sender as owner — no manual
-    // userid lookup required. This intentionally overrides product-level
-    // permissionDefaults, since scan-auth bots are by protocol only visible
-    // to their creator (single-user personal use). The manual-config path
-    // (handleAddInstance) still honors permissionDefaults — that flow
-    // legitimately covers team / multi-owner scenarios where auto-claim
-    // would bind the wrong user.
+    // Scan-auth path: force permission control ON. The WeCom Intelligent Bot
+    // scan protocol does not return the scanner's userid, so the generic
+    // owner auto-claim binds the first direct-message sender as owner — no
+    // manual userid lookup required. This intentionally overrides
+    // product-level permissionDefaults, since scan-auth bots are by protocol
+    // only visible to their creator (single-user personal use).
     const newInstance: ImChannelInstanceConfig = {
       id: generateId(),
       type: 'wecom-bot',
@@ -1394,7 +1357,6 @@ export function MessageChannelsSection({ config, setConfig }: MessageChannelsSec
       config: { botId: result.botId, secret: result.secret, wsUrl: '' },
       replyScope: 'all',
       permissionEnabled: true,
-      pendingOwnerClaim: true,
     }
     await saveInstances([...instances, newInstance])
     // Refresh the apps list so the newly-installed assistant appears in the

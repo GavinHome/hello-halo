@@ -446,7 +446,9 @@ export function onEvent(channel: string, callback: (data: unknown) => void): () 
       'app:navigate': 'onAppNavigate',
       'app:im-session-updated': 'onImSessionUpdated',
       'im-channels:instance-updated': 'onImChannelInstanceUpdated',
-      'notification:toast': 'onNotificationToast'
+      'notification:toast': 'onNotificationToast',
+      'store:sync-status-changed': 'onStoreSyncStatusChanged',
+      'store:upgrade-available': 'onStoreUpgradeAvailable',
     }
 
     const method = methodMap[channel]

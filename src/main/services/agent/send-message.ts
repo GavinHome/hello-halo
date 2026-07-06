@@ -16,11 +16,11 @@
  *     5. Return immediately (no await on stream processing)
  */
 
-import { getConfig } from '../config.service'
+import { getConfig } from '../../foundation/config.service'
 import { addMessage } from '../conversation.service'
 import { createAIBrowserMcpServer } from '../ai-browser'
 import { createWebSearchMcpServer } from '../web-search'
-import { createHaloAppsMcpServer } from '../../apps/conversation-mcp'
+import { createHaloAppsMcpServer } from '../app-bridge'
 import type {
   AgentRequest,
   SessionConfig,
@@ -115,7 +115,8 @@ export async function sendMessage(
       mcpServers['ai-browser'] = createAIBrowserMcpServer(undefined, workDir)
     }
     if (digitalHumansEnabled) {
-      mcpServers['halo-apps'] = createHaloAppsMcpServer(spaceId)
+      const haloApps = createHaloAppsMcpServer(spaceId)
+      if (haloApps) mcpServers['halo-apps'] = haloApps
     }
     mcpServers['web-search'] = createWebSearchMcpServer()
 
@@ -157,7 +158,8 @@ export async function sendMessage(
     // Get or create persistent V2 session (also starts persistent consumer if new)
     const v2Session = await getOrCreateV2Session(
       spaceId, conversationId, sdkOptions, sessionId, sessionConfig, workDir,
-      resolvedCredentials.displayModel  // Passed to consumer for thought parsing
+      resolvedCredentials.displayModel,  // Passed to consumer for thought parsing
+      resolvedCredentials.capabilities?.contextWindow
     )
 
     sessionObtained = true
@@ -165,7 +167,9 @@ export async function sendMessage(
     // Ensure consumer's displayModel is up-to-date.
     // When the session is reused (no rebuild), the consumer retains the old displayModel.
     // This keeps thought parsing ("Connected | Model: X") in sync after model switches.
-    updateConsumerDisplayModel(conversationId, resolvedCredentials.displayModel)
+    updateConsumerDisplayModel(
+      conversationId, resolvedCredentials.displayModel, resolvedCredentials.capabilities?.contextWindow
+    )
 
     // Dynamic runtime parameter adjustment
     try {

@@ -13,8 +13,7 @@ import os from 'os'
 import { existsSync, copyFileSync, mkdirSync } from 'fs'
 import { app } from 'electron'
 import { createSession } from './resolved-sdk'
-import { getConfig, onApiConfigChange, getCredentialsGeneration } from '../config.service'
-import { onMcpAppsChange } from '../../apps/manager/service'
+import { getConfig, onApiConfigChange, getCredentialsGeneration } from '../../foundation/config.service'
 import { getConversation } from '../conversation.service'
 import type {
   V2SDKSession,
@@ -32,7 +31,7 @@ import { isImSessionKey } from '../../../shared/apps/im-keys'
 import { emitAgentEvent } from './events'
 import { registerProcess, unregisterProcess, getCurrentInstanceId } from '../health'
 import { resolveCredentialsForSdk, buildBaseSdkOptions } from './sdk-config'
-import { createHaloAppsMcpServer } from '../../apps/conversation-mcp'
+import { createHaloAppsMcpServer } from '../app-bridge'
 import { createWebSearchMcpServer } from '../web-search'
 import { startConsumer, type ConsumerHandle } from './session-consumer'
 import { hasActiveTeamTasks } from './subagent-handler'
@@ -439,6 +438,7 @@ function closeV2SessionForRebuild(conversationId: string): void {
  * @param config - Session configuration for rebuild detection
  * @param workDir - Working directory (required for session migration when sessionId is provided)
  * @param displayModel - Display model name for thought parsing (when provided, starts persistent consumer)
+ * @param contextWindow - Source-resolved context window for token-usage display
  */
 export async function getOrCreateV2Session(
   spaceId: string,
@@ -447,7 +447,8 @@ export async function getOrCreateV2Session(
   sessionId?: string,
   config?: SessionConfig,
   workDir?: string,
-  displayModel?: string
+  displayModel?: string,
+  contextWindow?: number
 ): Promise<V2SessionInfo['session']> {
   // Check if we have an existing session for this conversation
   const existing = v2Sessions.get(conversationId)
@@ -605,7 +606,7 @@ export async function getOrCreateV2Session(
   // Automation apps (app-chat.ts, execute.ts) don't pass displayModel and handle
   // their own processStream() calls, so they don't get a consumer.
   if (displayModel) {
-    const consumer = startConsumer(session, spaceId, conversationId, displayModel)
+    const consumer = startConsumer(session, spaceId, conversationId, displayModel, contextWindow)
     consumers.set(conversationId, consumer)
     console.log(`[Agent][${conversationId}] Persistent consumer started`)
   }
@@ -655,7 +656,8 @@ export async function ensureSessionWarm(
   // Build MCP servers config (must match sendMessage to avoid session rebuild)
   const mcpServers: Record<string, any> = dbMcpServers ? { ...dbMcpServers } : {}
   if (digitalHumansEnabled) {
-    mcpServers['halo-apps'] = createHaloAppsMcpServer(spaceId)
+    const haloApps = createHaloAppsMcpServer(spaceId)
+    if (haloApps) mcpServers['halo-apps'] = haloApps
   }
   mcpServers['web-search'] = createWebSearchMcpServer()
 
@@ -680,10 +682,15 @@ export async function ensureSessionWarm(
   })
 
   try {
-    const session = await getOrCreateV2Session(spaceId, conversationId, sdkOptions, sessionId, undefined, workDir, resolvedCredentials.displayModel)
+    const session = await getOrCreateV2Session(
+      spaceId, conversationId, sdkOptions, sessionId, undefined, workDir,
+      resolvedCredentials.displayModel, resolvedCredentials.capabilities?.contextWindow
+    )
 
     // Ensure consumer's displayModel is up-to-date (same as sendMessage)
-    updateConsumerDisplayModel(conversationId, resolvedCredentials.displayModel)
+    updateConsumerDisplayModel(
+      conversationId, resolvedCredentials.displayModel, resolvedCredentials.capabilities?.contextWindow
+    )
 
     // Fetch supported commands from SDK and send to renderer
     // This provides slash commands immediately without needing to send a message
@@ -747,10 +754,14 @@ export function getConsumerHandle(conversationId: string): ConsumerHandle | null
  * Called by sendMessage/ensureSessionWarm to keep displayModel in sync after
  * model switches without requiring a full session rebuild.
  */
-export function updateConsumerDisplayModel(conversationId: string, displayModel: string): void {
+export function updateConsumerDisplayModel(
+  conversationId: string,
+  displayModel: string,
+  contextWindow?: number
+): void {
   const consumer = consumers.get(conversationId)
   if (consumer) {
-    consumer.updateDisplayModel(displayModel)
+    consumer.updateDisplayModel(displayModel, contextWindow)
   }
 }
 
@@ -963,13 +974,19 @@ onApiConfigChange(() => {
   invalidateAllSessions()
 })
 
-// Register for MCP apps change notifications.
-// Global MCP changes (spaceId=null) invalidate all sessions.
-// Space-scoped MCP changes invalidate only that space's sessions.
-onMcpAppsChange((spaceId) => {
+/**
+ * Invalidate sessions in response to an MCP-apps change.
+ * Global changes (`spaceId === null`) invalidate all sessions; space-scoped
+ * changes invalidate only that space's sessions.
+ *
+ * The Apps layer owns the `onMcpAppsChange` event and wires this handler to
+ * it at startup (see `apps/runtime`), keeping the services→apps dependency
+ * direction inverted.
+ */
+export function handleMcpAppsChange(spaceId: string | null): void {
   if (spaceId === null) {
     invalidateAllSessions()
   } else {
     invalidateSessionsForSpace(spaceId)
   }
-})
+}

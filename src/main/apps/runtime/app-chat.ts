@@ -26,7 +26,7 @@ import { join } from 'path'
 import { getAppManager } from '../manager'
 import { resolvePermission } from '../../../shared/apps/app-types'
 import type { MemoryCallerScope } from '../../platform/memory'
-import { getConfig } from '../../services/config.service'
+import { getConfig } from '../../foundation/config.service'
 import {
   getApiCredentials,
   getApiCredentialsForSource,
@@ -578,7 +578,11 @@ export async function sendAppChatMessage(
             `tokens=${streamResult.tokenUsage ? 'yes' : 'no'}`
           )
 
-          // Invoke onReply callback for external bridges (WeCom Bot auto-reply)
+          // Invoke onReply callback for external bridges (WeCom Bot auto-reply).
+          // Always fire when content exists — including the whitespace-only
+          // empty-response placeholder — because the bridge's onReply is what
+          // terminates a streaming IM session. Whether the placeholder is shown
+          // or replaced with a notice is the bridge's decision, not ours.
           if (onReply && replyContent) {
             try {
               onReply(replyContent)

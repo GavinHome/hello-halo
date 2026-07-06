@@ -21,7 +21,12 @@
 import type { Response } from 'express'
 import { parse as parseYaml } from 'yaml'
 
-import { loadProductConfig } from './ai-sources/auth-loader'
+import { loadProductConfig } from '../foundation/product-config'
+
+// `credentialAtRestSafe` is consumed by the foundation-tier at-rest crypto
+// primitive (`crypto-envelope.ts`), so its predicate lives in foundation.
+// Re-exported here to keep this module's documented policy surface complete.
+export { isCredentialAtRestSafe } from '../foundation/credential-safety'
 
 // ============================================================================
 // Policy shape
@@ -51,13 +56,26 @@ export interface SecurityPolicy {
   remoteMcpSafe?: boolean
 
   /**
-   * Encrypts the persisted remote-access credential at rest with
-   * SM4-CBC + HMAC-SM3 (encrypt-then-MAC; GM/T 0002 + GM/T 0091) under a
-   * machine-bound KEK. Off by default — open-source builds store the
-   * credential as plain text exactly as before. The plaintext is held in
-   * memory in both modes so the UI can keep displaying the current PIN
-   * and validation runs `crypto.timingSafeEqual` against the in-memory
-   * value.
+   * Encrypts persisted credentials at rest (remote-access PIN, AI source API
+   * keys/tokens, MCP and notification-channel secrets) with SM4-CBC +
+   * HMAC-SM3 (encrypt-then-MAC; GM/T 0002 + GM/T 0091). The KEK is derived
+   * via HKDF-SHA-256 from a persisted random master key (userData/cred.key),
+   * which is stable across restarts, network changes, and hardware
+   * reconfiguration; ciphertext written by older machine-seed builds is still
+   * read via a legacy fallback and re-encrypted under the master key on next
+   * save. Off by default — open-source builds store credentials as plain text
+   * exactly as before. Plaintext is held in memory in both modes so the UI
+   * can keep displaying the current PIN and validation runs
+   * `crypto.timingSafeEqual` against the in-memory value.
+   *
+   * Scope of protection (do not overstate it): this is encryption-AT-REST for
+   * compliance — on-disk data is ciphertext under a recognized (GM) algorithm.
+   * It is NOT a defense against an attacker who already has local filesystem
+   * access as the user: cred.key and config.json are both readable by that
+   * user, so a compromised account can recover both. It does protect a config
+   * file copied on its own (without cred.key). Real key isolation would
+   * require an OS keychain / TPM and is out of scope. See
+   * `src/main/http/auth/envelope.ts`.
    */
   credentialAtRestSafe?: boolean
 
@@ -119,6 +137,14 @@ export interface SecurityPolicy {
  */
 export interface PublicSecurityPolicy {
   tunnelSafe: boolean
+  /**
+   * True when the build runs an allowlist browser policy AND opts in to
+   * user-managed extensions (`browserPolicy.userExtensible: true`). Gates
+   * the Settings allowlist editor and the blocked-page "allow and retry"
+   * action. Open-source builds (no browserPolicy) are always false — the
+   * UI surfaces simply do not exist there.
+   */
+  browserAllowlistEditable: boolean
 }
 
 // ============================================================================
@@ -137,21 +163,6 @@ export function isRemoteMcpSafe(): boolean {
 }
 
 /**
- * True only when `credentialAtRestSafe` is explicitly set to boolean true.
- *
- * Consumers MUST treat this as a one-way gate: when false, the credential
- * persistence layer takes the standard path (plain string stored in
- * config). When true, the GM/T path is taken: HKDF-SHA-256 over a
- * machine-bound seed derives an SM4-CBC encryption key and an HMAC-SM3
- * MAC key (encrypt-then-MAC); see `src/main/http/auth/envelope.ts`. Any
- * non-boolean truthy value is treated as false to prevent accidental
- * enablement via config typos.
- */
-export function isCredentialAtRestSafe(): boolean {
-  return getSecurityPolicy().credentialAtRestSafe === true
-}
-
-/**
  * True only when `tunnelSafe` is explicitly set to boolean true.
  *
  * Any non-boolean truthy value is treated as false to prevent accidental
@@ -160,6 +171,21 @@ export function isCredentialAtRestSafe(): boolean {
  */
 export function isTunnelSafe(): boolean {
   return getSecurityPolicy().tunnelSafe === true
+}
+
+/**
+ * True only when the product browser policy is allowlist mode AND the build
+ * explicitly opts in via `browserPolicy.userExtensible: true`.
+ *
+ * This is the single gate for every user-allowlist surface: merge during URL
+ * checks, certificate trust for custom entries, the IPC mutation handlers,
+ * and (via {@link PublicSecurityPolicy}) the renderer UI. Lives here (not in
+ * browser-policy.service.ts) because config.service imports this module —
+ * placing it next to the policy logic would create an import cycle.
+ */
+export function isBrowserAllowlistUserExtensible(): boolean {
+  const policy = loadProductConfig().browserPolicy
+  return policy?.mode === 'allowlist' && policy.userExtensible === true
 }
 
 /**
@@ -238,6 +264,7 @@ export function isMcpCommandBlocked(command: string): boolean {
 export function getPublicSecurityPolicy(): PublicSecurityPolicy {
   return {
     tunnelSafe: isTunnelSafe(),
+    browserAllowlistEditable: isBrowserAllowlistUserExtensible(),
   }
 }
 
@@ -277,6 +304,42 @@ export function patchTouchesMcp(patch: unknown): boolean {
 export function configTouchesMcp(body: unknown): boolean {
   if (typeof body !== 'object' || body === null) return false
   return 'mcpServers' in (body as Record<string, unknown>)
+}
+
+/**
+ * Returns true when a config-update body touches the `browser` section
+ * (which carries `customAllowlist`). Used by POST /api/config: when the
+ * browser allowlist is user-extensible, mutations must go through the
+ * local desktop UI only — a remote caller must not be able to widen the
+ * browser security boundary.
+ */
+export function configTouchesBrowserAllowlist(body: unknown): boolean {
+  if (typeof body !== 'object' || body === null) return false
+  return 'browser' in (body as Record<string, unknown>)
+}
+
+/** Stable error code for the remote browser-allowlist write rejection. */
+export const BROWSER_ALLOWLIST_REMOTE_WRITE_FORBIDDEN = 'BROWSER_ALLOWLIST_REMOTE_WRITE_FORBIDDEN'
+
+/**
+ * Reject the request with 403 when the browser allowlist is user-extensible
+ * AND the config body touches the `browser` section. Returns true when the
+ * request was rejected (caller MUST return immediately).
+ *
+ * When the allowlist is NOT user-extensible, `browser.customAllowlist` is
+ * inert (never merged into any policy check), so remote writes are harmless
+ * and pass through unchanged.
+ */
+export function rejectIfRemoteBrowserAllowlistForbidden(res: Response, body: unknown): boolean {
+  if (!isBrowserAllowlistUserExtensible()) return false
+  if (!configTouchesBrowserAllowlist(body)) return false
+  console.warn('[SecurityPolicy] Blocked remote browser-allowlist write at POST /api/config')
+  res.status(403).json({
+    success: false,
+    error: 'Browser allowlist can only be changed from the local Halo app.',
+    code: BROWSER_ALLOWLIST_REMOTE_WRITE_FORBIDDEN,
+  })
+  return true
 }
 
 /**
