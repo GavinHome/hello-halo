@@ -15,6 +15,12 @@ export const agentRpc = {
   ensureSessionWarm: rawRpcMethod('agent:ensure-session-warm'),
   answerQuestion: rawRpcMethod('agent:answer-question'),
   getEngineCapabilities: rawRpcMethod('agent:get-engine-capabilities'),
+  getEngineAvailability: rawRpcMethod('agent:get-engine-availability'),
   injectMessage: rawRpcMethod('agent:inject-message'),
   testMcpConnections: rawRpcMethod('agent:test-mcp'),
+  probeMcpApp: rawRpcMethod('agent:probe-mcp'),
+  // Toolset broker (on-demand MCP toolsets)
+  listToolsets: rawRpcMethod('agent:toolsets-list'),
+  openToolset: rawRpcMethod('agent:toolsets-open'),
+  closeToolset: rawRpcMethod('agent:toolsets-close'),
 }

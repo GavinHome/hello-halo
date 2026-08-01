@@ -13,8 +13,12 @@ out
 # never checked in.
 resources/builtin-apps/
 
-# Release notes temp file
+# Portable Git archive for Windows builds (downloaded by scripts/prepare-binaries.mjs)
+resources/git-bash/
+
+# Release notes temp files
 .release-notes-current.md
+.release-notes-summary.md
 
 # Local environment variables (secrets)
 .env.local
@@ -29,6 +33,9 @@ local_docs/
 # Local plugins
 halo-local/
 product.json
+
+# Active product variant pointer (per-machine, managed by `npm run product`)
+.product-source
 
 # Local debug scripts
 vscode-debug/
@@ -71,3 +78,7 @@ src/sdk/
 AGENTS.md
 .reasonix
 .qoder
+# Stray KB wiki artifacts (real wikis live under ~/.halo, never in-repo)
+/wiki/
+# Personal marketing/intro drafts (not product code)
+/intro-doc/

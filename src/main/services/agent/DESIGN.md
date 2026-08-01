@@ -11,10 +11,14 @@
 | Session lifecycle (create / reuse / destroy / batch-invalidate on config change) | `session-manager.ts` | Largest file. V2 Session model. Registers callback on `config.service.ts` to auto-clean when API config changes. |
 | SDK stream → Thought[] translation | `stream-processor.ts` | Second largest. Incremental push, partial tool calls, interruption recovery. |
 | SDK invocation & configuration | `sdk-config.ts`, `resolved-sdk.ts`, `codex/` | Provider selection, model resolution, SDK option assembly. Alternate SDK engines are loaded only through `resolved-sdk.ts`; Codex-specific translation is isolated under `codex/`. |
-| System prompt composition | `system-prompt.ts` | Space context, conversation context, tool availability injection. |
+| Engine availability probe | `engine-availability.ts` | Detects which engine runtimes shipped in this build (manifest + entry file + platform binary for Codex) so `resolved-sdk.ts` can fall back instead of crashing at startup. Result is cached per process; exposed via `agent:get-engine-availability`. |
+| System prompt composition | `system-prompt.ts` | Space context, conversation context, tool availability injection. `buildKnowledgeSection` is exported separately for creation-time append. |
+| Knowledge context resolution | `knowledge-context.ts` | Conversation `knowledgeBaseIds` → injectable `KBReference[]` (agent→tlon dependency collector). Cheap id-only variant feeds the session knowledge fingerprint. |
 | Subagent orchestration | `subagent-handler.ts` | Nested agent invocations — Halo supports agents spawning agents. |
 | Permission gating | `permission-handler.ts` | AskUserQuestion, tool approval, permission mode resolution. |
-| MCP server routing | `mcp-manager.ts` | Registration, discovery, per-session MCP bindings. |
+| MCP server routing | `mcp-manager.ts` | Registration, discovery, per-session MCP bindings. Owns the shared status cache (`agent:mcp-status` broadcast). |
+| MCP connection probe | `mcp-probe.ts` | Native initialize+tools/list handshake via `@modelcontextprotocol/sdk` — no agent session, no token cost. Classifies failures (401→needs-auth, refused/timeout→failed + `errorDetail`). Triggered by app lifecycle events (install/resume/spec-update, wired in `apps/runtime`), by SDK-reported `failed`/`needs-auth` (stream-processor follow-up), and manually via `agent:probe-mcp` IPC. A probe that connects also clears the server's CC auth record. |
+| CC MCP auth state | `mcp-auth-state.ts` | Removes stale OAuth records CC persists under `CLAUDE_CONFIG_DIR` after any 4xx from a URL-based MCP server. Such a record has no expiry and makes CC skip the server entirely, so it is cleared before session creation and after a successful probe. Mirrors CC-internal formats; a mismatch degrades to a no-op. |
 | External message injection | `inject-message.ts` | Entry point for IM inbound / programmatic triggers to push messages into a session. |
 | Session control | `control.ts` | Interrupt / pause / switch-model mid-session. |
 | Outbound message composition | `send-message.ts`, `message-utils.ts` | User message assembly, attachment handling, token counting. |
@@ -26,6 +30,9 @@
 
 - **Session state (thoughts, tool calls, token usage) is authoritative in the main process.** The renderer consumes events and must not persist agent state independently.
 - **API config changes invalidate sessions in bulk.** `config.service.ts` exposes `onApiConfigChange(callback)`. `services/agent` registers that callback at module load. On change, all V2 Sessions are destroyed; the next user message creates a fresh Session with updated config. Do not attempt to mutate live sessions.
+- **Model selection is per-conversation.** A conversation pins its own `{ modelSourceId, modelId }` (Cursor-style), stamped at creation from the active global selection and resolved at send/warm time by `helpers.ts getApiCredentialsForConversation` (falls back to the global selection for legacy/unavailable pins). Because the model is baked into the encoded credentials at session creation (see `sdk-config.ts`), a pin change is detected by the per-conversation `credentialsFingerprint` on `V2SessionInfo` and rebuilds only that conversation's session; the fingerprint is what lets a conversation whose pin differs from the global selection resolve and rebuild independently. Note the desktop `ModelSelector` also writes the choice to the global selection — the "last-used" seed for new conversations and non-chat surfaces (apps use their own `userOverrides`) — and a global model change still bumps `credentialsGeneration`, invalidating all sessions (unchanged pre-pin behavior; sessions resume transparently via their `sessionId`).
+- **Session identity & rebuild triggers.** A conversation's live session is keyed by `conversationId` and rebuilt when any of three dimensions diverge from what was captured at creation: `credentialsGeneration` (global API-config epoch), `credentialsFingerprint` (this conversation's model/env — see above), and `knowledgeFingerprint` (the RESOLVED knowledge-base set + workDir, computed cheaply per send via `knowledge-context.ts resolveConversationKnowledgeBaseIds`; resolved-not-declared so a KB whose indexing finishes after creation triggers a rebuild instead of staying invisible forever, and workDir so KB-chat vs normal turns never share a mis-rooted session). Rebuild requests converge on `pendingConsumerRebuilds` and are applied at safe points only: turn end (consumer), idle reuse (`hasConsumablePendingRebuild`), or immediately when no consumer is active. Busy windows that defer a rebuild: an active turn, running team agents, mid-creation (`sessionsUnderCreation`), and a dispatched-but-unacknowledged turn (`turnsAwaitingInit`, marked by send-message before `session.send()` and cleared at `system:init`).
+- **Creation-time assembly is deferred and owned by the creation path.** `getOrCreateV2Session` deduplicates concurrent calls per conversation (in-flight promise map — a warm-up racing a send must never spawn two CC processes). Expensive/stateful inputs are passed as thunks and materialized only when a session is actually created, after any cleanup of the previous one: `buildMcpServers` (in-process MCP instances bind to exactly one session transport; a pre-built record could carry instances still bound to a torn-down session, whose connect failure the SDK swallows — tools silently vanish) and `resolveKnowledgeBases` (index.md reads + `# Knowledge` prompt section; deferred for cost — a reused session throws the resolution away).
 - **SDK protocol boundary.** `@anthropic-ai/claude-agent-sdk` is the default engine and defines Halo's internal stream/session protocol. `@hello-halo/agent-sdk`, `@openai/codex-sdk`, and future engines must expose the same `tool` / `createSdkMcpServer` / `createSession` / `query` surface through `resolved-sdk.ts`. Native engine events must be normalized before they reach `session-consumer.ts` or `stream-processor.ts`.
 
   Per-turn output contract (REQUIRED of every engine adapter, not just Claude). Adapters that emit only token-level `stream_event` frames silently break consumers that key off top-level envelopes (apps/runtime `execute.ts`, app-chat `lastAssistantText`, session-store JSONL replay):
@@ -89,6 +96,7 @@ Injection rules:
 | If you need to... | Start here |
 |---|---|
 | Change how the SDK is invoked or configured | `sdk-config.ts` / `resolved-sdk.ts` |
+| Change engine bundling detection / startup fallback | `engine-availability.ts` / `resolved-sdk.ts` |
 | Change how SDK events become thoughts | `stream-processor.ts` |
 | Change session lifecycle or invalidation rules | `session-manager.ts` |
 | Add a new field to the system prompt | `system-prompt.ts` |
@@ -97,6 +105,8 @@ Injection rules:
 | Interrupt / pause / switch mid-turn | `control.ts` |
 | Change subagent behavior | `subagent-handler.ts` |
 | Register a new MCP server source | `mcp-manager.ts` |
+| Change MCP connectivity checks / failure classification | `mcp-probe.ts` |
+| Touch CC's credential store / MCP auth records | `mcp-auth-state.ts` (never inline elsewhere) |
 
 ## 8) Hard Rules
 
@@ -104,4 +114,5 @@ Injection rules:
 2. **Never re-implement injection paths.** All external triggers go through `inject-message.ts`.
 3. **Never bypass `stream-processor`** when translating SDK events — subagent-handler and permission-handler compose with it, not around it.
 4. **Do not weaken the config-change invalidation contract.** Partial in-place session updates are forbidden; batch destroy + recreate is the only supported path.
-5. **Guard every `mainWindow` access** in async callbacks with `!mainWindow.isDestroyed()`.
+5. **Mirrors of CC-internal formats stay in one module and fail closed.** `mcp-auth-state.ts` reproduces CC's entry-key derivation and keychain naming; a CC upgrade that changes either must make the lookup miss, never make it match the wrong record. Revalidate when bumping `@anthropic-ai/claude-agent-sdk`.
+6. **Guard every `mainWindow` access** in async callbacks with `!mainWindow.isDestroyed()`.
