@@ -18,7 +18,8 @@ import {
 import { Header } from '../components/layout/Header'
 import { SpaceGuide } from '../components/space/SpaceGuide'
 import { CreateSpaceDialog } from '../components/space/CreateSpaceDialog'
-import { Blocks, ArrowRight, AlertCircle, SendHorizontal, Unplug, Bot, LayoutGrid, List, Play, Pause, ChevronDown, AlignJustify, MessageSquare, HelpCircle, Clock } from 'lucide-react'
+import { SortableSpaceList } from '../components/space/SortableSpaceList'
+import { Blocks, ArrowRight, AlertCircle, SendHorizontal, Unplug, Bot, LayoutGrid, List, Play, Pause, ChevronDown, AlignJustify, MessageSquare, HelpCircle, Clock, BookOpen } from 'lucide-react'
 import { AppAvatar } from '../components/apps/AppAvatar'
 import { useIsMobile } from '../hooks/useIsMobile'
 import { api } from '../api'
@@ -60,7 +61,7 @@ function writeLayout(key: string, value: LayoutMode) {
 export function HomePageNew() {
   const { t } = useTranslation()
   const { setView: setViewRaw } = useAppStore()
-  const { haloSpace, spaces, loadSpaces, setCurrentSpace, refreshCurrentSpace, updateSpace, deleteSpace } = useSpaceStore()
+  const { haloSpace, spaces, loadSpaces, setCurrentSpace, refreshCurrentSpace, updateSpace, deleteSpace, reorderSpaces } = useSpaceStore()
   const { apps, loadApps } = useAppsStore()
   const { setCurrentTab, openMarketplaceFilteredBy } = useAppsPageStore()
 
@@ -426,6 +427,23 @@ export function HomePageNew() {
           </>
         )}
 
+        {/* Knowledge entry — opens the Tlon knowledge-base manager */}
+        <button
+          onClick={() => setView('tlon')}
+          className="w-full mb-8 flex items-center gap-3 p-4 rounded-xl border border-border bg-card hover:bg-secondary transition-colors text-left group"
+        >
+          <div className="w-9 h-9 rounded-lg bg-primary/10 flex items-center justify-center flex-shrink-0">
+            <BookOpen className="w-5 h-5 text-primary" />
+          </div>
+          <div className="min-w-0 flex-1">
+            <p className="text-sm font-medium">{t('Knowledge')}</p>
+            <p className="text-xs text-muted-foreground truncate">
+              {t('Teach Halo from your files and folders')}
+            </p>
+          </div>
+          <ArrowRight className="w-4 h-4 text-muted-foreground opacity-0 group-hover:opacity-100 transition-opacity flex-shrink-0" />
+        </button>
+
         {/* Spaces Section */}
         <div className="mb-4 flex items-center justify-between">
           <div className="flex items-center gap-1.5">
@@ -462,13 +480,15 @@ export function HomePageNew() {
             <p className="text-sm">{t('No dedicated spaces yet')}</p>
           </div>
         ) : (
-          <div className={`grid gap-4 ${effectiveSpaceLayout === 'grid' ? 'grid-cols-2' : 'grid-cols-1'}`}>
-            {spaces.map((space, i) => {
+          <SortableSpaceList
+            items={spaces}
+            onReorder={(ids) => { void reorderSpaces(ids) }}
+            className={`grid gap-4 ${effectiveSpaceLayout === 'grid' ? 'grid-cols-2' : 'grid-cols-1'}`}
+            renderItem={(space) => {
               const spaceApps = apps.filter(a => a.spaceId === space.id && a.status !== 'uninstalled')
               const latestConv = latestConversations[space.id] ?? null
               return (
                 <SpaceCard
-                  key={`${space.id}-${i}`}
                   space={space}
                   layout={effectiveSpaceLayout}
                   onClick={() => handleSpaceClick(space)}
@@ -479,8 +499,8 @@ export function HomePageNew() {
                   latestConversation={latestConv}
                 />
               )
-            })}
-          </div>
+            }}
+          />
         )}
 
         {/* Digital Humans Section — only in unified mode */}
