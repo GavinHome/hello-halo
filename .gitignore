@@ -33,6 +33,7 @@ local_docs/
 # Local plugins
 halo-local/
 product.json
+product.local.json
 
 # Active product variant pointer (per-machine, managed by `npm run product`)
 .product-source
@@ -74,11 +75,15 @@ RELEASE_NOTES.md
 # Halo Agent SDK (managed in separate private repo)
 src/sdk/
 /temp/
-.agents/
-AGENTS.md
-.reasonix
-.qoder
 # Stray KB wiki artifacts (real wikis live under ~/.halo, never in-repo)
 /wiki/
 # Personal marketing/intro drafts (not product code)
 /intro-doc/
+
+# Local git worktrees created for isolated work
+.claude/worktrees/
+# Agent tooling (dev-local)
+.agents/
+AGENTS.md
+.reasonix
+.qoder

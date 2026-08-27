@@ -421,7 +421,7 @@ export function ChatHistoryPanel() {
         `}
         title={t('Conversation history')}
       >
-        <History className={`w-4 h-4 ${isExpanded ? 'text-primary' : ''}`} />
+        <History className="w-4 h-4" />
         <span className="text-sm font-medium hidden sm:inline">
           {conversations.length > 0
             ? t('{{count}} conversations', { count: conversations.length })

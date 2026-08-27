@@ -65,6 +65,15 @@ interface ThoughtsSummaryRecord {
   duration?: number
 }
 
+/** Image attachment record — matches renderer's ImageAttachment for bubble display */
+interface ImageRecord {
+  id: string
+  type: 'image'
+  mediaType: string
+  data: string
+  name?: string
+}
+
 /**
  * Message record returned to the renderer.
  * Matches renderer's Message interface so MessageItem renders correctly.
@@ -74,30 +83,24 @@ interface MessageRecord {
   role: 'user' | 'assistant'
   content: string
   timestamp: string
-  images?: Array<{ id: string; type: 'image'; mediaType: string; data: string; name?: string }>
   thoughts?: ThoughtRecord[]
   thoughtsSummary?: ThoughtsSummaryRecord
+  images?: ImageRecord[]
 }
 
 // ============================================
 // Writer
 // ============================================
 
-/** Image shape accepted by writeTrigger — matches both renderer ImageAttachment and API format */
-interface TriggerImage {
-  id?: string
-  type: string
-  mediaType?: string   // camelCase (renderer / backend ImageAttachment)
-  media_type?: string  // snake_case (IPC wire format from appChatSend)
-  data: string
-  name?: string
-}
-
 export interface SessionWriter {
   /** Append a raw SDK stream event */
   writeEvent(event: Record<string, unknown>): void
-  /** Write the initial trigger message (before stream starts) */
-  writeTrigger(content: string, images?: TriggerImage[]): void
+  /**
+   * Write the initial trigger message (before stream starts). Images are
+   * stored as base64 image blocks in the trigger content (same trade-off as
+   * main-chat conversation JSON) so chat bubbles survive the JSONL reload.
+   */
+  writeTrigger(content: string, images?: Array<{ mediaType: string; data: string; name?: string }>): void
 }
 
 /** Get the directory for run session files */
@@ -138,26 +141,20 @@ export function openSessionWriter(spacePath: string, appId: string, runId: strin
       appendLine({ _ts: new Date().toISOString(), ...event } as StoredEvent)
     },
 
-    writeTrigger(content: string, images?: TriggerImage[]): void {
-      // Build content blocks: always include text, plus image blocks when images are provided
-      const contentBlocks: Array<Record<string, unknown>> = [{ type: 'text', text: content }]
-      if (images && images.length > 0) {
-        for (const img of images) {
-          const mediaType = img.mediaType || img.media_type || 'image/jpeg'
-          contentBlocks.push({
-            type: 'image',
-            source: { type: 'base64', media_type: mediaType, data: img.data },
-            // Preserve id and name for round-trip extraction
-            _imageId: img.id,
-            _imageName: img.name,
-          })
-        }
+    writeTrigger(content, images): void {
+      const blocks: Array<Record<string, unknown>> = [{ type: 'text', text: content }]
+      for (const img of images ?? []) {
+        blocks.push({
+          type: 'image',
+          source: { type: 'base64', media_type: img.mediaType, data: img.data },
+          ...(img.name ? { _name: img.name } : {}),
+        })
       }
       appendLine({
         _ts: new Date().toISOString(),
         type: 'user',
         _isTrigger: true,
-        message: { role: 'user', content: contentBlocks },
+        message: { role: 'user', content: blocks },
       })
     },
   }
@@ -386,18 +383,18 @@ export function convertEventsToMessages(events: StoredEvent[]): MessageRecord[] 
         // Flush the current turn before showing the user message.
         flush()
         const textContent = extractTextContent(content)
-        const images = extractImages(content)
+        // Image blocks become bubble attachments only for trigger records (our
+        // own format) — SDK round-trip user events may carry image blocks that
+        // are tool plumbing, not something the user attached.
+        const images = event._isTrigger ? extractImageRecords(content, msgIdx + 1) : []
         if (textContent || images.length > 0) {
-          const msg: MessageRecord = {
+          messages.push({
             id: `session-msg-${++msgIdx}`,
             role: 'user',
             content: textContent,
             timestamp: ts,
-          }
-          if (images.length > 0) {
-            msg.images = images
-          }
-          messages.push(msg)
+            ...(images.length > 0 ? { images } : {}),
+          })
         }
       }
       continue
@@ -729,22 +726,17 @@ function extractTextContent(content: unknown): string {
     .join('')
 }
 
-/**
- * Extract image attachments from content blocks (reverse of writeTrigger's content block build).
- * Content blocks are in Anthropic API format: { type: 'image', source: { type: 'base64', media_type, data } }
- * Output matches renderer's ImageAttachment format: { id, type, mediaType, data, name }
- */
-function extractImages(content: unknown): Array<{ id: string; type: 'image'; mediaType: string; data: string; name?: string }> {
+/** Rebuild ImageRecords from base64 image blocks in a trigger record's content */
+function extractImageRecords(content: unknown, msgIdx: number): ImageRecord[] {
   if (!Array.isArray(content)) return []
-  let idx = 0
   return content
-    .filter((b: any) => b.type === 'image' && b.source?.data)
-    .map((b: any) => ({
-      id: b._imageId || `img-${++idx}`,
+    .filter((b: any) => b.type === 'image' && b.source?.type === 'base64' && b.source.data)
+    .map((b: any, i: number) => ({
+      id: `session-img-${msgIdx}-${i}`,
       type: 'image' as const,
-      mediaType: b.source.media_type || 'image/jpeg',
+      mediaType: b.source.media_type || 'image/png',
       data: b.source.data,
-      ...(b._imageName ? { name: b._imageName } : {}),
+      ...(b._name ? { name: b._name } : {}),
     }))
 }
 

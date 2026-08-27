@@ -10,7 +10,7 @@
 
 import { useState, useRef, useEffect, useCallback, useMemo } from 'react'
 import { Play, Pause, RotateCcw, RefreshCw, Globe, ExternalLink, MessageSquare, Activity, Cog, ChevronRight, Share2 } from 'lucide-react'
-import { AppAvatar } from './AppAvatar'
+import { AutomationAvatar } from './AutomationAvatar'
 import { useAppsStore } from '../../stores/apps.store'
 import { useAppsPageStore } from '../../stores/apps-page.store'
 import { AppStatusDot } from './AppStatusDot'
@@ -154,11 +154,7 @@ export function AutomationHeader({ appId, spaceName }: AutomationHeaderProps) {
       <div className="flex items-start gap-3 px-4 pt-4 pb-3">
         {/* Avatar */}
         <div className="flex-shrink-0 rounded-xl overflow-hidden">
-          <AppAvatar
-            size={44}
-            name={name || appId}
-            status={status}
-          />
+          <AutomationAvatar name={name || appId} size={44} />
         </div>
 
         {/* Info */}

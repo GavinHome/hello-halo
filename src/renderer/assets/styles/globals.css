@@ -55,6 +55,10 @@
   --halo-warning: 38 92% 50%;
   --halo-error: 0 62% 50%;
 
+  /* App type accent colors (skill = cyan, mcp = amber). Brightened for the
+     dark default; .light carries the source values. */
+  --app-skill: 174 60% 48%;
+  --app-mcp: 38 90% 55%;
   /* Onboarding hero accent gradient endpoints (blue → violet). Hue is shared by
      both themes; the light theme applies them at low opacity (see .login-hero). */
   --hero-from: 217 91% 60%;
@@ -88,6 +92,10 @@
   --halo-success: 142 71% 40%;
   --halo-warning: 38 92% 45%;
   --halo-error: 0 72% 51%;
+
+  /* App type accent colors — light values (skill #0d9488, mcp #b26a00) */
+  --app-skill: 175 84% 32%;
+  --app-mcp: 36 100% 35%;
 }
 
 * {
@@ -948,14 +956,8 @@ body {
 }
 
 .halo-space-card:hover {
-  /* Only apply hover on devices with pointer (avoid iOS double-tap) */
-}
-
-@media (hover: hover) {
-  .halo-space-card:hover {
-    border-color: hsl(var(--primary));
-    box-shadow: 0 0 20px hsl(var(--primary) / 0.2);
-  }
+  border-color: hsl(var(--primary));
+  box-shadow: 0 0 20px hsl(var(--primary) / 0.2);
 }
 
 /* Conversation history panel styles */
