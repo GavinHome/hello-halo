@@ -24,7 +24,6 @@ operations on this page:
   POST   /api/apps/<appId>/clear-memory                              Delete all of a digital human's memory files   !! destructive
   POST   /api/apps/<appId>/config                                    Replace a digital human's user configuration values
   POST   /api/apps/<appId>/escalation/<entryId>/respond              Answer a digital human's pending question (it stopped to ask a human before continuing)   !! destructive
-  GET    /api/apps/<appId>/export-spec                               Export a digital human definition as YAML
   POST   /api/apps/<appId>/frequency                                 Change how often a digital human runs, without editing its full definition (spec)
   POST   /api/apps/<appId>/im-chat/clear                             Clear a digital human's chat history in a bound IM chat   !! destructive
   GET    /api/apps/<appId>/im-chat/messages                          Read a digital human's transcript in a bound IM chat
@@ -87,8 +86,8 @@ POST   /api/apps/<appId>/chat/clear                                Clear a digit
      curl -sX POST "$HALO_API_URL/api/apps/<appId>/chat/clear" \
           -H "Authorization: Bearer $HALO_API_TOKEN" \
           -H "Content-Type: application/json" \
-          -d '{"spaceId":"<spaceId — a uuid from GET /api/spaces>"}'
-     # body: {"spaceId": "<spaceId — a uuid from GET /api/spaces>"}
+          -d '{"spaceId":"<spaceId — the app's own spaceId from GET /api/apps>"}'
+     # body: {"spaceId": "<spaceId — the app's own spaceId from GET /api/apps>"}
      # out: {success:true}
      # note: spaceId is required even though the app is already scoped to one. Optional conversationId clears one specific session instead of the default one.
 
@@ -108,8 +107,8 @@ POST   /api/apps/<appId>/chat/send                                 Send a messag
      curl -sX POST "$HALO_API_URL/api/apps/<appId>/chat/send" \
           -H "Authorization: Bearer $HALO_API_TOKEN" \
           -H "Content-Type: application/json" \
-          -d '{"spaceId":"<spaceId — a uuid from GET /api/spaces>","message":"What did you find today?"}'
-     # body: {"spaceId": "<spaceId — a uuid from GET /api/spaces>", "message": "What did you find today?"}
+          -d '{"spaceId":"<spaceId — the app's own spaceId from GET /api/apps>","message":"What did you find today?"}'
+     # body: {"spaceId": "<spaceId — the app's own spaceId from GET /api/apps>", "message": "What did you find today?"}
      # out: {success:true,data:{conversationId}}  // accepted, not answered
      # note: conversationId decides which thread it lands in. Omit it for the main thread. For a fresh thread, take the one POST /api/apps/<appId>/sessions/create hands back — it is already in the right form. To continue a thread the user created in Halo, build it from GET /api/im-sessions?appId=: join appId, channel, chatType and chatId as app-chat:<appId>:<channel>:<chatType>:<chatId>.
      # note: Only the "local" and "http" channels are accepted; a thread whose source is "im" is refused, because this API must not put words into a real conversation with a person. 400 with the expected form when the id is malformed, and chatId must match [A-Za-z0-9_-].
@@ -156,13 +155,6 @@ POST   /api/apps/<appId>/escalation/<entryId>/respond              Answer a digi
      # out: {success:true}
      # note: choice and text are both optional (send whichever the pending question asked for). Find the pending entryId via GET /:appId/activity (type:"escalation") or by app.status==="waiting_user". This is the human decision it was waiting for — answer with the user's actual input, never a guessed one, and there is no way to un-answer it afterward.
 
-GET    /api/apps/<appId>/export-spec                               Export a digital human definition as YAML
-     curl -s "$HALO_API_URL/api/apps/<appId>/export-spec" -H "Authorization: Bearer $HALO_API_TOKEN"
-     # out: {success:true,data:{yaml:string,filename:string}}
-     # note: The YAML is verbatim, including any credentials the app keeps in mcp_server.env or headers. Never paste it back to the user or into a file you did not create for them.
-     # note: To reinstall it elsewhere, hand the YAML to the create_automation_app tool — the raw import route is closed so that required skills and rollback are not skipped.
-     # err: 404 when the appId does not exist.
-
 POST   /api/apps/<appId>/frequency                                 Change how often a digital human runs, without editing its full definition (spec)
      # note: reversible — can be undone or corrected afterward.
      curl -sX POST "$HALO_API_URL/api/apps/<appId>/frequency" \
@@ -178,15 +170,15 @@ POST   /api/apps/<appId>/im-chat/clear                             Clear a digit
      curl -sX POST "$HALO_API_URL/api/apps/<appId>/im-chat/clear" \
           -H "Authorization: Bearer $HALO_API_TOKEN" \
           -H "Content-Type: application/json" \
-          -d '{"spaceId":"<spaceId — a uuid from GET /api/spaces>","channel":"wecom","chatType":"direct","chatId":"<chatId — from GET /api/im-sessions>"}'
-     # body: {"spaceId": "<spaceId — a uuid from GET /api/spaces>", "channel": "wecom", "chatType": "direct", "chatId": "<chatId — from GET /api/im-sessions>"}
+          -d '{"spaceId":"<spaceId — the app's own spaceId from GET /api/apps>","channel":"wecom","chatType":"direct","chatId":"<chatId — from GET /api/im-sessions>"}'
+     # body: {"spaceId": "<spaceId — the app's own spaceId from GET /api/apps>", "channel": "wecom", "chatType": "direct", "chatId": "<chatId — from GET /api/im-sessions>"}
      # out: {success:true}
      # note: All four body fields are required, 400 otherwise. chatType is "direct" or "group".
 
 GET    /api/apps/<appId>/im-chat/messages                          Read a digital human's transcript in a bound IM chat
-     curl -s "$HALO_API_URL/api/apps/<appId>/im-chat/messages" -H "Authorization: Bearer $HALO_API_TOKEN" | head -c 4000
+     curl -s "$HALO_API_URL/api/apps/<appId>/im-chat/messages?channel=wecom-bot&chatId=<chatId — from GET /api/im-sessions>&spaceId=<spaceId — the app's own spaceId from GET /api/apps>" -H "Authorization: Bearer $HALO_API_TOKEN" | head -c 4000
      # out: {success:true,data:[{id,role:"user"|"assistant",content,timestamp,thoughts?,thoughtsSummary?,images?}]}
-     # note: Required query: ?channel=&chatId=&spaceId=. 400 if any is missing. Optional ?chatType=group, defaults to direct.
+     # note: All three query params are required, 400 otherwise. spaceId must be the app's own — a different but valid one is accepted and reads the wrong space. Optional ?chatType=group, defaults to direct.
      # note: This is real correspondence with a person on the other end — read it only when the task needs it.
 
 POST   /api/apps/<appId>/im-chat/stop                              Stop a digital human's in-progress reply in a bound IM chat (keeps history)
@@ -292,8 +284,8 @@ POST   /api/apps/<appId>/sessions/delete                           Delete a chat
      curl -sX POST "$HALO_API_URL/api/apps/<appId>/sessions/delete" \
           -H "Authorization: Bearer $HALO_API_TOKEN" \
           -H "Content-Type: application/json" \
-          -d '{"spaceId":"<spaceId — a uuid from GET /api/spaces>","conversationId":"<conversationId — a uuid from GET /api/spaces/$HALO_SPACE_ID/conversations>"}'
-     # body: {"spaceId": "<spaceId — a uuid from GET /api/spaces>", "conversationId": "<conversationId — a uuid from GET /api/spaces/$HALO_SPACE_ID/conversations>"}
+          -d '{"spaceId":"<spaceId — the app's own spaceId from GET /api/apps>","conversationId":"<conversationId — a uuid from GET /api/spaces/$HALO_SPACE_ID/conversations>"}'
+     # body: {"spaceId": "<spaceId — the app's own spaceId from GET /api/apps>", "conversationId": "<conversationId — a uuid from GET /api/spaces/$HALO_SPACE_ID/conversations>"}
      # out: {success:true}
      # err: 400 if spaceId or conversationId is missing
 
@@ -301,8 +293,8 @@ POST   /api/apps/<appId>/sessions/fork                             Branch an exi
      curl -sX POST "$HALO_API_URL/api/apps/<appId>/sessions/fork" \
           -H "Authorization: Bearer $HALO_API_TOKEN" \
           -H "Content-Type: application/json" \
-          -d '{"spaceId":"<spaceId — a uuid from GET /api/spaces>","sourceConversationId":"<conversationId — a uuid from GET /api/spaces/$HALO_SPACE_ID/conversations>"}'
-     # body: {"spaceId": "<spaceId — a uuid from GET /api/spaces>", "sourceConversationId": "<conversationId — a uuid from GET /api/spaces/$HALO_SPACE_ID/conversations>"}
+          -d '{"spaceId":"<spaceId — the app's own spaceId from GET /api/apps>","sourceConversationId":"<conversationId — a uuid from GET /api/spaces/$HALO_SPACE_ID/conversations>"}'
+     # body: {"spaceId": "<spaceId — the app's own spaceId from GET /api/apps>", "sourceConversationId": "<conversationId — a uuid from GET /api/spaces/$HALO_SPACE_ID/conversations>"}
      # out: {success:true,data:{conversationId}}
      # err: 400 if spaceId or sourceConversationId is missing
 

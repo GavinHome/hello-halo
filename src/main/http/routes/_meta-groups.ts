@@ -41,6 +41,9 @@ export const GROUPS: Record<GroupId, GroupMeta> = {
       'stopping a running task': 'conversation',
       'running shell commands in the working directory': 'terminal',
     },
+    withheld: [
+      'Download a file, or a whole space, as bytes — those routes answer outside this API\'s JSON envelope, so they are closed to you. Read the file instead, or use your own file tools.',
+    ],
   },
   'digital-human': {
     title: 'digital-human — create, run and configure digital humans',
@@ -90,7 +93,8 @@ export const GROUPS: Record<GroupId, GroupMeta> = {
       'where a space keeps its files': 'workspace',
     },
     withheld: [
-      'Add a model source, or change an API key — both need the key in plaintext, so the user does it in Settings > AI Model rather than sending a secret into this conversation.',
+      'Add a model source, change an API key, or test one — all need the key in plaintext, so the user does it in Settings > AI Model rather than sending a secret into this conversation.',
+      'Change any other setting — appearance, permissions, system behaviour. They share one write endpoint that replaces whole branches of the configuration at once, so it stays closed rather than risk dropping settings nobody asked you to touch. Settings, in the Halo app.',
       'Change remote-access settings (port, token, tunnel) — the user does this in Settings > Remote Access, on the desktop app only; it is not in the remote web UI.',
     ],
     noEndpoint: {
@@ -107,6 +111,9 @@ export const GROUPS: Record<GroupId, GroupMeta> = {
       'knowledge collections': 'knowledge-base',
       'installing or removing a skill': 'tool:skill_manage',
     },
+    withheld: [
+      'Publish something to the store, or export a digital human definition to a file — the user does both in the Halo app. Publishing is public and cannot be taken back, and an exported definition carries whatever credentials the app holds.',
+    ],
   },
   terminal: {
     title: 'terminal — interactive shell sessions',

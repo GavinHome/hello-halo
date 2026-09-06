@@ -13,7 +13,8 @@ export const MODULE: RouteModuleMeta = {
         'This really starts Halo working, and the reply is produced after the response comes back. success:true means accepted, not answered.',
         'Poll GET /api/agent/generating/<conversationId> for progress — back off (2s, then double), do not tight-loop.',
         'Optional body fields: resumeSessionId, thinkingEnabled (boolean), knowledgeBaseId, images (base64 attachments).',
-        'Nothing stops a turn you start from messaging you back. Target a conversation other than your own, or create one with POST /api/spaces/$HALO_SPACE_ID/conversations, and do not build a loop out of it.',
+        'Create the conversation you target with POST /api/spaces/$HALO_SPACE_ID/conversations. Nothing tells you which id in GET /api/agent/sessions is your own, so picking one from there risks talking to yourself, and nothing stops the turn you start from messaging you back.',
+        'A turn you start can stop to ask a question, and answering it is not open to you — the user answers it in the Halo app. Do not start one you are unwilling to leave pending.',
       ].join('\n'),
     },
     'POST /api/agent/stop': {

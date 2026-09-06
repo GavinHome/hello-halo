@@ -33,15 +33,15 @@ POST   /api/apps/<appId>/im-chat/clear                             Clear a digit
      curl -sX POST "$HALO_API_URL/api/apps/<appId>/im-chat/clear" \
           -H "Authorization: Bearer $HALO_API_TOKEN" \
           -H "Content-Type: application/json" \
-          -d '{"spaceId":"<spaceId — a uuid from GET /api/spaces>","channel":"wecom","chatType":"direct","chatId":"<chatId — from GET /api/im-sessions>"}'
-     # body: {"spaceId": "<spaceId — a uuid from GET /api/spaces>", "channel": "wecom", "chatType": "direct", "chatId": "<chatId — from GET /api/im-sessions>"}
+          -d '{"spaceId":"<spaceId — the app's own spaceId from GET /api/apps>","channel":"wecom","chatType":"direct","chatId":"<chatId — from GET /api/im-sessions>"}'
+     # body: {"spaceId": "<spaceId — the app's own spaceId from GET /api/apps>", "channel": "wecom", "chatType": "direct", "chatId": "<chatId — from GET /api/im-sessions>"}
      # out: {success:true}
      # note: All four body fields are required, 400 otherwise. chatType is "direct" or "group".
 
 GET    /api/apps/<appId>/im-chat/messages                          Read a digital human's transcript in a bound IM chat
-     curl -s "$HALO_API_URL/api/apps/<appId>/im-chat/messages" -H "Authorization: Bearer $HALO_API_TOKEN" | head -c 4000
+     curl -s "$HALO_API_URL/api/apps/<appId>/im-chat/messages?channel=wecom-bot&chatId=<chatId — from GET /api/im-sessions>&spaceId=<spaceId — the app's own spaceId from GET /api/apps>" -H "Authorization: Bearer $HALO_API_TOKEN" | head -c 4000
      # out: {success:true,data:[{id,role:"user"|"assistant",content,timestamp,thoughts?,thoughtsSummary?,images?}]}
-     # note: Required query: ?channel=&chatId=&spaceId=. 400 if any is missing. Optional ?chatType=group, defaults to direct.
+     # note: All three query params are required, 400 otherwise. spaceId must be the app's own — a different but valid one is accepted and reads the wrong space. Optional ?chatType=group, defaults to direct.
      # note: This is real correspondence with a person on the other end — read it only when the task needs it.
 
 POST   /api/apps/<appId>/im-chat/stop                              Stop a digital human's in-progress reply in a bound IM chat (keeps history)

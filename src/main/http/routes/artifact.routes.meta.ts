@@ -41,9 +41,10 @@ export const MODULE: RouteModuleMeta = {
       expose: 'ai',
       group: 'workspace',
       summary: 'Read one file from a space',
+      query: '?path=/absolute/path/inside/the/space',
       returns: '{"success":true,"data":{"content":"…","mimeType":"text/plain","encoding":"utf-8","size":1234}}',
       notes: [
-        'Query: ?path= (absolute). Binary types (png, jpg, pdf, zip, …) come back base64 with encoding:"base64".',
+        'Binary types (png, jpg, pdf, zip, …) come back base64 with encoding:"base64".',
         'Your own Read tool is usually the better door — this one exists for reading a file in a space that is not your working directory.',
         'The content is verbatim and unredacted, so a .env or a pasted key comes back in the clear. Do not echo it into the conversation.',
         '400 missing path, 403 outside an allowed space, 404 not found, 500 "File too large" above 10MB text / 50MB binary.',

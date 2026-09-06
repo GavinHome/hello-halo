@@ -575,8 +575,7 @@
   },
   {
     "method": "GET",
-    "path": "/api/apps/:appId/export-spec",
-    "group": "digital-human"
+    "path": "/api/apps/:appId/export-spec"
   },
   {
     "method": "POST",

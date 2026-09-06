@@ -9,12 +9,25 @@ import { describe, it, expect, beforeEach, vi } from 'vitest'
 
 vi.mock('../../../../src/main/services/api-ref/resource-path', () => ({
   readApiRefJson: (file: string) => {
-    if (file === 'scope.json') return [{ method: 'GET', path: '/api/apps' }]
+    if (file === 'scope.json') {
+      return [
+        { method: 'GET', path: '/api/apps' },
+        { method: 'GET', path: '/api/spaces/:spaceId' },
+      ]
+    }
     if (file === 'routes.json') {
       return [
         { method: 'GET', path: '/api/apps' },
         { method: 'GET', path: '/api/apps/:appId', group: 'digital-human' },
         { method: 'GET', path: '/api/config' },
+        // A literal registered ahead of a parameterized sibling, internal
+        // while the sibling is exposed — the one arrangement that tells the
+        // two candidate algorithms apart. The real tables happen to contain
+        // no such pair today, so without it here nothing in the suite would
+        // notice classify() being rewritten to "does any allowed pattern
+        // match".
+        { method: 'GET', path: '/api/spaces/halo', group: 'workspace' },
+        { method: 'GET', path: '/api/spaces/:spaceId' },
       ]
     }
     return null
@@ -36,6 +49,11 @@ describe('classify', () => {
 
   it('forbids without a group when the route has none (e.g. internal)', () => {
     expect(classify('GET', '/api/config')).toEqual({ decision: 'forbidden', group: undefined })
+  })
+
+  it('forbids an internal literal that a later exposed pattern also matches', () => {
+    expect(classify('GET', '/api/spaces/halo')).toEqual({ decision: 'forbidden', group: 'workspace' })
+    expect(classify('GET', '/api/spaces/other')).toEqual({ decision: 'allowed' })
   })
 
   it('treats an unregistered path as unknown', () => {

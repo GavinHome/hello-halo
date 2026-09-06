@@ -42,9 +42,9 @@ POST   /api/apps/<appId>/move-space                                Move a digita
      # note: Send {"newSpaceId": null} to make it global (available in every space). 404 if appId does not exist; 400 if newSpaceId is an empty string.
 
 GET    /api/artifacts/content                                      Read one file from a space
-     curl -s "$HALO_API_URL/api/artifacts/content" -H "Authorization: Bearer $HALO_API_TOKEN"
+     curl -s "$HALO_API_URL/api/artifacts/content?path=/absolute/path/inside/the/space" -H "Authorization: Bearer $HALO_API_TOKEN"
      # out: {"success":true,"data":{"content":"…","mimeType":"text/plain","encoding":"utf-8","size":1234}}
-     # note: Query: ?path= (absolute). Binary types (png, jpg, pdf, zip, …) come back base64 with encoding:"base64".
+     # note: Binary types (png, jpg, pdf, zip, …) come back base64 with encoding:"base64".
      # note: Your own Read tool is usually the better door — this one exists for reading a file in a space that is not your working directory.
      # note: The content is verbatim and unredacted, so a .env or a pasted key comes back in the clear. Do not echo it into the conversation.
      # err: 400 missing path, 403 outside an allowed space, 404 not found, 500 "File too large" above 10MB text / 50MB binary.
@@ -196,6 +196,15 @@ PUT    /api/spaces/reorder                                         Set the displ
      # body: {"spaceIds":["<uuid>","<uuid>","<uuid>"]}
      # out: {"success":true}
      # note: Send every space id in the order you want. A partial list scrambles the rest — call GET /api/spaces first and reorder that full list.
+
+Halo does all of these; you do not. Say so, and say where:
+  - Download a file, or a whole space, as bytes — those routes answer outside this API's JSON envelope, so they are closed to you. Read the file instead, or use your own file tools.
+That list is complete for this area and the search has already been done for
+  you: do not grep the index for these, and do not guess a path — it will 403.
+For anything NOT on that list the normal rule still applies: grep the index
+  before you tell the user something is impossible.
+After saying where, tell the user which nearby parts you CAN do for them —
+  a hand-off reads very differently from a refusal.
 
 -----------------------------------------------------------------------
 $HALO_API_URL, $HALO_API_TOKEN and $HALO_SPACE_ID are already set in your Bash

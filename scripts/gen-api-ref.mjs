@@ -710,8 +710,14 @@ function looksLikeListResponse(returns) {
   return typeof returns === 'string' && /data\s*:\s*\[/.test(returns)
 }
 
-function buildCurl(method, path, jsonBody, truncate) {
-  const url = `$HALO_API_URL${toDisplayPath(path)}`
+/**
+ * `query` is appended raw, unlike the path: `toDisplayPath` rewrites
+ * `:spaceId` to `$HALO_SPACE_ID`, which is right for a path segment and wrong
+ * for a query parameter whose value is some other space. Neither mistake
+ * produces an error the agent would notice, so the meta author owns the text.
+ */
+function buildCurl(method, path, query, jsonBody, truncate) {
+  const url = `$HALO_API_URL${toDisplayPath(path)}${query ?? ''}`
   const pipe = truncate ? ' | head -c 4000' : ''
   if (jsonBody === undefined) {
     const flag = method === 'GET' ? '-s' : `-sX ${method}`
@@ -759,7 +765,7 @@ function renderEntry(r, pathWidth) {
   }
   const jsonBody = r.method !== 'GET' ? r.meta.__derivedBody : undefined
   const truncate = r.method === 'GET' && looksLikeListResponse(r.meta.returns)
-  const lines = [header, ...renderImpactLines(r.meta), buildCurl(r.method, r.path, jsonBody, truncate)]
+  const lines = [header, ...renderImpactLines(r.meta), buildCurl(r.method, r.path, r.meta.query, jsonBody, truncate)]
   if (r.meta.body !== undefined) lines.push(`${BASE_INDENT}# body: ${r.meta.body}`)
   if (r.meta.returns) lines.push(`${BASE_INDENT}# out: ${r.meta.returns}`)
   if (r.meta.notes) {

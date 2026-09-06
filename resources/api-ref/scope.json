@@ -352,10 +352,6 @@
     "path": "/api/apps/:appId/state"
   },
   {
-    "method": "GET",
-    "path": "/api/apps/:appId/export-spec"
-  },
-  {
     "method": "POST",
     "path": "/api/apps/:appId/chat/send"
   },

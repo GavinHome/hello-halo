@@ -42,6 +42,16 @@ export interface AiRouteMeta extends RouteMetaBase {
   summary: string
   /** Request body shape, written as the literal JSON an agent would send. */
   body?: string
+  /**
+   * Query string appended to the example URL verbatim, leading `?` included.
+   *
+   * Two rules, because breaking either yields a plausible answer rather than
+   * an error. It is never rewritten the way a path is — a rendered
+   * `$HALO_SPACE_ID` would name the session's space where a route wants some
+   * other one. And it carries required parameters only: appending an optional
+   * filter turns a complete answer into a quietly narrowed one.
+   */
+  query?: string
   /** Response shape, read off the handler — never guessed. */
   returns?: string
   /** Error meanings and recovery hints, one per line. */

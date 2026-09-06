@@ -72,7 +72,7 @@ POST   /api/store/apps/<slug>/install                              Install an ap
           -d '{"spaceId":"$HALO_SPACE_ID"}'
      # body: {"spaceId":"$HALO_SPACE_ID"}
      # out: {success:true,data:{appId}} or {success:false,error,code?}
-     # note: Always send spaceId. The handler treats an omitted spaceId as a GLOBAL install, not as "the current space" — leaving it out silently installs somewhere the user did not ask for.
+     # note: Always send spaceId, and send the right one. It is used exactly as sent: nothing fills it in and nothing checks it against the space you are working in. Omit it and the install goes GLOBAL; name another space and it installs there. Both answer success:true, and the response never says which space was written.
      # note: Pass "spaceId":null only when the user explicitly asked for a global install (mcp/skill types only).
      # note: Optional field: userConfig (object).
      # note: Identical behavior to POST /api/store/install (slug in path instead of body), including the 403 MCP_COMMAND_BLOCKED case.
@@ -107,13 +107,13 @@ POST   /api/store/import-dhpkg                                     Install a dig
      curl -sX POST "$HALO_API_URL/api/store/import-dhpkg" \
           -H "Authorization: Bearer $HALO_API_TOKEN" \
           -H "Content-Type: application/json" \
-          -d '{"filePath":"/absolute/path/to/app.dhpkg","spaceId":"<spaceId — a uuid from GET /api/spaces>"}'
-     # body: {"filePath":"/absolute/path/to/app.dhpkg","spaceId":"<spaceId — a uuid from GET /api/spaces>"}
+          -d '{"filePath":"/absolute/path/to/app.dhpkg","spaceId":"$HALO_SPACE_ID"}'
+     # body: {"filePath":"/absolute/path/to/app.dhpkg","spaceId":"$HALO_SPACE_ID"}
      # out: {success:true,data:{appId}}
      # note: Installs and activates whatever the package contains — it starts running on its own schedule. Only import a file the user pointed you at. Undo with DELETE /api/apps/<appId>.
      # note: A raw install: unlike the create_automation_app tool it does not fetch the package's required skills or roll back a half-finished install, so check GET /api/apps/<appId> afterwards rather than assuming.
      # note: filePath is read with no sandbox check, so any path this machine can see resolves. That is not a licence to browse — pass through what the user gave you.
-     # note: spaceId is optional. 400 when filePath is missing.
+     # note: spaceId is used exactly as sent — omitted means a global install, another space means it installs there, and neither is reported back. 400 when filePath is missing.
      # note: Activation failing after install still returns success:true; check GET /api/apps/<appId> to confirm it is running.
 
 POST   /api/store/install                                          Install an app from the store by slug
@@ -124,7 +124,7 @@ POST   /api/store/install                                          Install an ap
           -d '{"slug":"author/app-id","spaceId":"$HALO_SPACE_ID"}'
      # body: {"slug":"author/app-id","spaceId":"$HALO_SPACE_ID"}
      # out: {success:true,data:{appId}} or {success:false,error,code?}
-     # note: Always send spaceId. The handler treats an omitted spaceId as a GLOBAL install, not as "the current space" — leaving it out silently installs somewhere the user did not ask for.
+     # note: Always send spaceId, and send the right one. It is used exactly as sent: nothing fills it in and nothing checks it against the space you are working in. Omit it and the install goes GLOBAL; name another space and it installs there. Both answer success:true, and the response never says which space was written.
      # note: Pass "spaceId":null only when the user explicitly asked for a global install (mcp/skill types only).
      # note: Optional field: userConfig (object).
      # err: 400 = missing slug.
@@ -244,6 +244,15 @@ POST   /api/store/updates/check-now                                Re-check all 
      curl -sX POST "$HALO_API_URL/api/store/updates/check-now" -H "Authorization: Bearer $HALO_API_TOKEN"
      # out: {success:true,data:[{appId,currentVersion,latestVersion,entry,strategy,severity}]}
      # note: Apps set to auto-update silently apply any patch/minor update found — this is not just a read.
+
+Halo does all of these; you do not. Say so, and say where:
+  - Publish something to the store, or export a digital human definition to a file — the user does both in the Halo app. Publishing is public and cannot be taken back, and an exported definition carries whatever credentials the app holds.
+That list is complete for this area and the search has already been done for
+  you: do not grep the index for these, and do not guess a path — it will 403.
+For anything NOT on that list the normal rule still applies: grep the index
+  before you tell the user something is impossible.
+After saying where, tell the user which nearby parts you CAN do for them —
+  a hand-off reads very differently from a refusal.
 
 -----------------------------------------------------------------------
 $HALO_API_URL, $HALO_API_TOKEN and $HALO_SPACE_ID are already set in your Bash

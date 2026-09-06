@@ -96,7 +96,6 @@ POST   /api/apps/<appId>/upgrade-strategy                          [ai]       di
 POST   /api/apps/<appId>/permissions/revoke                        [ai]       digital-human           Revoke a named permission from a digital human
 PATCH  /api/apps/<appId>/spec                                      [wrapped]  digital-human           Edit part of a digital human's definition (spec) without replacing all of it
 GET    /api/apps/<appId>/state                                     [ai]       digital-human           Get real-time run state of a digital human (running/queued/idle/etc.)
-GET    /api/apps/<appId>/export-spec                               [ai]       digital-human           Export a digital human definition as YAML
 POST   /api/apps/import-spec                                       [wrapped]  digital-human           Install a digital human (or other app type) from a YAML definition (spec) string
 POST   /api/apps/<appId>/chat/send                                 [ai]       digital-human           Send a message to a digital human and let it reply
 POST   /api/apps/<appId>/chat/stop                                 [ai]       digital-human           Stop a digital human's in-progress chat reply

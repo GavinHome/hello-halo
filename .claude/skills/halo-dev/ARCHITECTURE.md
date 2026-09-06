@@ -652,9 +652,12 @@ listener (`src/main/http/self-api/`) reached with curl.
   the `expose` field in `*.routes.meta.ts`. That allow-list is the only bound —
   space is not one. The listener once refused any request naming a space other
   than the session's own and injected its own when none was named; both were
-  removed. The refusal stopped nothing (the agent holds Bash and read the same
-  files off disk) and the injection silently narrowed list responses so the
-  agent under-reported against the window the user was looking at.
+  removed. For reads the refusal stopped nothing a read could not already do,
+  the agent holding Bash; it did also stop cross-space *writes*, which are now
+  permitted deliberately, so a route taking a `spaceId` acts on the one it is
+  given and its manual entry has to say so. The injection silently narrowed
+  list responses, leaving the agent to under-report against the window the
+  user was looking at.
 - **Adding a route** means adding its meta entry too — `npm run test:api-ref`
   fails the build when the generated tree and the routes have drifted.
 

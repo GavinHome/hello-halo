@@ -29,19 +29,14 @@ export const MODULE: RouteModuleMeta = {
       summary: 'Get one installed digital human (or other app) by id',
       returns: '{success:true,data:InstalledApp|null}  — same shape as GET /api/apps entries, redacted the same way',
     },
-    // The spec comes back as one opaque YAML string, so the loopback
-    // listener's JSON-leaf redaction cannot reach mcp_server.env/headers
-    // inside it — unlike every sibling here, this response is unredacted.
+    // The whole spec arrives as one opaque YAML string, and self-api/redact.ts
+    // walks parsed JSON by key — it cannot see inside a serialized blob, so
+    // mcp_server.env would leave verbatim. Keeping this route off the listener
+    // is what lets that module keep promising every response is redacted, and
+    // that promise is what the next serializing route will be written against.
+    // The agent reads a spec off disk with its own tools instead.
     'GET /api/apps/:appId/export-spec': {
-      expose: 'ai',
-      group: 'digital-human',
-      summary: 'Export a digital human definition as YAML',
-      returns: '{success:true,data:{yaml:string,filename:string}}',
-      notes: [
-        'The YAML is verbatim, including any credentials the app keeps in mcp_server.env or headers. Never paste it back to the user or into a file you did not create for them.',
-        'To reinstall it elsewhere, hand the YAML to the create_automation_app tool — the raw import route is closed so that required skills and rollback are not skipped.',
-        '404 when the appId does not exist.',
-      ].join('\n'),
+      expose: 'internal',
     },
 
     'GET /api/apps/:appId/available-skills': {
@@ -292,7 +287,7 @@ export const MODULE: RouteModuleMeta = {
       expose: 'ai',
       group: 'digital-human',
       summary: 'Send a message to a digital human and let it reply',
-      body: '{"spaceId": "<spaceId — a uuid from GET /api/spaces>", "message": "What did you find today?"}',
+      body: '{"spaceId": "<spaceId — the app\'s own spaceId from GET /api/apps>", "message": "What did you find today?"}',
       returns: '{success:true,data:{conversationId}}  // accepted, not answered',
       notes: [
         'conversationId decides which thread it lands in. Omit it for the main thread. For a fresh thread, take the one POST /api/apps/<appId>/sessions/create hands back — it is already in the right form. To continue a thread the user created in Halo, build it from GET /api/im-sessions?appId=: join appId, channel, chatType and chatId as app-chat:<appId>:<channel>:<chatType>:<chatId>.',
@@ -338,10 +333,11 @@ export const MODULE: RouteModuleMeta = {
       expose: 'ai',
       group: ['digital-human', 'channels'],
       summary: "Read a digital human's transcript in a bound IM chat",
+      query: '?channel=wecom-bot&chatId=<chatId — from GET /api/im-sessions>&spaceId=<spaceId — the app\'s own spaceId from GET /api/apps>',
       returns:
         '{success:true,data:[{id,role:"user"|"assistant",content,timestamp,thoughts?,thoughtsSummary?,images?}]}',
       notes: [
-        'Required query: ?channel=&chatId=&spaceId=. 400 if any is missing. Optional ?chatType=group, defaults to direct.',
+        'All three query params are required, 400 otherwise. spaceId must be the app\'s own — a different but valid one is accepted and reads the wrong space. Optional ?chatType=group, defaults to direct.',
         'This is real correspondence with a person on the other end — read it only when the task needs it.',
       ].join('\n'),
     },
@@ -349,7 +345,7 @@ export const MODULE: RouteModuleMeta = {
       expose: 'ai',
       group: 'digital-human',
       summary: "Clear a digital human's chat history",
-      body: '{"spaceId": "<spaceId — a uuid from GET /api/spaces>"}',
+      body: '{"spaceId": "<spaceId — the app\'s own spaceId from GET /api/apps>"}',
       returns: '{success:true}',
       notes: 'spaceId is required even though the app is already scoped to one. Optional conversationId clears one specific session instead of the default one.',
       impact: 'irreversible',
@@ -365,7 +361,7 @@ export const MODULE: RouteModuleMeta = {
       expose: 'ai',
       group: ['digital-human', 'channels'],
       summary: "Clear a digital human's chat history in a bound IM chat",
-      body: '{"spaceId": "<spaceId — a uuid from GET /api/spaces>", "channel": "wecom", "chatType": "direct", "chatId": "<chatId — from GET /api/im-sessions>"}',
+      body: '{"spaceId": "<spaceId — the app\'s own spaceId from GET /api/apps>", "channel": "wecom", "chatType": "direct", "chatId": "<chatId — from GET /api/im-sessions>"}',
       returns: '{success:true}',
       notes: 'All four body fields are required, 400 otherwise. chatType is "direct" or "group".',
       impact: 'irreversible',
@@ -391,7 +387,7 @@ export const MODULE: RouteModuleMeta = {
       expose: 'ai',
       group: 'digital-human',
       summary: 'Branch an existing chat thread into a new one, copying its history',
-      body: '{"spaceId": "<spaceId — a uuid from GET /api/spaces>", "sourceConversationId": "<conversationId — a uuid from GET /api/spaces/$HALO_SPACE_ID/conversations>"}',
+      body: '{"spaceId": "<spaceId — the app\'s own spaceId from GET /api/apps>", "sourceConversationId": "<conversationId — a uuid from GET /api/spaces/$HALO_SPACE_ID/conversations>"}',
       returns: '{success:true,data:{conversationId}}',
       notes: '400 if spaceId or sourceConversationId is missing',
     },
@@ -399,7 +395,7 @@ export const MODULE: RouteModuleMeta = {
       expose: 'ai',
       group: 'digital-human',
       summary: 'Delete a chat thread with a digital human',
-      body: '{"spaceId": "<spaceId — a uuid from GET /api/spaces>", "conversationId": "<conversationId — a uuid from GET /api/spaces/$HALO_SPACE_ID/conversations>"}',
+      body: '{"spaceId": "<spaceId — the app\'s own spaceId from GET /api/apps>", "conversationId": "<conversationId — a uuid from GET /api/spaces/$HALO_SPACE_ID/conversations>"}',
       returns: '{success:true}',
       notes: '400 if spaceId or conversationId is missing',
       impact: 'irreversible',

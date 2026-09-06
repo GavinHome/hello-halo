@@ -151,7 +151,8 @@ GET    /api/system/version                                         Read the runn
      # out: {"success":true,"data":"2.1.15"}
 
 Halo does all of these; you do not. Say so, and say where:
-  - Add a model source, or change an API key — both need the key in plaintext, so the user does it in Settings > AI Model rather than sending a secret into this conversation.
+  - Add a model source, change an API key, or test one — all need the key in plaintext, so the user does it in Settings > AI Model rather than sending a secret into this conversation.
+  - Change any other setting — appearance, permissions, system behaviour. They share one write endpoint that replaces whole branches of the configuration at once, so it stays closed rather than risk dropping settings nobody asked you to touch. Settings, in the Halo app.
   - Change remote-access settings (port, token, tunnel) — the user does this in Settings > Remote Access, on the desktop app only; it is not in the remote web UI.
 That list is complete for this area and the search has already been done for
   you: do not grep the index for these, and do not guess a path — it will 403.
