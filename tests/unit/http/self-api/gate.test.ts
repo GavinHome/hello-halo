@@ -74,7 +74,7 @@ beforeAll(async () => {
     })
   })
   app.get('/api/config', (_req, res) => res.json({ success: true, data: {} }))
-  // Echoes what the guard left behind, so a test can see the defaulted space.
+  // Echoes the query back, so a test can see whether the middleware rewrote it.
   app.get('/api/apps', (req, res) => res.json({ success: true, data: { sawSpaceId: req.query.spaceId } }))
   // Mirrors the exposed handlers that destructure req.body with no try/catch.
   app.post('/api/apps/:appId/boom', (req, res) => {
@@ -147,24 +147,16 @@ describe('self-API gate, assembled', () => {
     expect(JSON.stringify(body)).not.toMatch(/self-api|\.ts:|at Object|node_modules/)
   })
 
-  it('defaults a missing spaceId to the calling session, not to every space', async () => {
+  it('passes a request through with no space of its own added', async () => {
     const res = await call('/api/apps')
     expect(res.status).toBe(200)
-    expect((await res.json()).data.sawSpaceId).toBe(SESSION_SPACE)
+    expect((await res.json()).data.sawSpaceId).toBeUndefined()
   })
 
-  it('refuses a request aimed at another space', async () => {
+  it('serves a request aimed at another space', async () => {
     const res = await call('/api/apps?spaceId=space-b')
-    expect(res.status).toBe(403)
-    expect((await res.json()).code).toBe('halo.self_api.wrong_space')
-  })
-
-  it('keeps one session token from reaching another session space', async () => {
-    const other = issueSelfApiToken('space-b')
-    const mine = await call('/api/apps')
-    expect((await mine.json()).data.sawSpaceId).toBe(SESSION_SPACE)
-    const theirs = await call('/api/apps', `Bearer ${other}`)
-    expect((await theirs.json()).data.sawSpaceId).toBe('space-b')
+    expect(res.status).toBe(200)
+    expect((await res.json()).data.sawSpaceId).toBe('space-b')
   })
 
   it('serves nothing outside /api/', async () => {

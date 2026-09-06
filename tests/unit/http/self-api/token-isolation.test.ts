@@ -31,7 +31,7 @@ describe('self-API / remote-access token isolation', () => {
     setCustomAccessToken(REMOTE_ACCESS_TOKEN)
     const selfToken = issueSelfApiToken(SPACE_ID)
 
-    expect(resolveSelfApiToken(REMOTE_ACCESS_TOKEN)).toBeNull()
-    expect(resolveSelfApiToken(selfToken)).toEqual({ spaceId: SPACE_ID })
+    expect(resolveSelfApiToken(REMOTE_ACCESS_TOKEN)).toBe(false)
+    expect(resolveSelfApiToken(selfToken)).toBe(true)
   })
 })

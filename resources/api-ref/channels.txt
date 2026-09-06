@@ -1,22 +1,27 @@
 ## channels — inbound IM channels and outbound notifications
 covers: connect and disconnect IM channels, bind a chat to a digital human,
-        list bound sessions, configure and test outbound notification channels
+        list every thread a digital human has (IM and its own), read a bound
+        chat transcript, configure and test outbound notification channels,
+        drop cached channel tokens
 not here:
   the digital human on the other end of a channel -> digital-human
   model providers and API keys -> settings
 
 operations on this page:
   POST   /api/apps/<appId>/im-chat/clear                             Clear a digital human's chat history in a bound IM chat   !! destructive
+  GET    /api/apps/<appId>/im-chat/messages                          Read a digital human's transcript in a bound IM chat
   POST   /api/apps/<appId>/im-chat/stop                              Stop a digital human's in-progress reply in a bound IM chat (keeps history)
   GET    /api/im-channels/permission-defaults                        Get this build's default guest-access permission settings for new IM instances
   GET    /api/im-channels/providers                                  List available IM channel provider types and their config fields
   POST   /api/im-channels/reconnect                                  Reconnect one IM channel instance
   POST   /api/im-channels/reload                                     Reload all IM channel instances from saved config
   GET    /api/im-channels/status                                     Get connection status for all IM channel instances, or one via ?instanceId=
-  GET    /api/im-sessions                                            List known IM contacts/chats bound to digital humans, optional ?appId= filter
+  GET    /api/im-sessions                                            List every chat thread a digital human has, its own and IM ones
   POST   /api/im-sessions/remove                                     Remove a chat binding from the IM session registry
   POST   /api/im-sessions/set-custom-name                            Set a custom display name for a chat binding
   POST   /api/im-sessions/set-proactive                              Toggle whether a run's result is auto-pushed to this chat when it finishes
+  POST   /api/notify-channels/clear-cache                            Drop cached notification-channel access tokens
+  GET    /api/notify-channels/product-config                         Read the product-level notification channel customisation
   POST   /api/notify-channels/test                                   Send a test notification through one configured channel
   POST   /api/wecom-bot/reconnect                                    Reconnect all configured WeCom bot instances
   GET    /api/wecom-bot/status                                       Check whether a WeCom bot channel is configured and connected
@@ -32,6 +37,12 @@ POST   /api/apps/<appId>/im-chat/clear                             Clear a digit
      # body: {"spaceId": "<spaceId — a uuid from GET /api/spaces>", "channel": "wecom", "chatType": "direct", "chatId": "<chatId — from GET /api/im-sessions>"}
      # out: {success:true}
      # note: All four body fields are required, 400 otherwise. chatType is "direct" or "group".
+
+GET    /api/apps/<appId>/im-chat/messages                          Read a digital human's transcript in a bound IM chat
+     curl -s "$HALO_API_URL/api/apps/<appId>/im-chat/messages" -H "Authorization: Bearer $HALO_API_TOKEN" | head -c 4000
+     # out: {success:true,data:[{id,role:"user"|"assistant",content,timestamp,thoughts?,thoughtsSummary?,images?}]}
+     # note: Required query: ?channel=&chatId=&spaceId=. 400 if any is missing. Optional ?chatType=group, defaults to direct.
+     # note: This is real correspondence with a person on the other end — read it only when the task needs it.
 
 POST   /api/apps/<appId>/im-chat/stop                              Stop a digital human's in-progress reply in a bound IM chat (keeps history)
      curl -sX POST "$HALO_API_URL/api/apps/<appId>/im-chat/stop" \
@@ -72,9 +83,13 @@ GET    /api/im-channels/status                                     Get connectio
      # out: {success:true,data:{id,type,enabled,connected,state?,appId,appName?,reason?,identityResolution?}[] | <single instance object>}
      # note: No credentials in this response. instanceId not found → {success:false,error}.
 
-GET    /api/im-sessions                                            List known IM contacts/chats bound to digital humans, optional ?appId= filter
+GET    /api/im-sessions                                            List every chat thread a digital human has, its own and IM ones
      curl -s "$HALO_API_URL/api/im-sessions" -H "Authorization: Bearer $HALO_API_TOKEN" | head -c 4000
-     # out: {success:true,data:[{appId,channel,chatId,proactive,customName?,...}]}
+     # out: {success:true,data:[{appId,channel,source:"local"|"im"|"http",chatType:"direct"|"group",chatId,displayName,customName?,proactive,instanceId}]}
+     # note: Optional ?appId= narrows it to one digital human. This is the only listing of its threads — there is no sessions/list beside sessions/create.
+     # note: source says what a thread is: "local" = a named thread the user created in Halo, "im" = a real chat with a person on an IM platform, "http" = created through this API.
+     # note: Reading or writing one thread needs a conversationId, which is not a field here — build it from four fields of the record: app-chat:<appId>:<channel>:<chatType>:<chatId>.
+     # note: Only "local" and "http" threads accept a message from this API. An "im" thread is refused on send — this API must not put words into a real conversation with a person.
 
 POST   /api/im-sessions/remove                                     Remove a chat binding from the IM session registry
      # note: reversible — can be undone or corrected afterward.
@@ -105,6 +120,17 @@ POST   /api/im-sessions/set-proactive                              Toggle whethe
      # body: {"appId":"<appId — a uuid from GET /api/apps>","channel":"wecom-bot","chatId":"<chatId — from GET /api/im-sessions>","proactive":true}
      # out: {success:true} or {success:false,error}
      # err: 404 if no matching session exists yet — the chat must have messaged the digital human at least once.
+
+POST   /api/notify-channels/clear-cache                            Drop cached notification-channel access tokens
+     # note: reversible — can be undone or corrected afterward.
+     curl -sX POST "$HALO_API_URL/api/notify-channels/clear-cache" -H "Authorization: Bearer $HALO_API_TOKEN"
+     # out: {"success":true}  // no data
+     # note: Worth trying when a channel that used to work starts failing to authenticate — the next send fetches a fresh token. It changes no configuration.
+
+GET    /api/notify-channels/product-config                         Read the product-level notification channel customisation
+     curl -s "$HALO_API_URL/api/notify-channels/product-config" -H "Authorization: Bearer $HALO_API_TOKEN"
+     # out: {"success":true,"data":{"wecom":{"docs":{...}},"email":{"docs":{...}}}}
+     # note: Presentation only — help links this build shows per channel. data is null when the build customises nothing. It does not say which channels the user configured.
 
 POST   /api/notify-channels/test                                   Send a test notification through one configured channel
      # note: reversible — can be undone or corrected afterward.
@@ -138,7 +164,7 @@ POST   /api/weixin-ilink/disconnect                                Clear WeChat 
           -d '{"instanceId":"<instanceId — from GET /api/im-channels/status>"}'
      # body: {"instanceId":"<instanceId — from GET /api/im-channels/status>"}
      # out: {success:true} or {success:false,error}
-     # note: Can be restored by pairing again (request-qrcode) or by calling save-token with the same token.
+     # note: Reversible only if the token is still to hand: call save-token with the same one. Otherwise the user has to re-pair by QR in Settings > Message Channels, which is not something you can start.
 
 POST   /api/weixin-ilink/save-token                                Set the bot token for an already-configured WeChat iLink instance
      # note: reversible — can be undone or corrected afterward.
@@ -156,6 +182,7 @@ POST   /api/weixin-ilink/save-token                                Set the bot t
 
 Halo does all of these; you do not. Say so, and say where:
   - Pair a brand-new WeCom bot or WeChat personal account (QR-code pairing) — none of that flow is open to you. The user does the whole thing in Settings > Message Channels on the desktop app.
+  - Create a channel instance, or set up a notification channel (SMTP for email, a webhook URL, a bot key) — the user does this in Settings > Message Channels. The only write path behind it replaces the whole configuration in one call, so a partial write would drop their other channels.
 That list is complete for this area and the search has already been done for
   you: do not grep the index for these, and do not guess a path — it will 403.
 For anything NOT on that list the normal rule still applies: grep the index

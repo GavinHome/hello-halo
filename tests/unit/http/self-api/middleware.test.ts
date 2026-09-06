@@ -126,7 +126,13 @@ describe('selfApiAuthMiddleware error envelopes', () => {
   })
 })
 
-describe('selfApiAuthMiddleware space gate', () => {
+/**
+ * Asserting an absence: space is not a bound on this listener, so a
+ * reintroduced refusal OR a reintroduced default has to fail here rather than
+ * ship quietly. Both halves need their own assertion — `calledNext` alone
+ * catches a refusal but not a rewritten query string.
+ */
+describe('selfApiAuthMiddleware and spaces', () => {
   const SPACE_ID = 'space-mine'
   const OTHER_SPACE_ID = 'space-other'
   let token: string
@@ -137,7 +143,7 @@ describe('selfApiAuthMiddleware space gate', () => {
     token = issueSelfApiToken(SPACE_ID)
   })
 
-  it("defaults an unnamed spaceId to the session's own space", () => {
+  it('leaves the query string untouched when no space is named', () => {
     const { req, res } = fakeReqRes('GET', '/api/apps', token)
     let calledNext = false
     selfApiAuthMiddleware(req, res, () => {
@@ -145,7 +151,7 @@ describe('selfApiAuthMiddleware space gate', () => {
     })
 
     expect(calledNext).toBe(true)
-    expect(new URLSearchParams(req.url.split('?')[1]).get('spaceId')).toBe(SPACE_ID)
+    expect(req.url).toBe('/api/apps')
   })
 
   it("allows a path-scoped request naming the session's own space", () => {
@@ -158,43 +164,48 @@ describe('selfApiAuthMiddleware space gate', () => {
     expect(calledNext).toBe(true)
   })
 
-  it('refuses a path naming a different space with code halo.self_api.wrong_space', () => {
+  it('allows a path naming a different space', () => {
     const { req, res } = fakeReqRes('GET', `/api/spaces/${OTHER_SPACE_ID}/artifacts`, token)
-    selfApiAuthMiddleware(req, res, () => {})
+    let calledNext = false
+    selfApiAuthMiddleware(req, res, () => {
+      calledNext = true
+    })
 
-    expect(res.statusCode).toBe(403)
-    expect(res.sent.code).toBe('halo.self_api.wrong_space')
+    expect(calledNext).toBe(true)
+    expect(res.sent).toBeUndefined()
+    expect(req.url).toBe(`/api/spaces/${OTHER_SPACE_ID}/artifacts`)
   })
 
-  it('refuses a query spaceId naming a different space', () => {
+  it('allows a query spaceId naming a different space', () => {
     const { req, res } = fakeReqRes('GET', '/api/apps', token)
     req.url = `/api/apps?spaceId=${OTHER_SPACE_ID}`
     req.query = { spaceId: OTHER_SPACE_ID }
-    selfApiAuthMiddleware(req, res, () => {})
+    let calledNext = false
+    selfApiAuthMiddleware(req, res, () => {
+      calledNext = true
+    })
 
-    expect(res.statusCode).toBe(403)
-    expect(res.sent.code).toBe('halo.self_api.wrong_space')
+    expect(calledNext).toBe(true)
+    expect(req.url).toBe(`/api/apps?spaceId=${OTHER_SPACE_ID}`)
   })
 
-  it('refuses a body spaceId naming a different space', () => {
+  it('allows a body spaceId naming a different space', () => {
     const { req, res } = fakeReqRes('GET', '/api/apps', token)
     req.body = { spaceId: OTHER_SPACE_ID }
-    selfApiAuthMiddleware(req, res, () => {})
+    let calledNext = false
+    selfApiAuthMiddleware(req, res, () => {
+      calledNext = true
+    })
 
-    expect(res.statusCode).toBe(403)
-    expect(res.sent.code).toBe('halo.self_api.wrong_space')
+    expect(calledNext).toBe(true)
+    expect(res.sent).toBeUndefined()
   })
 
-  it('two sessions never cross: each token only ever resolves to its own space', () => {
-    const otherToken = issueSelfApiToken(OTHER_SPACE_ID)
+  it('still refuses an unknown token regardless of the space it names', () => {
+    const { req, res } = fakeReqRes('GET', `/api/spaces/${OTHER_SPACE_ID}/artifacts`, 'not-a-token')
+    selfApiAuthMiddleware(req, res, () => {})
 
-    const mine = fakeReqRes('GET', '/api/apps', token)
-    selfApiAuthMiddleware(mine.req, mine.res, () => {})
-    expect(new URLSearchParams(mine.req.url.split('?')[1]).get('spaceId')).toBe(SPACE_ID)
-
-    const theirs = fakeReqRes('GET', '/api/apps', otherToken)
-    selfApiAuthMiddleware(theirs.req, theirs.res, () => {})
-    expect(new URLSearchParams(theirs.req.url.split('?')[1]).get('spaceId')).toBe(OTHER_SPACE_ID)
+    expect(res.statusCode).toBe(401)
   })
 })
 

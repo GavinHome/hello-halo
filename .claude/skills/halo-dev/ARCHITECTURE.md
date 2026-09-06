@@ -649,8 +649,12 @@ listener (`src/main/http/self-api/`) reached with curl.
   **default OFF** — unlike every other built-in capability. Never granted to IM
   guests.
 - **What a session may call** is `resources/api-ref/scope.json`, generated from
-  the `expose` field in `*.routes.meta.ts`. That allow-list is the real bound;
-  the middleware's `spaceId` handling is a default scope, not isolation.
+  the `expose` field in `*.routes.meta.ts`. That allow-list is the only bound —
+  space is not one. The listener once refused any request naming a space other
+  than the session's own and injected its own when none was named; both were
+  removed. The refusal stopped nothing (the agent holds Bash and read the same
+  files off disk) and the injection silently narrowed list responses so the
+  agent under-reported against the window the user was looking at.
 - **Adding a route** means adding its meta entry too — `npm run test:api-ref`
   fails the build when the generated tree and the routes have drifted.
 

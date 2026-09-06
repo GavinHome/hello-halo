@@ -1,7 +1,8 @@
 [
   {
     "method": "GET",
-    "path": "/api/security/policy"
+    "path": "/api/security/policy",
+    "group": "settings"
   },
   {
     "method": "GET",
@@ -27,7 +28,8 @@
   },
   {
     "method": "POST",
-    "path": "/api/config/refresh-ai-sources"
+    "path": "/api/config/refresh-ai-sources",
+    "group": "settings"
   },
   {
     "method": "POST",
@@ -45,19 +47,23 @@
   },
   {
     "method": "PUT",
-    "path": "/api/ai-sources/sources/:sourceId"
+    "path": "/api/ai-sources/sources/:sourceId",
+    "group": "settings"
   },
   {
     "method": "DELETE",
-    "path": "/api/ai-sources/sources/:sourceId"
+    "path": "/api/ai-sources/sources/:sourceId",
+    "group": "settings"
   },
   {
     "method": "POST",
-    "path": "/api/model-capabilities/resolve"
+    "path": "/api/model-capabilities/resolve",
+    "group": "settings"
   },
   {
     "method": "GET",
-    "path": "/api/model-capabilities/preset/:modelId"
+    "path": "/api/model-capabilities/preset/:modelId",
+    "group": "settings"
   },
   {
     "method": "GET",
@@ -66,7 +72,8 @@
   },
   {
     "method": "GET",
-    "path": "/api/spaces/halo"
+    "path": "/api/spaces/halo",
+    "group": "workspace"
   },
   {
     "method": "GET",
@@ -143,7 +150,8 @@
   },
   {
     "method": "GET",
-    "path": "/api/spaces/:spaceId/conversations/:conversationId/messages/:messageId/thoughts"
+    "path": "/api/spaces/:spaceId/conversations/:conversationId/messages/:messageId/thoughts",
+    "group": "conversation"
   },
   {
     "method": "POST",
@@ -152,7 +160,8 @@
   },
   {
     "method": "POST",
-    "path": "/api/agent/message"
+    "path": "/api/agent/message",
+    "group": "conversation"
   },
   {
     "method": "POST",
@@ -187,23 +196,28 @@
   },
   {
     "method": "POST",
-    "path": "/api/agent/test-mcp"
+    "path": "/api/agent/test-mcp",
+    "group": "settings"
   },
   {
     "method": "POST",
-    "path": "/api/agent/probe-mcp"
+    "path": "/api/agent/probe-mcp",
+    "group": "settings"
   },
   {
     "method": "GET",
-    "path": "/api/agent/engine-capabilities"
+    "path": "/api/agent/engine-capabilities",
+    "group": "settings"
   },
   {
     "method": "GET",
-    "path": "/api/agent/engine-availability"
+    "path": "/api/agent/engine-availability",
+    "group": "settings"
   },
   {
     "method": "POST",
-    "path": "/api/agent/toolsets/list"
+    "path": "/api/agent/toolsets/list",
+    "group": "conversation"
   },
   {
     "method": "POST",
@@ -268,7 +282,8 @@
   },
   {
     "method": "GET",
-    "path": "/api/artifacts/content"
+    "path": "/api/artifacts/content",
+    "group": "workspace"
   },
   {
     "method": "POST",
@@ -317,11 +332,13 @@
   },
   {
     "method": "POST",
-    "path": "/api/notify-channels/clear-cache"
+    "path": "/api/notify-channels/clear-cache",
+    "group": "channels"
   },
   {
     "method": "GET",
-    "path": "/api/notify-channels/product-config"
+    "path": "/api/notify-channels/product-config",
+    "group": "channels"
   },
   {
     "method": "GET",
@@ -414,7 +431,8 @@
   },
   {
     "method": "GET",
-    "path": "/api/auth/providers"
+    "path": "/api/auth/providers",
+    "group": "settings"
   },
   {
     "method": "GET",
@@ -447,7 +465,8 @@
   },
   {
     "method": "GET",
-    "path": "/api/skills/command-name"
+    "path": "/api/skills/command-name",
+    "group": "store"
   },
   {
     "method": "DELETE",
@@ -511,7 +530,8 @@
   },
   {
     "method": "GET",
-    "path": "/api/apps/:appId/runs/:runId/session"
+    "path": "/api/apps/:appId/runs/:runId/session",
+    "group": "digital-human"
   },
   {
     "method": "POST",
@@ -555,7 +575,8 @@
   },
   {
     "method": "GET",
-    "path": "/api/apps/:appId/export-spec"
+    "path": "/api/apps/:appId/export-spec",
+    "group": "digital-human"
   },
   {
     "method": "POST",
@@ -564,7 +585,8 @@
   },
   {
     "method": "POST",
-    "path": "/api/apps/:appId/chat/send"
+    "path": "/api/apps/:appId/chat/send",
+    "group": "digital-human"
   },
   {
     "method": "POST",
@@ -578,7 +600,8 @@
   },
   {
     "method": "GET",
-    "path": "/api/apps/:appId/chat/messages"
+    "path": "/api/apps/:appId/chat/messages",
+    "group": "digital-human"
   },
   {
     "method": "GET",
@@ -586,7 +609,8 @@
   },
   {
     "method": "GET",
-    "path": "/api/apps/:appId/im-chat/messages"
+    "path": "/api/apps/:appId/im-chat/messages",
+    "group": "digital-human"
   },
   {
     "method": "POST",
@@ -749,7 +773,8 @@
   },
   {
     "method": "POST",
-    "path": "/api/store/import-dhpkg"
+    "path": "/api/store/import-dhpkg",
+    "group": "store"
   },
   {
     "method": "POST",
@@ -838,7 +863,8 @@
   },
   {
     "method": "POST",
-    "path": "/api/tlon/:kbId/resolve-sources"
+    "path": "/api/tlon/:kbId/resolve-sources",
+    "group": "knowledge-base"
   },
   {
     "method": "POST",

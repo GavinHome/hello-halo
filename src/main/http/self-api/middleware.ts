@@ -80,44 +80,6 @@ function unknownEndpointBody() {
 }
 
 /**
- * Refusing rather than silently rewriting: a request that explicitly names a
- * different space is a mistake worth surfacing, and quietly redirecting it to
- * the session's own space would act on the wrong data without either the agent
- * or the user seeing it. Naming the mismatch (not just refusing) is what stops
- * the agent from reporting a false "Halo can't do this".
- */
-function wrongSpaceBody() {
-  return {
-    success: false,
-    code: 'halo.self_api.wrong_space',
-    error:
-      'This request names a different space than the one this session belongs to. You can only operate on your own ' +
-      'space through this API. To act on another space, tell the user to switch to it in the Halo app first.',
-  }
-}
-
-/** Where a request can name a space: the path segment wins, then an explicit query param, then the JSON body. */
-function requestedSpaceId(req: Request, pathSpaceId: string | undefined): string | undefined {
-  if (pathSpaceId !== undefined) return pathSpaceId
-  if (typeof req.query.spaceId === 'string') return req.query.spaceId
-  const bodySpaceId = (req.body as Record<string, unknown> | undefined)?.spaceId
-  return typeof bodySpaceId === 'string' ? bodySpaceId : undefined
-}
-
-/**
- * Adds `spaceId` to the request's own query string rather than assigning to
- * `req.query`. Express 5 recomputes that object from the URL on every access,
- * so a property set on it is read back as undefined by the handler — the
- * assignment looks correct and does nothing.
- */
-function applyDefaultSpaceId(req: Request, spaceId: string): void {
-  const [path, search] = (req.url || '').split('?')
-  const params = new URLSearchParams(search ?? '')
-  params.set('spaceId', spaceId)
-  req.url = `${path}?${params.toString()}`
-}
-
-/**
  * Anything outside `/api/` is refused as JSON — no SPA, no static files, no
  * dev proxy.
  *
@@ -172,8 +134,7 @@ export function selfApiErrorHandler(
 
 export function selfApiAuthMiddleware(req: Request, res: Response, next: NextFunction): void {
   const token = extractToken(req)
-  const resolved = token ? resolveSelfApiToken(token) : null
-  if (!resolved) {
+  if (!token || !resolveSelfApiToken(token)) {
     res.status(401).json(unauthorizedBody())
     return
   }
@@ -203,7 +164,7 @@ export function selfApiAuthMiddleware(req: Request, res: Response, next: NextFun
         ? rawResult
         : decodedResult.decision === 'forbidden'
           ? decodedResult
-          : { decision: 'unknown' as const, group: undefined, pathSpaceId: undefined }
+          : { decision: 'unknown' as const, group: undefined }
 
   if (result.decision === 'forbidden') {
     res.status(403).json(notExposedBody(result.group))
@@ -214,28 +175,6 @@ export function selfApiAuthMiddleware(req: Request, res: Response, next: NextFun
     return
   }
 
-  // Default scope, not isolation. A space named explicitly and differently is
-  // refused; left unnamed, the session's own space is filled in so a route
-  // that DOES read `spaceId` (e.g. `GET /api/apps`) answers about the space
-  // the agent is working in rather than all of them.
-  //
-  // This confines nothing on its own: most exposed routes address a resource
-  // by a global id (`/api/apps/:appId`, `/api/tlon/:kbId`) or take the space
-  // under another name (`newSpaceId`, `spaceIds`), and the injected parameter
-  // is inert for all of them. What bounds a session is which routes
-  // `scope.json` exposes at all — see `services/api-ref` and the route meta
-  // files. Do not extend this into a security check without also making every
-  // exposed handler verify ownership; a half-enforced boundary reads as a real
-  // one to the next reader.
-  const named = requestedSpaceId(req, result.pathSpaceId)
-  if (named !== undefined) {
-    if (named !== resolved.spaceId) {
-      res.status(403).json(wrongSpaceBody())
-      return
-    }
-  } else {
-    applyDefaultSpaceId(req, resolved.spaceId)
-  }
-
+  // Space is deliberately not a bound here — `scope.json` is the only one.
   next()
 }

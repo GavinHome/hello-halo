@@ -8,8 +8,13 @@ import type { RouteModuleMeta } from './_meta-types'
 export const MODULE: RouteModuleMeta = {
   file: 'space',
   routes: {
-    // Scratch space backing the UI's temporary-session affordance.
-    'GET /api/spaces/halo': { expose: 'internal' },
+    'GET /api/spaces/halo': {
+      expose: 'ai',
+      group: 'workspace',
+      summary: 'Read the built-in temporary space',
+      returns: '{"success":true,"data":{"id":"halo-temp","name":"Halo","path":"/…","isTemp":true}}',
+      notes: 'The scratch space behind Halo\'s temporary sessions. Its id is the fixed string "halo-temp", not a uuid, and it always exists — but GET /api/spaces leaves it out, so it is reachable only through this route.',
+    },
 
     'GET /api/spaces/default-path': {
       expose: 'ai',
@@ -23,7 +28,11 @@ export const MODULE: RouteModuleMeta = {
       group: 'workspace',
       summary: 'List all spaces',
       returns: '{"success":true,"data":[{"id":"<uuid>","name":"Work","path":"/…"}]}',
-      notes: 'Start here when you need a spaceId. $HALO_SPACE_ID is the space this conversation is in.',
+      notes: [
+        'Start here when you need a spaceId. $HALO_SPACE_ID is the space this conversation is in, and the one to assume when the user does not name another.',
+        'Any space here can be addressed, not just your own — pass its id where a route takes one. Say which space you acted on whenever it was not $HALO_SPACE_ID.',
+        'The built-in temporary space is not in this list; GET /api/spaces/halo is the only way to it. Do not answer "how many spaces do I have" from a raw count without saying so.',
+      ].join('\n'),
     },
 
     'POST /api/spaces': {
@@ -95,15 +104,18 @@ export const MODULE: RouteModuleMeta = {
       summary: 'Create an empty conversation',
       body: '{"title":"Weekly report"}',
       returns: '{"success":true,"data":{"id":"<uuid>","title":"Weekly report"}}',
-      notes: 'Creates an empty conversation. Making Halo reply in one is not opened to the assistant — the user drives it from the app.',
+      notes: 'Creates it empty. Make Halo reply in it with POST /api/agent/message — a conversation you made yourself is the safe target for that, since a turn you start there cannot interrupt one the user is having.',
     },
 
     'GET /api/spaces/:spaceId/conversations/:conversationId': {
       expose: 'ai',
       group: 'conversation',
       summary: 'Read a conversation with its messages',
-      returns: '{"success":true,"data":{"id":"<uuid>","messages":[{"role":"user","content":"…"}]}}',
-      notes: 'Long conversations return a lot of text. Read one only when you need its content.',
+      returns: '{"success":true,"data":{"id":"<uuid>","messages":[{"id":"<uuid>","role":"user","content":"…"}]}}',
+      notes: [
+        'Long conversations return a lot of text. Read one only when you need its content.',
+        'Each message carries its own id — that is the messageId the /thoughts route takes, and the only place to get one.',
+      ].join('\n'),
     },
 
     'PUT /api/spaces/:spaceId/conversations/:conversationId': {
@@ -132,7 +144,14 @@ export const MODULE: RouteModuleMeta = {
     'POST /api/spaces/:spaceId/conversations/:conversationId/messages': { expose: 'internal' },
     'PUT /api/spaces/:spaceId/conversations/:conversationId/messages/last': { expose: 'internal' },
     'GET /api/spaces/:spaceId/conversations/:conversationId/messages/:messageId/thoughts': {
-      expose: 'internal',
+      expose: 'ai',
+      group: 'conversation',
+      summary: 'Read the reasoning and tool calls behind one message',
+      returns: '{"success":true,"data":[{"id":"…","type":"…","content":"…","timestamp":"…","toolName":"…","toolInput":{},"toolOutput":"…"}]}',
+      notes: [
+        'Wrong ids return an empty array, not a 404 — an empty result does not prove the message had no thoughts.',
+        'toolInput and toolOutput are the raw arguments and results of that turn, so this gets long fast. Read it to diagnose what Halo actually did, not as a way to read a conversation.',
+      ].join('\n'),
     },
 
     'POST /api/spaces/:spaceId/conversations/:conversationId/star': {

@@ -1,19 +1,19 @@
 {
   "totalRoutes": 181,
   "expose": {
-    "ai": 121,
+    "ai": 147,
     "wrapped": 11,
-    "internal": 49,
+    "internal": 23,
     "unlabeled": 0
   },
   "groups": {
-    "conversation": 9,
-    "workspace": 20,
-    "digital-human": 36,
-    "knowledge-base": 20,
-    "channels": 16,
-    "settings": 6,
-    "store": 25,
+    "conversation": 12,
+    "workspace": 22,
+    "digital-human": 45,
+    "knowledge-base": 21,
+    "channels": 19,
+    "settings": 17,
+    "store": 27,
     "terminal": 6
   },
   "files": [

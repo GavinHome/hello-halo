@@ -5,13 +5,10 @@
  * independent modules with independent state makes that a structural
  * property instead of a rule someone could accidentally violate.
  *
- * Each token carries the spaceId it was issued for. That is a **default
- * scope, not a trust boundary**: it lets the auth middleware fill in "this
- * session's own space" for a request that names none, so the agent reads and
- * lists the space it is actually working in. It confines nothing by itself —
- * most exposed routes address a resource by a global id and never consult a
- * space at all. What actually bounds a session is which routes `scope.json`
- * exposes; do not build an isolation guarantee on top of this field.
+ * An entry's spaceId is only what keeps issuance to one token per space; it
+ * carries no authority and nothing reads it back. What bounds a session is
+ * which routes `scope.json` exposes — do not build an isolation guarantee on
+ * top of this field.
  *
  * Never persisted — there is nothing to pair with and nothing to survive a
  * restart for.
@@ -65,8 +62,8 @@ export function resetSelfApiTokens(): void {
  * one entry per space (see `issueSelfApiToken`). It was once one per call —
  * i.e. per message — which made this grow with conversation volume.
  */
-export function resolveSelfApiToken(candidate: string): { spaceId: string } | null {
-  if (typeof candidate !== 'string') return null
+export function resolveSelfApiToken(candidate: string): boolean {
+  if (typeof candidate !== 'string') return false
   const provided = Buffer.from(candidate, 'utf8')
 
   for (const entry of tokens) {
@@ -77,9 +74,7 @@ export function resolveSelfApiToken(candidate: string): { spaceId: string } | nu
       timingSafeEqual(expected, padded)
       continue
     }
-    if (timingSafeEqual(expected, provided)) {
-      return { spaceId: entry.spaceId }
-    }
+    if (timingSafeEqual(expected, provided)) return true
   }
-  return null
+  return false
 }

@@ -82,6 +82,26 @@ digital humans, knowledge bases, channels, settings and the app store.
   user to do it in the Halo app, not that Halo cannot do it.
 - Not finding something is a real answer only after you have grepped the full
   index (its path is printed on every page).
+
+### Answering vs. doing
+"How do I set up X?" is a question. Answer it from Halo's own documentation
+(\`read_halo_doc\`, when this build has that tool) and stop — do not start
+configuring anything.
+
+"Can you set up X for me?" is the job, and it still starts at the
+documentation. This manual carries paths and payloads; it never carries what a
+good configuration looks like. Clicking through the UI is something the user
+can already do — the reason to hand the work to you is that you know which
+fields matter and why. Without those docs in reach, say what you are about to
+configure and what you are unsure of before you write anything.
+
+Most credentials cannot be written through this API at all — model keys and
+SMTP passwords live behind routes that answer 403, and a couple of bot tokens
+are the exception rather than the rule. So find the write route before you ask
+for anything. When there is none, name the screen in the Halo app where the
+user sets it themselves and carry on from there: a key pasted into a
+conversation you cannot spend it in has cost them something and bought
+nothing.
 `
 
 /**

@@ -214,10 +214,20 @@ export const MODULE: RouteModuleMeta = {
     // unrecoverable once live even after unpublishing. Not a response-body
     // leak (the redaction layer can't help): the action itself exfiltrates.
     'POST /api/store/publish': { expose: 'internal' },
-    // readFile(filePath) here skips validateFilePath/isPathInside entirely
-    // (unlike every artifact.routes.ts path), so it can read and then install
-    // any file the Halo process can see on this machine, not just files
-    // inside a space's sandbox.
-    'POST /api/store/import-dhpkg': { expose: 'internal' },
+    'POST /api/store/import-dhpkg': {
+      expose: 'ai',
+      group: 'store',
+      summary: 'Install a digital human from a local .dhpkg file',
+      body: '{"filePath":"/absolute/path/to/app.dhpkg","spaceId":"<spaceId — a uuid from GET /api/spaces>"}',
+      returns: '{success:true,data:{appId}}',
+      impact: 'reversible',
+      notes: [
+        'Installs and activates whatever the package contains — it starts running on its own schedule. Only import a file the user pointed you at. Undo with DELETE /api/apps/<appId>.',
+        'A raw install: unlike the create_automation_app tool it does not fetch the package\'s required skills or roll back a half-finished install, so check GET /api/apps/<appId> afterwards rather than assuming.',
+        'filePath is read with no sandbox check, so any path this machine can see resolves. That is not a licence to browse — pass through what the user gave you.',
+        'spaceId is optional. 400 when filePath is missing.',
+        'Activation failing after install still returns success:true; check GET /api/apps/<appId> to confirm it is running.',
+      ].join('\n'),
+    },
   },
 }

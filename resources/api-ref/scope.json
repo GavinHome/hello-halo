@@ -1,11 +1,19 @@
 [
   {
     "method": "GET",
+    "path": "/api/security/policy"
+  },
+  {
+    "method": "GET",
     "path": "/api/config"
   },
   {
     "method": "GET",
     "path": "/api/config/credential-failures"
+  },
+  {
+    "method": "POST",
+    "path": "/api/config/refresh-ai-sources"
   },
   {
     "method": "POST",
@@ -16,8 +24,28 @@
     "path": "/api/ai-sources/set-model"
   },
   {
+    "method": "PUT",
+    "path": "/api/ai-sources/sources/:sourceId"
+  },
+  {
+    "method": "DELETE",
+    "path": "/api/ai-sources/sources/:sourceId"
+  },
+  {
+    "method": "POST",
+    "path": "/api/model-capabilities/resolve"
+  },
+  {
+    "method": "GET",
+    "path": "/api/model-capabilities/preset/:modelId"
+  },
+  {
     "method": "GET",
     "path": "/api/model-capabilities/all"
+  },
+  {
+    "method": "GET",
+    "path": "/api/spaces/halo"
   },
   {
     "method": "GET",
@@ -72,8 +100,16 @@
     "path": "/api/spaces/:spaceId/conversations/:conversationId"
   },
   {
+    "method": "GET",
+    "path": "/api/spaces/:spaceId/conversations/:conversationId/messages/:messageId/thoughts"
+  },
+  {
     "method": "POST",
     "path": "/api/spaces/:spaceId/conversations/:conversationId/star"
+  },
+  {
+    "method": "POST",
+    "path": "/api/agent/message"
   },
   {
     "method": "POST",
@@ -88,6 +124,26 @@
     "path": "/api/agent/generating/:conversationId"
   },
   {
+    "method": "POST",
+    "path": "/api/agent/test-mcp"
+  },
+  {
+    "method": "POST",
+    "path": "/api/agent/probe-mcp"
+  },
+  {
+    "method": "GET",
+    "path": "/api/agent/engine-capabilities"
+  },
+  {
+    "method": "GET",
+    "path": "/api/agent/engine-availability"
+  },
+  {
+    "method": "POST",
+    "path": "/api/agent/toolsets/list"
+  },
+  {
     "method": "GET",
     "path": "/api/spaces/:spaceId/artifacts"
   },
@@ -98,6 +154,10 @@
   {
     "method": "POST",
     "path": "/api/spaces/:spaceId/artifacts/children"
+  },
+  {
+    "method": "GET",
+    "path": "/api/artifacts/content"
   },
   {
     "method": "POST",
@@ -134,6 +194,14 @@
   {
     "method": "POST",
     "path": "/api/notify-channels/test"
+  },
+  {
+    "method": "POST",
+    "path": "/api/notify-channels/clear-cache"
+  },
+  {
+    "method": "GET",
+    "path": "/api/notify-channels/product-config"
   },
   {
     "method": "GET",
@@ -189,6 +257,10 @@
   },
   {
     "method": "GET",
+    "path": "/api/auth/providers"
+  },
+  {
+    "method": "GET",
     "path": "/api/system/version"
   },
   {
@@ -202,6 +274,10 @@
   {
     "method": "GET",
     "path": "/api/apps/:appId/available-skills"
+  },
+  {
+    "method": "GET",
+    "path": "/api/skills/command-name"
   },
   {
     "method": "DELETE",
@@ -244,6 +320,10 @@
     "path": "/api/apps/:appId/runs/:runId/inject"
   },
   {
+    "method": "GET",
+    "path": "/api/apps/:appId/runs/:runId/session"
+  },
+  {
     "method": "POST",
     "path": "/api/apps/:appId/config"
   },
@@ -272,12 +352,28 @@
     "path": "/api/apps/:appId/state"
   },
   {
+    "method": "GET",
+    "path": "/api/apps/:appId/export-spec"
+  },
+  {
+    "method": "POST",
+    "path": "/api/apps/:appId/chat/send"
+  },
+  {
     "method": "POST",
     "path": "/api/apps/:appId/chat/stop"
   },
   {
     "method": "GET",
     "path": "/api/apps/:appId/chat/status"
+  },
+  {
+    "method": "GET",
+    "path": "/api/apps/:appId/chat/messages"
+  },
+  {
+    "method": "GET",
+    "path": "/api/apps/:appId/im-chat/messages"
   },
   {
     "method": "POST",
@@ -405,6 +501,10 @@
   },
   {
     "method": "POST",
+    "path": "/api/store/import-dhpkg"
+  },
+  {
+    "method": "POST",
     "path": "/api/tlon"
   },
   {
@@ -470,6 +570,10 @@
   {
     "method": "GET",
     "path": "/api/tlon/:kbId/index"
+  },
+  {
+    "method": "POST",
+    "path": "/api/tlon/:kbId/resolve-sources"
   },
   {
     "method": "POST",

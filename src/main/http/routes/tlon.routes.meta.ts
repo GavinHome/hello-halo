@@ -146,7 +146,12 @@ export const MODULE: RouteModuleMeta = {
       returns: '{success:true,data:string}  — markdown text, empty string if not yet generated',
     },
     'POST /api/tlon/:kbId/resolve-sources': {
-      expose: 'internal',
+      expose: 'ai',
+      group: 'knowledge-base',
+      summary: 'Map paths read from a collection back to their source documents',
+      body: '{"readPaths":["/absolute/path/inside/the/collection"]}',
+      returns: '{success:true,data:[{name:string,path:string}]}  — deduped, absolute, files that still exist',
+      notes: 'Turns the copies a collection holds into citable originals. Paths that no longer exist are dropped silently, so a shorter list than you sent is normal. 400 when readPaths is not an array; an empty array is accepted and returns nothing.',
     },
     'POST /api/tlon/:kbId/ingest': {
       expose: 'ai',

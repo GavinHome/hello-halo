@@ -1,6 +1,6 @@
 ## store — browse and install from the app store
 covers: browse and search store listings, read a listing, install and
-        uninstall store items, skills
+        uninstall store items, install from a local .dhpkg file, skills
 not here:
   configuring an installed digital human -> digital-human
   knowledge collections -> knowledge-base
@@ -8,6 +8,7 @@ not here:
 
 operations on this page:
   POST   /api/apps/<appId>/upgrade-strategy                          Set how a store-installed digital human handles version upgrades
+  GET    /api/skills/command-name                                    Preview the slash-command name a skill title would install under
   GET    /api/store/app-document                                     Get a listing's SKILL.md/README document
   GET    /api/store/apps                                             List store listings (legacy, non-paginated; prefer POST /api/store/query)
   GET    /api/store/apps/<slug>                                      Get full detail for one store listing by slug
@@ -16,6 +17,7 @@ operations on this page:
   GET    /api/store/category-taxonomy                                Get the store category enum used for browsing and publishing
   GET    /api/store/discover-page                                    Get the curated store home page (featured/trending sections)
   POST   /api/store/ignore-version                                   Dismiss an available update so it stops appearing as pending
+  POST   /api/store/import-dhpkg                                     Install a digital human from a local .dhpkg file
   POST   /api/store/install                                          Install an app from the store by slug
   GET    /api/store/my-publications                                  List the signed-in creator's own published apps
   POST   /api/store/publish/find-app                                 Find the installed app that a store slug would resolve to
@@ -42,6 +44,11 @@ POST   /api/apps/<appId>/upgrade-strategy                          Set how a sto
      # body: {"strategy": "auto"}
      # out: {success:true}
      # note: strategy is one of "auto" (silent patch/minor, notify on major), "notify" (always notify), or "manual" (no automatic checks)
+
+GET    /api/skills/command-name                                    Preview the slash-command name a skill title would install under
+     curl -s "$HALO_API_URL/api/skills/command-name" -H "Authorization: Bearer $HALO_API_TOKEN"
+     # out: {success:true,data:string}  // e.g. "My Skill" -> "my-skill"
+     # note: Query: ?name=. A missing name returns an empty string, not a 400. Pure string transform — it does not check whether that name is already taken.
 
 GET    /api/store/app-document                                     Get a listing's SKILL.md/README document
      curl -s "$HALO_API_URL/api/store/app-document" -H "Authorization: Bearer $HALO_API_TOKEN"
@@ -94,6 +101,20 @@ POST   /api/store/ignore-version                                   Dismiss an av
      # body: {"appId":"<appId — a uuid from GET /api/apps>","version":"1.2.0"}
      # out: {success:true,data:null}
      # note: Only hides that one version; a newer update still surfaces normally.
+
+POST   /api/store/import-dhpkg                                     Install a digital human from a local .dhpkg file
+     # note: reversible — can be undone or corrected afterward.
+     curl -sX POST "$HALO_API_URL/api/store/import-dhpkg" \
+          -H "Authorization: Bearer $HALO_API_TOKEN" \
+          -H "Content-Type: application/json" \
+          -d '{"filePath":"/absolute/path/to/app.dhpkg","spaceId":"<spaceId — a uuid from GET /api/spaces>"}'
+     # body: {"filePath":"/absolute/path/to/app.dhpkg","spaceId":"<spaceId — a uuid from GET /api/spaces>"}
+     # out: {success:true,data:{appId}}
+     # note: Installs and activates whatever the package contains — it starts running on its own schedule. Only import a file the user pointed you at. Undo with DELETE /api/apps/<appId>.
+     # note: A raw install: unlike the create_automation_app tool it does not fetch the package's required skills or roll back a half-finished install, so check GET /api/apps/<appId> afterwards rather than assuming.
+     # note: filePath is read with no sandbox check, so any path this machine can see resolves. That is not a licence to browse — pass through what the user gave you.
+     # note: spaceId is optional. 400 when filePath is missing.
+     # note: Activation failing after install still returns success:true; check GET /api/apps/<appId> to confirm it is running.
 
 POST   /api/store/install                                          Install an app from the store by slug
      # note: reversible — can be undone or corrected afterward.

@@ -18,7 +18,10 @@ export const MODULE: RouteModuleMeta = {
       group: 'digital-human',
       summary: 'List digital humans (and other installed apps) in a space',
       returns: '{success:true,data:[{id,specId,spaceId,spec,status,userConfig,userOverrides,permissions,installedAt,lastRunAt?,lastRunOutcome?,errorMessage?}]}  — userConfig/spec.mcp_server.env/headers values are redacted to "[redacted]", keys are preserved',
-      notes: 'Optional query: ?spaceId=, ?status=. Without ?status, uninstalled apps are excluded by default.',
+      notes: [
+        'Optional query: ?spaceId=, ?status=. Without ?status, uninstalled apps are excluded by default.',
+        'Omitting ?spaceId= lists every space, which is what the Halo app itself shows — pass $HALO_SPACE_ID to narrow it to the one you are working in. Say which of the two you did, since "how many digital humans do I have" has a different answer for each.',
+      ].join('\n'),
     },
     'GET /api/apps/:appId': {
       expose: 'ai',
@@ -26,12 +29,19 @@ export const MODULE: RouteModuleMeta = {
       summary: 'Get one installed digital human (or other app) by id',
       returns: '{success:true,data:InstalledApp|null}  — same shape as GET /api/apps entries, redacted the same way',
     },
-    // Exports the raw spec as a YAML string, not JSON — the transport-level
-    // redaction in §5.6 only rewrites JSON response bodies, so it cannot
-    // reach into this one. mcp_server.env/headers would come out in plain
-    // text.
+    // The spec comes back as one opaque YAML string, so the loopback
+    // listener's JSON-leaf redaction cannot reach mcp_server.env/headers
+    // inside it — unlike every sibling here, this response is unredacted.
     'GET /api/apps/:appId/export-spec': {
-      expose: 'internal',
+      expose: 'ai',
+      group: 'digital-human',
+      summary: 'Export a digital human definition as YAML',
+      returns: '{success:true,data:{yaml:string,filename:string}}',
+      notes: [
+        'The YAML is verbatim, including any credentials the app keeps in mcp_server.env or headers. Never paste it back to the user or into a file you did not create for them.',
+        'To reinstall it elsewhere, hand the YAML to the create_automation_app tool — the raw import route is closed so that required skills and rollback are not skipped.',
+        '404 when the appId does not exist.',
+      ].join('\n'),
     },
 
     'GET /api/apps/:appId/available-skills': {
@@ -41,10 +51,12 @@ export const MODULE: RouteModuleMeta = {
       returns: '{success:true,data:[{name,description,scope:"global"|"space",dirName,path}]}',
       notes: '404-equivalent = {success:false,error:"App not found or has no space"} — the app must have a spaceId',
     },
-    // Live preview of the identifier a skill name would install under (form
-    // helper for a name field, e.g. "My Skill" -> "my-skill"). No side effect.
     'GET /api/skills/command-name': {
-      expose: 'internal',
+      expose: 'ai',
+      group: 'store',
+      summary: 'Preview the slash-command name a skill title would install under',
+      returns: '{success:true,data:string}  // e.g. "My Skill" -> "my-skill"',
+      notes: 'Query: ?name=. A missing name returns an empty string, not a 400. Pure string transform — it does not check whether that name is already taken.',
     },
 
     // ── Install / uninstall / lifecycle ───────────────────────────────
@@ -155,10 +167,17 @@ export const MODULE: RouteModuleMeta = {
       notes: '400 if text is missing or the run is not currently active. This can resume/redirect a run with full tool permissions (bypassPermissions) and take real-world action that Halo cannot undo.',
       impact: 'irreversible',
     },
-    // Raw internal session transcript for the UI's "View process" debug
-    // panel — unshaped SDK message dump, not a curated response.
     'GET /api/apps/:appId/runs/:runId/session': {
-      expose: 'internal',
+      expose: 'ai',
+      group: 'digital-human',
+      summary: 'Read what a run actually did, step by step',
+      returns:
+        '{success:true,data:[{id,role:"user"|"assistant",content,timestamp,thoughts?,thoughtsSummary?,images?}]}',
+      notes: [
+        'The transcript behind the "View process" panel — same shape as chat/messages, but for one automation run. It is the only way to see why a run did what it did rather than what it reported.',
+        'Get the runId from GET /api/apps/<appId>/activity. Read this when a run went wrong; for what it concluded, its activity entry is shorter and enough.',
+        '404 when the app or its space is gone. An empty array means that run left no transcript, not that the ids were wrong.',
+      ].join('\n'),
     },
     'GET /api/apps/:appId/state': {
       expose: 'ai',
@@ -265,27 +284,23 @@ export const MODULE: RouteModuleMeta = {
     },
 
     // ── App chat (talk to a digital human directly) ─────────────────────
-    // Lead ruled this must be 'wrapped', not 'ai': apps.routes.ts:820 calls
-    // sendAppChatMessage(request).catch(...) WITHOUT awaiting — genuinely
-    // fire-and-forget, unlike /api/agent/message which awaits. Confirmed
-    // `grep -cE "Semaphore|maxConcurrent|acquire" apps/runtime/app-chat.ts`
-    // = 0: unlike automation runs (which share a global Semaphore(10) in
-    // runtime/service.ts:93), chat has no throttle at all. A raw loop over
-    // this route starts N full-tool-permission agent processes at once with
-    // no pacing and no delivery confirmation.
-    // Held 'internal' for now rather than 'wrapped', because 'wrapped'
-    // requires a real useInstead MCP tool and none exists yet — grepped
-    // conversation-mcp/index.ts and toolsets/registry.ts, zero hits for any
-    // chat-with-a-digital-human tool or toolset. Pointing useInstead at a
-    // tool that does not exist is a dead end, which is worse than internal.
-    // Needs: Lead to confirm the name of the throttled wrapper tool once
-    // built (or already planned with engineering), then flip this to
-    // 'wrapped' with bypassCost: 'delivery confirmation and one-at-a-time
-    // pacing — a raw POST returns before the digital human has read
-    // anything, so a loop over it starts N agents at once with nothing
-    // telling you they are running'.
+    // Unlike automation runs, which share a global semaphore, app chat has no
+    // throttle and the route does not await the send — so N calls start N
+    // full-tool-permission agent processes at once. The pacing note below is
+    // the only brake there is.
     'POST /api/apps/:appId/chat/send': {
-      expose: 'internal',
+      expose: 'ai',
+      group: 'digital-human',
+      summary: 'Send a message to a digital human and let it reply',
+      body: '{"spaceId": "<spaceId — a uuid from GET /api/spaces>", "message": "What did you find today?"}',
+      returns: '{success:true,data:{conversationId}}  // accepted, not answered',
+      notes: [
+        'conversationId decides which thread it lands in. Omit it for the main thread. For a fresh thread, take the one POST /api/apps/<appId>/sessions/create hands back — it is already in the right form. To continue a thread the user created in Halo, build it from GET /api/im-sessions?appId=: join appId, channel, chatType and chatId as app-chat:<appId>:<channel>:<chatType>:<chatId>.',
+        'Only the "local" and "http" channels are accepted; a thread whose source is "im" is refused, because this API must not put words into a real conversation with a person. 400 with the expected form when the id is malformed, and chatId must match [A-Za-z0-9_-].',
+        'Returns before the digital human has read anything. Poll GET /api/apps/<appId>/chat/status until isGenerating is false, then read the reply with GET /api/apps/<appId>/chat/messages, passing the same conversationId.',
+        'Nothing here paces you: each send starts another full agent process immediately. Send one at a time and wait for the reply — never loop over this route.',
+        'Optional body fields: thinkingEnabled, images.',
+      ].join('\n'),
     },
     'POST /api/apps/:appId/chat/stop': {
       expose: 'ai',
@@ -302,17 +317,34 @@ export const MODULE: RouteModuleMeta = {
       returns: '{success:true,data:{isGenerating:boolean,conversationId}}',
       notes: 'Use this to poll a chat that is already running instead of guessing a wait time; back off (2s, then double), never poll tightly',
     },
-    // Carries the raw tool call and result records of the digital human's own
-    // run, the same content the sibling endpoints were closed for.
-    'GET /api/apps/:appId/chat/messages': { expose: 'internal' },
+    'GET /api/apps/:appId/chat/messages': {
+      expose: 'ai',
+      group: 'digital-human',
+      summary: 'Read a digital human chat transcript',
+      returns:
+        '{success:true,data:[{id,role:"user"|"assistant",content,timestamp,thoughts?,thoughtsSummary?,images?}]}',
+      notes: [
+        'Reads the main thread by default. For any other thread pass ?conversationId=, the same key chat/send takes: app-chat:<appId>:<channel>:<chatType>:<chatId>, built from GET /api/im-sessions?appId=.',
+        'Empty array when the thread has no history yet — a wrong conversationId looks identical, so list the threads first rather than guessing one.',
+        'thoughts carries the raw tool calls and results of the run; skip it unless you are diagnosing what the digital human actually did.',
+      ].join('\n'),
+    },
     // Recovery-after-refresh snapshot (thoughts, pendingQuestion) for the
     // chat UI to rebuild its view on reconnect — not a general-purpose read.
     'GET /api/apps/:appId/chat/session-state': {
       expose: 'internal',
     },
-    // Carries the raw tool call and result records of the digital human's own
-    // run, the same content the sibling endpoints were closed for.
-    'GET /api/apps/:appId/im-chat/messages': { expose: 'internal' },
+    'GET /api/apps/:appId/im-chat/messages': {
+      expose: 'ai',
+      group: ['digital-human', 'channels'],
+      summary: "Read a digital human's transcript in a bound IM chat",
+      returns:
+        '{success:true,data:[{id,role:"user"|"assistant",content,timestamp,thoughts?,thoughtsSummary?,images?}]}',
+      notes: [
+        'Required query: ?channel=&chatId=&spaceId=. 400 if any is missing. Optional ?chatType=group, defaults to direct.',
+        'This is real correspondence with a person on the other end — read it only when the task needs it.',
+      ].join('\n'),
+    },
     'POST /api/apps/:appId/chat/clear': {
       expose: 'ai',
       group: 'digital-human',
@@ -352,7 +384,8 @@ export const MODULE: RouteModuleMeta = {
       expose: 'ai',
       group: 'digital-human',
       summary: 'Start a new chat thread with a digital human',
-      returns: '{success:true,data:{conversationId}}',
+      returns: '{success:true,data:{conversationId}}  // already in the form chat/send takes',
+      notes: 'The shortest path to a thread of your own: the conversationId comes back ready to pass to chat/send and chat/messages, with nothing to assemble. Continuing a thread the user already made is the case that needs GET /api/im-sessions.',
     },
     'POST /api/apps/:appId/sessions/fork': {
       expose: 'ai',

@@ -1,6 +1,7 @@
 ## knowledge-base — document collections agents can search
 covers: create and delete collections, bind them to a space, import and remove
-        documents, indexing progress and status
+        documents, resolve read paths back to their source documents, indexing
+        progress and status
 not here:
   ordinary files in a space -> workspace
   digital humans that read a collection -> digital-human
@@ -22,6 +23,7 @@ operations on this page:
   DELETE /api/tlon/<kbId>/linked-dirs/<linkId>                       Stop watching a linked directory
   GET    /api/tlon/<kbId>/raw                                        List the raw source files added to a collection
   POST   /api/tlon/<kbId>/remove-raw                                 Remove one document (raw source file) from a collection   !! destructive
+  POST   /api/tlon/<kbId>/resolve-sources                            Map paths read from a collection back to their source documents
   POST   /api/tlon/<kbId>/unbind-app                                 Unbind a knowledge collection from a digital human
   POST   /api/tlon/<kbId>/unbind-space                               Unbind a knowledge collection from a space
   GET    /api/tlon/for-space/$HALO_SPACE_ID                          List knowledge collections bound to a space (or the default one)
@@ -139,6 +141,15 @@ POST   /api/tlon/<kbId>/remove-raw                                 Remove one do
      # body: {"relativePath":"raw/file.pdf"}
      # out: {success:true,data:<removal result>}
      # err: 400 if relativePath is missing. Permanently deletes the copied file from the collection — no trash, no undo.
+
+POST   /api/tlon/<kbId>/resolve-sources                            Map paths read from a collection back to their source documents
+     curl -sX POST "$HALO_API_URL/api/tlon/<kbId>/resolve-sources" \
+          -H "Authorization: Bearer $HALO_API_TOKEN" \
+          -H "Content-Type: application/json" \
+          -d '{"readPaths":["/absolute/path/inside/the/collection"]}'
+     # body: {"readPaths":["/absolute/path/inside/the/collection"]}
+     # out: {success:true,data:[{name:string,path:string}]}  — deduped, absolute, files that still exist
+     # note: Turns the copies a collection holds into citable originals. Paths that no longer exist are dropped silently, so a shorter list than you sent is normal. 400 when readPaths is not an array; an empty array is accepted and returns nothing.
 
 POST   /api/tlon/<kbId>/unbind-app                                 Unbind a knowledge collection from a digital human
      # note: reversible — can be undone or corrected afterward.

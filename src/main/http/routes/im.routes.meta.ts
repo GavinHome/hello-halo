@@ -100,17 +100,29 @@ export const MODULE: RouteModuleMeta = {
       body: '{"instanceId":"<instanceId — from GET /api/im-channels/status>"}',
       returns: '{success:true} or {success:false,error}',
       impact: 'reversible',
-      notes: 'Can be restored by pairing again (request-qrcode) or by calling save-token with the same token.',
+      notes: 'Reversible only if the token is still to hand: call save-token with the same one. Otherwise the user has to re-pair by QR in Settings > Message Channels, which is not something you can start.',
     },
+    // Dual-grouped on purpose. The name and the file both say "IM", but this
+    // is also the only listing of a digital human's own named threads
+    // (source:'local'), and an agent looking for those starts on the
+    // digital-human page. Single-grouping it under channels is what made an
+    // existing capability read as missing.
     'GET /api/im-sessions': {
       expose: 'ai',
-      group: 'channels',
-      summary: 'List known IM contacts/chats bound to digital humans, optional ?appId= filter',
-      returns: '{success:true,data:[{appId,channel,chatId,proactive,customName?,...}]}',
+      group: ['channels', 'digital-human'],
+      summary: 'List every chat thread a digital human has, its own and IM ones',
+      returns:
+        '{success:true,data:[{appId,channel,source:"local"|"im"|"http",chatType:"direct"|"group",chatId,displayName,customName?,proactive,instanceId}]}',
+      notes: [
+        'Optional ?appId= narrows it to one digital human. This is the only listing of its threads — there is no sessions/list beside sessions/create.',
+        'source says what a thread is: "local" = a named thread the user created in Halo, "im" = a real chat with a person on an IM platform, "http" = created through this API.',
+        'Reading or writing one thread needs a conversationId, which is not a field here — build it from four fields of the record: app-chat:<appId>:<channel>:<chatType>:<chatId>.',
+        'Only "local" and "http" threads accept a message from this API. An "im" thread is refused on send — this API must not put words into a real conversation with a person.',
+      ].join('\n'),
     },
     'POST /api/im-sessions/set-proactive': {
       expose: 'ai',
-      group: 'channels',
+      group: ['channels', 'digital-human'],
       summary: "Toggle whether a run's result is auto-pushed to this chat when it finishes",
       body: '{"appId":"<appId — a uuid from GET /api/apps>","channel":"wecom-bot","chatId":"<chatId — from GET /api/im-sessions>","proactive":true}',
       returns: '{success:true} or {success:false,error}',
@@ -119,7 +131,7 @@ export const MODULE: RouteModuleMeta = {
     },
     'POST /api/im-sessions/remove': {
       expose: 'ai',
-      group: 'channels',
+      group: ['channels', 'digital-human'],
       summary: 'Remove a chat binding from the IM session registry',
       body: '{"appId":"<appId — a uuid from GET /api/apps>","channel":"wecom-bot","chatId":"<chatId — from GET /api/im-sessions>"}',
       returns: '{success:true,data:{removed:boolean}}',
@@ -128,7 +140,7 @@ export const MODULE: RouteModuleMeta = {
     },
     'POST /api/im-sessions/set-custom-name': {
       expose: 'ai',
-      group: 'channels',
+      group: ['channels', 'digital-human'],
       summary: 'Set a custom display name for a chat binding',
       body: '{"appId":"<appId — a uuid from GET /api/apps>","channel":"wecom-bot","chatId":"<chatId — from GET /api/im-sessions>","name":"Sales Team Chat"}',
       returns: '{success:true} or {success:false,error}',

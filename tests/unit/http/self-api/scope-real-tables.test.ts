@@ -9,13 +9,10 @@
  * are added nor go quiet when the tables change shape.
  */
 
-import { describe, it, expect, beforeAll, afterAll, vi } from 'vitest'
+import { describe, it, expect, vi } from 'vitest'
 import { readFileSync } from 'fs'
 import { join, dirname } from 'path'
 import { fileURLToPath } from 'url'
-
-import express from 'express'
-import type { Server } from 'http'
 
 // Only the LOCATION is stubbed, never the content: `getBundledRoot` resolves
 // against `app.getAppPath()`, which under the test runner does not point at the
@@ -34,8 +31,6 @@ vi.mock('../../../../src/main/services/api-ref/resource-path', async () => {
 })
 
 import { classify } from '../../../../src/main/http/self-api/scope'
-import { selfApiAuthMiddleware } from '../../../../src/main/http/self-api/middleware'
-import { issueSelfApiToken } from '../../../../src/main/http/self-api/token-store'
 
 const repoRoot = join(dirname(fileURLToPath(import.meta.url)), '../../../..')
 const readTable = (name: string): Endpoint[] =>
@@ -108,54 +103,4 @@ describe('the real generated tables', () => {
     expect(snapshot.expose.unlabeled).toBe(0)
   })
 
-})
-
-/**
- * `applyDefaultSpaceId` rewrites `req.url` rather than assigning to `req.query`
- * — the only place in this module that leans on a framework implementation
- * detail (Express 5 recomputes `query` from the URL on access, so the obvious
- * assignment silently does nothing). Every other space-gate test asserts the
- * middleware's own output; this one asserts a handler actually receives it,
- * through the same `app.use('/api', ...)` mount the real server uses.
- */
-describe('default spaceId survives the mount point', () => {
-  const spaceId = 'space-under-test'
-  let server: Server
-  let base: string
-  let token: string
-
-  beforeAll(async () => {
-    token = issueSelfApiToken(spaceId)
-
-    const app = express()
-    app.use(express.json())
-    app.use('/api', selfApiAuthMiddleware)
-    app.get('/api/apps', (req, res) => {
-      res.json({ success: true, data: { sawSpaceId: req.query.spaceId } })
-    })
-
-    await new Promise<void>((done) => {
-      server = app.listen(0, '127.0.0.1', () => done())
-    })
-    base = `http://127.0.0.1:${(server.address() as { port: number }).port}`
-  })
-
-  afterAll(() => new Promise<void>((done) => server.close(() => done())))
-
-  const get = (path: string) =>
-    fetch(`${base}${path}`, { headers: { Authorization: `Bearer ${token}` } })
-
-  it('is readable as req.query.spaceId inside the handler', async () => {
-    const res = await get('/api/apps')
-
-    expect(res.status).toBe(200)
-    expect((await res.json()).data.sawSpaceId).toBe(spaceId)
-  })
-
-  it('leaves an explicitly matching spaceId alone', async () => {
-    const res = await get(`/api/apps?spaceId=${spaceId}`)
-
-    expect(res.status).toBe(200)
-    expect((await res.json()).data.sawSpaceId).toBe(spaceId)
-  })
 })

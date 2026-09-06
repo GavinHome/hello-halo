@@ -28,16 +28,27 @@ export const MODULE: RouteModuleMeta = {
       notes: '400 if dirPath is missing. 403 if dirPath resolves outside this space\'s working directory.',
     },
 
-    // All three of these hand back arbitrary workspace file bytes with no
-    // content-level filtering (readArtifactContent treats .env as first-class
-    // viewable text) — download/download-all stream raw bytes outside the
-    // JSON envelope entirely, and content wraps the same risk in JSON. A
-    // user's pasted API key or saved .env is retrievable byte-for-byte
-    // through any of the three, so all three are withheld rather than relying
-    // on the redaction layer to reach into free-form file content.
+    // Both stream raw bytes past res.json, the only write the loopback
+    // listener's redaction wraps, so the generator refuses to label them 'ai'.
+    // That gate is about the envelope, not the contents: redaction matches on
+    // key names and never looks inside a file, so the exposed artifacts/content
+    // hands back a .env verbatim too — its own note says so, because nothing in
+    // the transport can.
     'GET /api/artifacts/download': { expose: 'internal' },
     'GET /api/spaces/:spaceId/artifacts/download-all': { expose: 'internal' },
-    'GET /api/artifacts/content': { expose: 'internal' },
+
+    'GET /api/artifacts/content': {
+      expose: 'ai',
+      group: 'workspace',
+      summary: 'Read one file from a space',
+      returns: '{"success":true,"data":{"content":"…","mimeType":"text/plain","encoding":"utf-8","size":1234}}',
+      notes: [
+        'Query: ?path= (absolute). Binary types (png, jpg, pdf, zip, …) come back base64 with encoding:"base64".',
+        'Your own Read tool is usually the better door — this one exists for reading a file in a space that is not your working directory.',
+        'The content is verbatim and unredacted, so a .env or a pasted key comes back in the clear. Do not echo it into the conversation.',
+        '400 missing path, 403 outside an allowed space, 404 not found, 500 "File too large" above 10MB text / 50MB binary.',
+      ].join('\n'),
+    },
 
     'POST /api/artifacts/save': {
       expose: 'ai',

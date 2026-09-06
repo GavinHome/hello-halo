@@ -18,9 +18,21 @@ export const MODULE: RouteModuleMeta = {
       ].join('\n'),
     },
 
-    'POST /api/notify-channels/clear-cache': { expose: 'internal' },
+    'POST /api/notify-channels/clear-cache': {
+      expose: 'ai',
+      group: 'channels',
+      summary: 'Drop cached notification-channel access tokens',
+      returns: '{"success":true}  // no data',
+      impact: 'reversible',
+      notes: 'Worth trying when a channel that used to work starts failing to authenticate — the next send fetches a fresh token. It changes no configuration.',
+    },
 
-    // Product-level customisation read out of product.json.
-    'GET /api/notify-channels/product-config': { expose: 'internal' },
+    'GET /api/notify-channels/product-config': {
+      expose: 'ai',
+      group: 'channels',
+      summary: 'Read the product-level notification channel customisation',
+      returns: '{"success":true,"data":{"wecom":{"docs":{...}},"email":{"docs":{...}}}}',
+      notes: 'Presentation only — help links this build shows per channel. data is null when the build customises nothing. It does not say which channels the user configured.',
+    },
   },
 }

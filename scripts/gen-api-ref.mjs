@@ -748,7 +748,7 @@ function renderImpactLines(meta) {
 }
 
 function renderEntry(r, pathWidth) {
-  const header = `${r.method.padEnd(7)}${toDisplayPath(r.path).padEnd(pathWidth)}${r.meta.summary}`
+  const header = `${r.method.padEnd(7)}${padColumn(toDisplayPath(r.path), pathWidth)}${r.meta.summary}`
   if (r.meta.expose === 'wrapped') {
     return [
       header,
@@ -827,7 +827,7 @@ function renderOpsTable(routes, pathWidth) {
           : r.meta.narrowerAlternative
             ? `   !! destructive - narrower: ${toDisplayPath(r.meta.narrowerAlternative)}`
             : '   !! destructive'
-      return `  ${r.method.padEnd(7)}${toDisplayPath(r.path).padEnd(pathWidth)}${r.meta.summary}${mark}`
+      return `  ${r.method.padEnd(7)}${padColumn(toDisplayPath(r.path), pathWidth)}${r.meta.summary}${mark}`
     }),
     '',
   ]
@@ -919,7 +919,7 @@ function renderIndex(routes, pathWidth) {
       .map((r) => {
         const expose = `[${r.meta.expose}]`.padEnd(11)
         const groupsCol = groupsOf(r.meta.group).join(',').padEnd(24)
-        return `${r.method.padEnd(7)}${toDisplayPath(r.path).padEnd(pathWidth)}${expose}${groupsCol}${r.meta.summary}`
+        return `${r.method.padEnd(7)}${padColumn(toDisplayPath(r.path), pathWidth)}${expose}${groupsCol}${r.meta.summary}`
       })
       .join('\n') + '\n'
   )
@@ -927,6 +927,17 @@ function renderIndex(routes, pathWidth) {
 
 function clamp(n, min, max) {
   return Math.max(min, Math.min(max, n))
+}
+
+/**
+ * Columns are clamped so one outlier path cannot push every summary off the
+ * right edge, which means a path longer than the clamp gets no padding at all
+ * and butts straight into the next column — `.../thoughtsRead the reasoning`
+ * in a page, `.../thoughts[ai]` in the index, the second of which an agent
+ * will copy as a path. Pad to the column, but never to nothing.
+ */
+function padColumn(text, width) {
+  return text.length >= width ? `${text} ` : text.padEnd(width)
 }
 
 function renderAll(allRoutes, groups) {
