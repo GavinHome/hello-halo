@@ -11,6 +11,7 @@ import {
   type StreamHandlerOptions
 } from './base-stream-handler'
 import { safeJsonParse } from '../utils'
+import { normalizeOpenAIUsage } from '../converters/response/usage'
 import type { AnthropicStopReason } from '../types'
 
 // Event types from OpenAI Responses API
@@ -101,12 +102,9 @@ export class OpenAIResponsesStreamHandler extends BaseStreamHandler {
     }
 
     // Update usage from response
-    if (responseObj.usage) {
-      this.updateUsage({
-        inputTokens: responseObj.usage.input_tokens || responseObj.usage.prompt_tokens,
-        outputTokens: responseObj.usage.output_tokens || responseObj.usage.completion_tokens,
-        cacheReadTokens: responseObj.usage.cache_read_input_tokens
-      })
+    const usage = normalizeOpenAIUsage(responseObj.usage)
+    if (usage) {
+      this.updateUsage(usage)
     }
 
     // Ensure message has started
@@ -281,12 +279,9 @@ export class OpenAIResponsesStreamHandler extends BaseStreamHandler {
     this.setStopReason(stopReason)
 
     // Update final usage
-    if (response.usage) {
-      this.updateUsage({
-        inputTokens: response.usage.input_tokens || response.usage.prompt_tokens,
-        outputTokens: response.usage.output_tokens || response.usage.completion_tokens,
-        cacheReadTokens: response.usage.cache_read_input_tokens
-      })
+    const usage = normalizeOpenAIUsage(response.usage)
+    if (usage) {
+      this.updateUsage(usage)
     }
 
     this.markFinished()

@@ -111,16 +111,17 @@ export const MODULE: RouteModuleMeta = {
       notes: '404-equivalent: manager.resume throws for an unknown appId',
       impact: 'reversible',
     },
-    // trigger_automation_app translates a per-app concurrency conflict into a
-    // friendly non-error result the AI can relay ("already running, wait").
-    // A raw call surfaces the same conflict as {success:false,error:"..."}
-    // from ConcurrencyLimitError's message instead.
+    // This route answers only when the whole run is over (minutes), because the
+    // UI it was built for shows live progress meanwhile. trigger_automation_app
+    // instead returns at run start, and translates a per-app concurrency
+    // conflict into a friendly non-error result the AI can relay
+    // ("already running, wait") rather than {success:false,error:"..."}.
     'POST /api/apps/:appId/trigger': {
       expose: 'wrapped',
       group: 'digital-human',
       summary: 'Manually trigger a digital human to run immediately',
       useInstead: 'trigger_automation_app',
-      bypassCost: 'the friendly "already running or queued, please wait" message — a raw call surfaces this as a plain error instead',
+      bypassCost: 'this route blocks until the entire run finishes (minutes) — the tool returns as soon as the run starts; a raw call also surfaces "already running or queued" as a plain error instead of a friendly message',
     },
     'GET /api/apps/:appId/activity': {
       expose: 'ai',

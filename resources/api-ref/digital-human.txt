@@ -264,7 +264,7 @@ GET    /api/apps/<appId>/state                                     Get real-time
      # note: More detail than the "status" field on GET /:appId alone (adds nextRunAtMs, queued/idle distinction)
 
 POST   /api/apps/<appId>/trigger                                   Manually trigger a digital human to run immediately
-     # use trigger_automation_app instead — a raw call would skip: the friendly "already running or queued, please wait" message — a raw call surfaces this as a plain error instead.
+     # use trigger_automation_app instead — a raw call would skip: this route blocks until the entire run finishes (minutes) — the tool returns as soon as the run starts; a raw call also surfaces "already running or queued" as a plain error instead of a friendly message.
      # If that tool is not available to you, this capability is switched off in this build's settings —
      # say that, and do not say Halo cannot do it.
 
