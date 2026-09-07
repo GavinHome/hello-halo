@@ -1,5 +1,6 @@
-## terminal — interactive shell sessions
-covers: create a session, write input, read output, close a session
+## terminal — the terminal session the user can see and type into
+covers: create a session, write input, read output, close a session. Commands
+        you run for yourself go through your own Bash tool, not here.
 not here:
   reading files without a shell -> workspace
 

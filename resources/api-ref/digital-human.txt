@@ -1,8 +1,7 @@
-## digital-human — create, run and configure digital humans
+## digital-human — digital humans: scheduled or event-triggered automations, and the chat threads users hold with them
 covers: install and uninstall, pause and resume, manual trigger, schedule and
-        user config, list its chat threads, chat with it in any of them and
-        read the transcript, export its definition as YAML, run history and
-        activity
+        user config, run history and activity, list its chat threads, chat
+        with it in any of them and read the transcript
 not here:
   binding a digital human to an IM chat -> channels
   files a digital human produced -> workspace
@@ -284,19 +283,21 @@ POST   /api/apps/<appId>/sessions/delete                           Delete a chat
      curl -sX POST "$HALO_API_URL/api/apps/<appId>/sessions/delete" \
           -H "Authorization: Bearer $HALO_API_TOKEN" \
           -H "Content-Type: application/json" \
-          -d '{"spaceId":"<spaceId — the app's own spaceId from GET /api/apps>","conversationId":"<conversationId — a uuid from GET /api/spaces/$HALO_SPACE_ID/conversations>"}'
-     # body: {"spaceId": "<spaceId — the app's own spaceId from GET /api/apps>", "conversationId": "<conversationId — a uuid from GET /api/spaces/$HALO_SPACE_ID/conversations>"}
+          -d '{"spaceId":"<spaceId — the app's own spaceId from GET /api/apps>","conversationId":"<conversationId — a thread of THIS app, from GET /api/im-sessions?appId=>"}'
+     # body: {"spaceId": "<spaceId — the app's own spaceId from GET /api/apps>", "conversationId": "<conversationId — a thread of THIS app, from GET /api/im-sessions?appId=>"}
      # out: {success:true}
-     # err: 400 if spaceId or conversationId is missing
+     # note: The id names one of this digital human's own threads, never a conversation from GET /api/spaces/<spaceId>/conversations.
+     # err: 400 if spaceId or conversationId is missing.
 
 POST   /api/apps/<appId>/sessions/fork                             Branch an existing chat thread into a new one, copying its history
      curl -sX POST "$HALO_API_URL/api/apps/<appId>/sessions/fork" \
           -H "Authorization: Bearer $HALO_API_TOKEN" \
           -H "Content-Type: application/json" \
-          -d '{"spaceId":"<spaceId — the app's own spaceId from GET /api/apps>","sourceConversationId":"<conversationId — a uuid from GET /api/spaces/$HALO_SPACE_ID/conversations>"}'
-     # body: {"spaceId": "<spaceId — the app's own spaceId from GET /api/apps>", "sourceConversationId": "<conversationId — a uuid from GET /api/spaces/$HALO_SPACE_ID/conversations>"}
+          -d '{"spaceId":"<spaceId — the app's own spaceId from GET /api/apps>","sourceConversationId":"<conversationId — a thread of THIS app, from POST /api/apps/<appId>/sessions/create or assembled from GET /api/im-sessions?appId=>"}'
+     # body: {"spaceId": "<spaceId — the app's own spaceId from GET /api/apps>", "sourceConversationId": "<conversationId — a thread of THIS app, from POST /api/apps/<appId>/sessions/create or assembled from GET /api/im-sessions?appId=>"}
      # out: {success:true,data:{conversationId}}
-     # err: 400 if spaceId or sourceConversationId is missing
+     # note: A digital human's threads are not the conversations in a space — do not take an id from GET /api/spaces/<spaceId>/conversations, it belongs to the user's chats with the Halo assistant and this route will not find it.
+     # err: 400 if spaceId or sourceConversationId is missing.
 
 PATCH  /api/apps/<appId>/spec                                      Edit part of a digital human's definition (spec) without replacing all of it
      # use update_automation_app instead — a raw call would skip: the guard against changing spec.type, and the "frequency" shorthand that rewrites the schedule subscription for you.

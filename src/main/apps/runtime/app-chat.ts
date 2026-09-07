@@ -86,6 +86,7 @@ import { FileExportGate } from './file-export-gate'
 import { truncateUtf16Safe } from './text-truncate'
 import { getImSessionRegistry } from './im-session-registry'
 import { createHaloAppsMcpServer } from '../conversation-mcp'
+import { createOfficialDocsSession } from '../../services/official-docs-mcp'
 import { createWebSearchMcpServer } from '../../services/web-search'
 import { createOcrMcpServer } from '../../services/ocr'
 import { createApiRefMcpServer, HALO_API_TOOLSET_ID } from '../../services/api-ref'
@@ -577,11 +578,15 @@ export async function sendAppChatMessage(
   // KEY constraint and the model retries in a loop (see issue #200). Chat replies
   // reach the user directly as text, so the Activity Thread is not needed here.
   // Built-in server ids below are mirrored in shared/apps/builtin-mcp.ts — keep in sync.
+  // Documentation is unconditional: the digital-humans switch decides whether
+  // apps can be managed here, not whether Halo can describe itself.
+  const { server: docsMcpServer, guideConsulted } = createOfficialDocsSession()
   const mcpServers: Record<string, any> = {
     ...(dbMcpServers ?? {}),
     'halo-memory': memoryMcpServer,
     'halo-notify': notifyMcpServer,
-    ...(digitalHumansEnabled ? { 'halo-apps': createHaloAppsMcpServer(spaceId) } : {}),
+    'halo-docs': docsMcpServer,
+    ...(digitalHumansEnabled ? { 'halo-apps': createHaloAppsMcpServer(spaceId, guideConsulted) } : {}),
     'web-search': createWebSearchMcpServer(),
     'ocr': createOcrMcpServer(),
     ...(usesAIBrowser ? { 'ai-browser': createAIBrowserMcpServer(scopedBrowserCtx, workDir) } : {}),

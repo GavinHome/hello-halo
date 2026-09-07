@@ -48,6 +48,7 @@ import { createTerminalMcpServer, getGlobalTerminalContext, isTerminalAvailable 
 import { createWebSearchMcpServer } from '../../services/web-search'
 import { createOcrMcpServer } from '../../services/ocr'
 import { createApiRefMcpServer, HALO_API_TOOLSET_ID } from '../../services/api-ref'
+import { createOfficialDocsSession } from '../../services/official-docs-mcp'
 import { createEmailMcpServer } from '../../services/email-mcp'
 import { getConfig, resolveClaudeConfigDir } from '../../foundation/config.service'
 import { getSpace, getSpaceDir } from '../../services/space.service'
@@ -439,6 +440,12 @@ export async function executeRun(options: ExecuteRunOptions): Promise<AppRunResu
       app.spaceId!
     )
 
+    // A run has no person to ask what a screen looks like, so the one context
+    // that most needs Halo's own documentation was the one that shipped
+    // without it. The authoring gate the session half carries is unused here:
+    // spec creation is not a tool a run holds.
+    const { server: docsMcpServer } = createOfficialDocsSession()
+
     const sdkOptions = await buildBaseSdkOptions({
       selfApiAccess: usesHaloApi,
       credentials: resolvedCreds,
@@ -455,6 +462,7 @@ export async function executeRun(options: ExecuteRunOptions): Promise<AppRunResu
         'halo-memory': memoryMcpServer,     // built-in: persistent memory
         'halo-report': reportMcpServer,     // built-in: completion signal
         'halo-notify': notifyMcpServer,     // built-in: user notification
+        'halo-docs': docsMcpServer,         // built-in: Halo's own documentation
         'web-search': createWebSearchMcpServer(), // built-in: web search
         'ocr': createOcrMcpServer(),              // built-in: on-device image OCR
         ...(usesAIBrowser ? { 'ai-browser': createAIBrowserMcpServer(scopedBrowserCtx, workDir) } : {}),

@@ -17,7 +17,7 @@
 import { dirname } from 'path'
 import { z } from 'zod'
 import { createSdkMcpServer, tool } from '../agent/resolved-sdk'
-import { API_REF_GROUP_IDS } from './groups'
+import { API_REF_GROUP_IDS, API_REF_GROUPS } from './groups'
 
 /**
  * Toolset id, MCP server name, and — for digital humans — the permission id.
@@ -39,21 +39,29 @@ const INDEX_PLACEHOLDER = '{{API_REF_INDEX_PATH}}'
 
 // Every sentence here closes one specific failure: the opening line is a "when
 // to use this" rather than a "what this returns", because a weak model routes
-// off the first sentence it reads and never reaches the group enum or the
-// env-var line; the last line is what stands between a wrong guess and the
-// model telling the user "Halo can't do this".
-const TOOL_DESCRIPTION = `Call this before doing anything to Halo itself (spaces, conversations,
-digital humans, knowledge collections, channels, settings).
-Returns the executable HTTP contract for one capability group of this Halo
-build: exact paths, ready-to-run curl, and response shapes.
+// off the first sentence it reads and never reaches the env-var line; the last
+// line is what stands between a wrong guess and the model telling the user
+// "Halo can't do this". What each group covers belongs to the `group`
+// parameter rather than here — it is read while filling that field in.
+const TOOL_DESCRIPTION = `Call this before doing anything to Halo itself. Returns the executable HTTP
+contract for one capability group of this build: exact paths, ready-to-run
+curl, response shapes, and what is closed to you.
+
 Auth and base URL are already in your environment ($HALO_API_URL,
 $HALO_API_TOKEN, $HALO_SPACE_ID) — copy the curl as-is and substitute ids.
 
-group: conversation | workspace | digital-human | knowledge-base
-     | channels | settings | store | terminal
-
 Not finding something here does NOT mean Halo can't do it. Grep the full
 index (path is printed on every page) before telling the user it is impossible.`
+
+/**
+ * The group enum's own documentation, built from the same descriptions the
+ * manual pages are headed with. Written out rather than summarised: choosing
+ * the wrong group ends in a page that does not hold the capability, and the
+ * agent reporting it missing — which costs far more than the words do.
+ */
+const GROUP_PARAM_DESCRIPTION = API_REF_GROUP_IDS.map(
+  (id) => `${API_REF_GROUPS[id].title}. Covers: ${API_REF_GROUPS[id].covers}`,
+).join('\n')
 
 /**
  * Appended to the system prompt only while this toolset is enabled
@@ -65,43 +73,33 @@ export const HALO_API_USAGE_GUIDE = `
 ## Operate Halo
 
 Halo itself is operable over its local HTTP API — spaces, conversations,
-digital humans, knowledge bases, channels, settings and the app store.
+digital humans, knowledge bases, IM channels, settings and the app store.
+This is a raw interface, with close to the reach the user has in the app.
 
-1. \`mcp__halo-api-ref__halo_api_ref\` — ask for the capability group you need.
-   It returns this build's real contract: exact paths, ready-to-run curl, and
-   response shapes.
-2. Run the curl it gives you with the Bash tool. \`$HALO_API_URL\`,
-   \`$HALO_API_TOKEN\` and \`$HALO_SPACE_ID\` are already set — copy commands as
-   written, substitute only ids, and never print or expand those variables.
+Prefer a purpose-built tool when you hold one. Purpose-built tools validate
+input, sequence multi-step operations and roll back on failure; the raw API
+does none of that. Use the API when no tool covers the task.
 
-### Key Rules
-- Never write a path from memory. Paths differ between builds; a remembered one
-  is how you end up reporting a capability as missing when it exists.
-- HTTP 200 does not mean success. Read the body and check \`"success"\`.
-- 403 means the endpoint exists but is closed to you in this build — tell the
-  user to do it in the Halo app, not that Halo cannot do it.
-- Not finding something is a real answer only after you have grepped the full
-  index (its path is printed on every page).
+### How to use it
+1. Call \`mcp__halo-api-ref__halo_api_ref\` with the capability group you need.
+   It returns this build's real contract: exact paths, ready-to-run curl,
+   response shapes, and what is closed to you.
+2. Run the curl it returns with the Bash tool. \`$HALO_API_URL\`,
+   \`$HALO_API_TOKEN\` and \`$HALO_SPACE_ID\` are already set. NEVER print or
+   expand them.
 
-### Answering vs. doing
-"How do I set up X?" is a question. Answer it and stop — do not start
-configuring anything.
-
-"Can you set up X for me?" is the job. This manual carries paths and payloads;
-it never carries what a good configuration looks like. Clicking through the UI
-is something the user can already do, so the reason to hand the work to you is
-that you know which fields matter and why. If this build gives you a way to
-read Halo's own documentation, that is where it comes from; if it does not,
-say what you are about to configure and what you are unsure of before you
-write anything.
-
-Most credentials cannot be written through this API at all — model keys and
-SMTP passwords live behind routes that answer 403, and a couple of bot tokens
-are the exception rather than the rule. So find the write route before you ask
-for anything. When there is none, name the screen in the Halo app where the
-user sets it themselves and carry on from there: a key pasted into a
-conversation you cannot spend it in has cost them something and bought
-nothing.
+### Rules
+- IMPORTANT: NEVER write a path from memory. Paths differ between builds.
+- HTTP 200 does not mean success. Check \`"success"\` in the body.
+- 403 means the endpoint exists and is closed to you — never that Halo cannot
+  do it. Check your own tools for the same operation first.
+- Before concluding it cannot be done: follow the group page's redirects, then
+  grep the full index (its path is printed on every page).
+- Once you have confirmed this API cannot do it: tell the user so plainly,
+  call \`read_halo_doc\` for the exact screen and steps, and walk them through
+  doing it by hand.
+- Most credentials cannot be written through this API. Find the write route
+  before asking the user for a secret.
 `
 
 /**
@@ -145,18 +143,7 @@ function buildTools(): unknown[] {
     'halo_api_ref',
     TOOL_DESCRIPTION,
     {
-      group: z
-        .enum(GROUPS)
-        .describe(
-          'conversation: stop or inspect what Halo is doing, read conversations. ' +
-            'workspace: spaces and the files they hold. ' +
-            'digital-human: install, run and configure digital humans. ' +
-            'knowledge-base: document collections agents can search. ' +
-            'channels: IM channels and outbound notifications. ' +
-            'settings: application and model configuration. ' +
-            'store: browse and install from the app store. ' +
-            'terminal: interactive shell sessions.',
-        ),
+      group: z.enum(GROUPS).describe(GROUP_PARAM_DESCRIPTION),
     },
     async (args: { group: string }) => {
       try {

@@ -1,8 +1,13 @@
 /**
- * Capability groups an agent navigates by. Deliberately decoupled from the
- * routes files: files are organised for whoever maintains them, groups are
- * organised for whoever is looking for a capability, and those two rarely
- * agree. Internal code names never appear here.
+ * Manual-page furniture for each capability group: where a wrong guess is
+ * redirected, what this build withholds, and what has no endpoint at all.
+ * Deliberately decoupled from the routes files: files are organised for
+ * whoever maintains them, groups are organised for whoever is looking for a
+ * capability, and those two rarely agree. Internal code names never appear
+ * here.
+ *
+ * What a group *is* lives in `services/api-ref/groups.ts` — that half is read
+ * while choosing a group, this half only once a page is open.
  *
  * `notHere` is what makes a wrong guess cheap — it redirects on the spot
  * instead of leaving the agent to conclude Halo cannot do the thing.
@@ -12,9 +17,6 @@ import type { GroupId, GroupMeta } from './_meta-types'
 
 export const GROUPS: Record<GroupId, GroupMeta> = {
   conversation: {
-    title: 'conversation — talk to Halo, drive and inspect chat sessions',
-    covers:
-      'start a new Halo turn, stop or cancel whatever Halo is currently doing, see what is still running, list and read conversations and the reasoning behind a message, rename, star and delete them, see which toolsets a conversation has open',
     notHere: {
       'chatting with a digital human': 'digital-human',
       'files produced during a conversation': 'workspace',
@@ -32,9 +34,6 @@ export const GROUPS: Record<GroupId, GroupMeta> = {
     },
   },
   workspace: {
-    title: 'workspace — spaces and the files they hold',
-    covers:
-      'create, rename, reorder and delete spaces, space settings and working directory, browse and read produced files and artifacts',
     notHere: {
       'documents indexed for retrieval': 'knowledge-base',
       'digital humans living in a space': 'digital-human',
@@ -46,9 +45,6 @@ export const GROUPS: Record<GroupId, GroupMeta> = {
     ],
   },
   'digital-human': {
-    title: 'digital-human — create, run and configure digital humans',
-    covers:
-      'install and uninstall, pause and resume, manual trigger, schedule and user config, list its chat threads, chat with it in any of them and read the transcript, export its definition as YAML, run history and activity',
     notHere: {
       'binding a digital human to an IM chat': 'channels',
       'files a digital human produced': 'workspace',
@@ -57,18 +53,12 @@ export const GROUPS: Record<GroupId, GroupMeta> = {
     },
   },
   'knowledge-base': {
-    title: 'knowledge-base — document collections agents can search',
-    covers:
-      'create and delete collections, bind them to a space, import and remove documents, resolve read paths back to their source documents, indexing progress and status',
     notHere: {
       'ordinary files in a space': 'workspace',
       'digital humans that read a collection': 'digital-human',
     },
   },
   channels: {
-    title: 'channels — inbound IM channels and outbound notifications',
-    covers:
-      'connect and disconnect IM channels, bind a chat to a digital human, list every thread a digital human has (IM and its own), read a bound chat transcript, configure and test outbound notification channels, drop cached channel tokens',
     notHere: {
       'the digital human on the other end of a channel': 'digital-human',
       'model providers and API keys': 'settings',
@@ -79,9 +69,6 @@ export const GROUPS: Record<GroupId, GroupMeta> = {
     ],
   },
   settings: {
-    title: 'settings — how this build is configured and what it can do',
-    covers:
-      'application version, sign-in and model providers this build offers, model capability presets, switching model source and model, deleting a model source, the security policy in force, agent engine capabilities and availability, MCP server diagnostics',
     notHere: {
       'per-space settings': 'workspace',
       'per-digital-human config': 'digital-human',
@@ -103,9 +90,6 @@ export const GROUPS: Record<GroupId, GroupMeta> = {
     },
   },
   store: {
-    title: 'store — browse and install from the app store',
-    covers:
-      'browse and search store listings, read a listing, install and uninstall store items, install from a local .dhpkg file, skills',
     notHere: {
       'configuring an installed digital human': 'digital-human',
       'knowledge collections': 'knowledge-base',
@@ -116,8 +100,6 @@ export const GROUPS: Record<GroupId, GroupMeta> = {
     ],
   },
   terminal: {
-    title: 'terminal — interactive shell sessions',
-    covers: 'create a session, write input, read output, close a session',
     notHere: {
       'reading files without a shell': 'workspace',
     },

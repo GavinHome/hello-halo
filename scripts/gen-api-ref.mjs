@@ -231,9 +231,16 @@ async function loadMeta(file) {
   return mod.MODULE
 }
 
+/**
+ * A group is described in one file and furnished in another — `title`/`covers`
+ * in `services/api-ref/groups.ts` because the runtime offers them beside the
+ * tool's group enum, the redirects and withheld lists in `_meta-groups.ts`
+ * because only a rendered page uses them. Merged here so a page still reads as
+ * one thing.
+ */
 async function loadGroups() {
   const mod = await transformAndImport(join(ROUTES_DIR, '_meta-groups.ts'))
-  const groups = mod.GROUPS
+  const furniture = mod.GROUPS
 
   // The runtime offers these groups in the halo_api_ref enum; the pages below
   // are what a request for one returns. A group offered without a page sends
@@ -242,7 +249,7 @@ async function loadGroups() {
     join(PROJECT_ROOT, 'src', 'main', 'services', 'api-ref', 'groups.ts')
   )
   const offered = [...declared.API_REF_GROUP_IDS].sort()
-  const paged = Object.keys(groups).sort()
+  const paged = Object.keys(furniture).sort()
   if (offered.join() !== paged.join()) {
     log.err('group mismatch between services/api-ref/groups.ts and routes/_meta-groups.ts:')
     for (const g of offered.filter((g) => !paged.includes(g))) log.err(`  offered with no page: ${g}`)
@@ -250,7 +257,20 @@ async function loadGroups() {
     process.exit(1)
   }
 
-  return groups
+  const described = Object.keys(declared.API_REF_GROUPS).sort()
+  if (described.join() !== offered.join()) {
+    log.err('services/api-ref/groups.ts: API_REF_GROUPS and API_REF_GROUP_IDS disagree:')
+    for (const g of offered.filter((g) => !described.includes(g))) log.err(`  offered with no description: ${g}`)
+    for (const g of described.filter((g) => !offered.includes(g))) log.err(`  described but not offered: ${g}`)
+    process.exit(1)
+  }
+
+  // Declaration order, not the sorted copy the checks above compare with: it is
+  // the order the tool offers the enum in, and a snapshot that reorders itself
+  // against no input change is a diff nobody reads.
+  return Object.fromEntries(
+    declared.API_REF_GROUP_IDS.map((gid) => [gid, { ...declared.API_REF_GROUPS[gid], ...furniture[gid] }])
+  )
 }
 
 // ---------------------------------------------------------------------------
@@ -600,7 +620,8 @@ async function reconcile() {
 
   for (const gid of groupIds) {
     const g = groups[gid]
-    if (!g.covers) errors.push(`[5] group '${gid}' missing covers`)
+    if (!g.title) errors.push(`[5] group '${gid}' missing title (services/api-ref/groups.ts)`)
+    if (!g.covers) errors.push(`[5] group '${gid}' missing covers (services/api-ref/groups.ts)`)
     if (!g.notHere) {
       errors.push(`[5] group '${gid}' missing notHere`)
     } else {

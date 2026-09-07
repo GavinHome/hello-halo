@@ -24,6 +24,7 @@ Apps Layer (src/main/apps)
                       + dispatch-inbound (IM → app-chat/prompt-chat)
                       + registers services/app-bridge at init (see §2)
   - conversation-mcp: in-process MCP server for app management tools
+                      (documentation reading is NOT here — see services/official-docs-mcp)
 
 Services Layer (src/main/services)
   - domain services: agent, ai-browser, ai-sources, space, conversation,
@@ -128,6 +129,8 @@ src/
 │       ├── notify-channels/           # Outbound notification channels (Email/WeCom/DingTalk/Feishu/Webhook)
 │       ├── ocr/                       # On-device OCR (tesseract.js engine + ocr_image MCP server);
 │       │                              #   shared by tlon ingest, chat toolset, digital-human runtime
+│       ├── official-docs-mcp/         # `read_halo_doc` — Halo's own documentation as a tool.
+│       │                              #   Always-on at all three chat entry points; see §17.2
 │       ├── perf/                      # Performance monitoring
 │       ├── remote/                     # Remote Access: HTTP-server + Cloudflare tunnel coordination (service + tunnel + issuer-client)
 │       ├── stealth/                   # Anti-detection evasions
@@ -660,6 +663,29 @@ listener (`src/main/http/self-api/`) reached with curl.
   user was looking at.
 - **Adding a route** means adding its meta entry too — `npm run test:api-ref`
   fails the build when the generated tree and the routes have drifted.
+- **A capability group is described in one file and furnished in another.**
+  `title`/`covers` live in `services/api-ref/groups.ts` because the tool offers
+  them beside its `group` enum, where the choice is actually made; the
+  redirects, withheld lists and no-endpoint notes live in
+  `routes/_meta-groups.ts` because only a rendered page uses them. The
+  generator merges the two and fails the build if they disagree. Neither half
+  may be phrased relative to the reader — the same guide is injected into
+  digital-human runs, where "your own conversations" means the opposite thing.
+
+### 17.2 Self-knowledge (the agent reading Halo's docs)
+
+`read_halo_doc` (`services/official-docs-mcp`) is mounted unconditionally at
+all three chat entry points — `toolsets/broker.ts`, `apps/runtime/app-chat.ts`,
+`apps/runtime/execute.ts`. It used to be a tool inside `apps/conversation-mcp`,
+which is mounted only where digital-human management is, so a scheduled run —
+the one context with no person to ask what a screen looks like — was the one
+context without the documentation. Do not re-couple it to a feature switch.
+
+`create_automation_app`'s authoring gate still has to observe reads that now
+happen in the other server, so a session takes `{ server, guideConsulted }`
+from `createOfficialDocsSession()` and hands the callback to
+`createHaloAppsMcpServer`. Session-scoped by closure, never process-wide: one
+conversation consulting the guide must not unlock spec authoring in another.
 
 ## 18) Logging
 

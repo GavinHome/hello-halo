@@ -1,8 +1,9 @@
-## conversation — talk to Halo, drive and inspect chat sessions
-covers: start a new Halo turn, stop or cancel whatever Halo is currently
-        doing, see what is still running, list and read conversations and the
-        reasoning behind a message, rename, star and delete them, see which
-        toolsets a conversation has open
+## conversation — chat threads between the user and the Halo assistant, held by a space
+covers: start a new turn of work, stop or cancel whatever is currently
+        running, see what is still running, list and read conversations and
+        the reasoning behind a message, rename, star and delete them, see
+        which toolsets a conversation has open. Chats with a digital human are
+        not here — see digital-human.
 not here:
   chatting with a digital human -> digital-human
   files produced during a conversation -> workspace

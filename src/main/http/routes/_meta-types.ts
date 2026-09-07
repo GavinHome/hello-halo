@@ -104,11 +104,12 @@ export interface RouteModuleMeta {
   routes: Record<string, RouteMeta>
 }
 
+/**
+ * A group's manual page furniture. What a group *is* — its title and what it
+ * covers — lives in `services/api-ref/groups.ts`, because that half is read
+ * while choosing a group and this half only matters once a page is open.
+ */
 export interface GroupMeta {
-  /** Rendered as the manual page heading. */
-  title: string
-  /** What lives here, as a comma-separated list of user-facing capabilities. */
-  covers: string
   /**
    * Capability an agent might wrongly look for here, pointing at where it does
    * live — another group, or `tool:<name>` when an MCP tool owns it outright.

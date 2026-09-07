@@ -7,6 +7,11 @@
  * Exposes app management tools to the AI during conversations so the
  * user can ask the AI to list, create, delete, pause, resume, or
  * manually trigger their installed automation apps.
+ *
+ * `read_halo_doc` used to live here and now has its own always-mounted server
+ * (`services/official-docs-mcp`); this one is mounted only where digital-human
+ * management belongs. The authoring gate below still observes reads from
+ * there, through the `guideConsulted` callback the caller passes in.
  */
 
 import { z } from 'zod'
@@ -17,7 +22,7 @@ import { getAppRuntime } from '../runtime'
 import { ConcurrencyLimitError } from '../runtime/errors'
 import { validateAppSpec } from '../spec'
 import { installFromStore, installRequiredSkills } from '../../store/registry.service'
-import { readOfficialDoc } from '../../services/official-docs.service'
+import { CREATE_GUIDE_PATH } from '../../services/official-docs-mcp'
 
 // ============================================
 // Helpers
@@ -33,16 +38,6 @@ function textResult(text: string, isError = false) {
 
 /** Error message returned when services are not yet initialised. */
 const NOT_READY = 'App services are not initialized. Please try again shortly.'
-
-/**
- * Guide the AI must consult before authoring a spec. The path is hard-coded
- * here and nowhere else; renaming the published document would strand every
- * shipped client, so it is fixed for the lifetime of the tool.
- */
-const CREATE_GUIDE_PATH = 'create-digital-human/SKILL.md'
-
-/** Everything under this prefix counts as "the authoring guide was consulted". */
-const CREATE_GUIDE_PREFIX = 'create-digital-human/'
 
 /**
  * Wait for AppManager to become available (handles bootstrap race condition).
@@ -72,59 +67,13 @@ async function waitForAppManager(maxMs = 5000, intervalMs = 200) {
 // Tool Factories (closed over spaceId)
 // ============================================
 
-function buildTools(spaceId: string) {
-  /**
-   * Whether the authoring guide was consulted in this session. The MCP server
-   * instance is created per session (see toolsets/broker.ts), so this closure
-   * is exactly session-scoped. Set on any guide read attempt, successful or
-   * not: the point is that the AI tried, and readOfficialDoc's offline
-   * fallback must never be able to lock creation out on an air-gapped machine.
-   */
-  let guideConsulted = false
-
-  const read_halo_doc = tool(
-    'read_halo_doc',
-    "Read official Halo documentation and return its raw markdown. This is the authoritative, " +
-    'independently updated source for how Halo (yourself) works — consult it whenever the user asks how to ' +
-    'do something in Halo, and again before you configure or build anything in Halo on their behalf: it is ' +
-    'the only place that says what a good configuration looks like, which is the whole reason the work is ' +
-    'worth handing to you rather than clicking through the UI. It describes the product and how a user ' +
-    'operates it; what you can execute yourself depends on the tools you actually hold, not on this ' +
-    'document. Paths are relative to the documentation root: ' +
-    'read "index.md" for the list of available documents, or ' +
-    `"${CREATE_GUIDE_PATH}" before creating or updating a digital human. Each entry document ` +
-    'lists its companion documents.',
-    {
-      path: z.string().describe(
-        `Document path relative to the guide root, e.g. "${CREATE_GUIDE_PATH}".`
-      )
-    },
-    async (args) => {
-      const path = args.path.trim()
-      if (path.startsWith(CREATE_GUIDE_PREFIX)) {
-        guideConsulted = true
-      }
-
-      try {
-        const result = await readOfficialDoc(path)
-        if (!result.ok) {
-          const hint = result.available.length > 0
-            ? `\n\nDocuments available offline:\n${result.available.map(d => `- ${d}`).join('\n')}`
-            : ''
-          return textResult(`${result.reason}${hint}`, true)
-        }
-
-        const provenance = result.source === 'bundled'
-          ? `<!-- source: offline snapshot bundled with this Halo version${result.snapshotDate ? ` (${result.snapshotDate})` : ''} — the documentation host was unreachable, content may be outdated -->`
-          : `<!-- source: ${result.source === 'remote' ? 'documentation host (current)' : 'documentation host (cached this session)'} -->`
-
-        return textResult(`${provenance}\n\n${result.text}`)
-      } catch (e) {
-        return textResult(`Error reading guide document: ${(e as Error).message}`, true)
-      }
-    }
-  )
-
+/**
+ * @param spaceId - captured via closure by every tool below
+ * @param guideConsulted - whether the authoring guide was read in this session.
+ *   The read happens in the `halo-docs` server, so the two are created together
+ *   per session and this callback is how the gate below sees it.
+ */
+function buildTools(spaceId: string, guideConsulted: () => boolean) {
   const list_automation_apps = tool(
     'list_automation_apps',
     'List all automation apps installed in the current space. Returns app ID, name, description, status, and schedule.',
@@ -181,7 +130,7 @@ function buildTools(spaceId: string) {
     },
     async (args) => {
       try {
-        if (!guideConsulted) {
+        if (!guideConsulted()) {
           return textResult(
             `Read the authoring guide first: call read_halo_doc with path "${CREATE_GUIDE_PATH}", ` +
             'follow it (in particular its interview checklist), then call this tool again. ' +
@@ -684,7 +633,6 @@ function buildTools(spaceId: string) {
   )
 
   return [
-    read_halo_doc,
     list_automation_apps,
     create_automation_app,
     update_automation_app,
@@ -706,9 +654,10 @@ function buildTools(spaceId: string) {
  * Runs in-process and handles all automation app management tools.
  *
  * @param spaceId - The current space ID (captured via closure by all tools)
+ * @param guideConsulted - the `halo-docs` session's authoring-guide gate
  */
-export function createHaloAppsMcpServer(spaceId: string) {
-  const allTools = buildTools(spaceId)
+export function createHaloAppsMcpServer(spaceId: string, guideConsulted: () => boolean) {
+  const allTools = buildTools(spaceId, guideConsulted)
 
   return createSdkMcpServer({
     name: 'halo-apps',
