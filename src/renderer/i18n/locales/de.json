@@ -1503,6 +1503,7 @@
   "This space": "Dieser Bereich",
   "This store requires an account to view your publications, but this build has no identity provider configured. Contact your administrator to enable sign-in.": "Dieser Store erfordert ein Konto, um Ihre Veröffentlichungen anzuzeigen, aber in diesem Build ist kein Identitätsanbieter konfiguriert. Wenden Sie sich an Ihren Administrator, um die Anmeldung zu aktivieren.",
   "This terminal has been used by AI": "Dieses Terminal wurde von AI verwendet.",
+  "This update is required and cannot be postponed": "Dieses Update ist erforderlich und kann nicht verschoben werden",
   "This version stops prompting; newer versions still notify.": "Diese Version wird nicht mehr angezeigt; neuere Versionen benachrichtigen weiterhin.",
   "This will permanently delete all memory files (memory.md and run history). The app will start fresh on its next run.": "Dadurch werden alle Speicherdateien (memory.md und Ausführungsverlauf) endgültig gelöscht. Die App startet beim nächsten Ausführen mit einem leeren Speicher.",
   "This will permanently delete the app and all its data. This action cannot be undone.": "Dies wird die App und alle ihre Daten endgültig löschen. Diese Aktion kann nicht rückgängig gemacht werden.",

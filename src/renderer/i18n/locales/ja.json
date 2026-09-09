@@ -1503,6 +1503,7 @@
   "This space": "このスペース",
   "This store requires an account to view your publications, but this build has no identity provider configured. Contact your administrator to enable sign-in.": "このストアでは公開物を表示するためにアカウントが必要ですが、このビルドにはアイデンティティプロバイダーが設定されていません。管理者に連絡してサインインを有効にしてください。",
   "This terminal has been used by AI": "このターミナルはAIによって使用されました。",
+  "This update is required and cannot be postponed": "このアップデートは必須です。延期できません",
   "This version stops prompting; newer versions still notify.": "このバージョンは通知しなくなりますが、新しいバージョンは引き続き通知します。",
   "This will permanently delete all memory files (memory.md and run history). The app will start fresh on its next run.": "すべてのメモリファイル（memory.md と実行履歴）が完全に削除されます。アプリは次回実行時に新規状態から始まります。",
   "This will permanently delete the app and all its data. This action cannot be undone.": "この操作によりアプリとそのすべてのデータが完全に削除されます。この操作は取り消すことができません。",

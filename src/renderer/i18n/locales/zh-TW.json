@@ -1503,6 +1503,7 @@
   "This space": "此空間",
   "This store requires an account to view your publications, but this build has no identity provider configured. Contact your administrator to enable sign-in.": "此商店需要登入後才能檢視你的發佈，但此版本未設定身分提供方。請聯絡管理員啟用登入。",
   "This terminal has been used by AI": "AI 已使用過此終端機",
+  "This update is required and cannot be postponed": "此更新為強制更新，無法延後",
   "This version stops prompting; newer versions still notify.": "此版本不再提示;更新的版本仍會通知。",
   "This will permanently delete all memory files (memory.md and run history). The app will start fresh on its next run.": "這將永久刪除所有記憶檔案（memory.md 和執行歷史）。應用程式將在下次執行時重新開始。",
   "This will permanently delete the app and all its data. This action cannot be undone.": "這將永久刪除此應用程式及其所有資料。此動作無法復原。",
