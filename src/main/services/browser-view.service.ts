@@ -290,10 +290,15 @@ class BrowserViewManager {
         partition: 'persist:browser',
         // Enable smooth scrolling and other web features
         scrollBounce: true,
-        // Keep rendering when the view is hidden or docked off-screen. AI
-        // automation drives views that are not visible; without this the
-        // compositor throttles and Page.captureScreenshot hangs (esp. Windows).
-        backgroundThrottling: false,
+        // Only views on the permanently hidden host window may disable
+        // throttling: their compositor would otherwise stall and hang
+        // Page.captureScreenshot (esp. Windows). Never disable it for
+        // main-window views. Electron then suppresses the widget's hidden
+        // state, so the removeBrowserView/addBrowserView round trip behind
+        // every canvas tab switch evicts the frame without ever re-embedding
+        // it — the view keeps routing input and running JS but paints nothing
+        // but its background color, permanently.
+        backgroundThrottling: !isOffscreen,
       },
     })
     console.log(`[BrowserView] BrowserView instance created`)
