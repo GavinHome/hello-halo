@@ -854,11 +854,15 @@ export async function processStream(params: ProcessStreamParams): Promise<Stream
       continue  // Sub-agent message handled, skip main processing
     }
 
-    // DEBUG: Log all SDK messages with timestamp
-    const elapsed = Date.now() - t1
-    console.log(`[Agent] SDK messages [${conversationId}] 🔵 +${elapsed}ms ${sdkMessage.type}:`,
-      JSON.stringify(sdkMessage, null, 2)
-    )
+    // DEBUG: Log all SDK messages with timestamp (ms since send).
+    // Same contract as the stream_event log above: debug channel, and the
+    // stringify stays behind the guard so it never runs on the hot path.
+    // A message carries user content and tool payloads, so it must not reach
+    // the production log.
+    if (isDeveloperMode()) {
+      const elapsed = Date.now() - t1
+      console.debug(`[Agent][${conversationId}] +${elapsed}ms ${sdkMessage.type}:`, JSON.stringify(sdkMessage))
+    }
 
     // Capture per-call usage from real assistant messages (represents current
     // context size). Synthetic messages (interrupt/cancel/reject) are skipped
