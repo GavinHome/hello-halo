@@ -886,12 +886,41 @@ class BrowserViewManager {
     const state = this.states.get(viewId)
     if (!view) return
 
+    // Store the renderer-space bounds, not the converted ones — a later
+    // restore re-enters here and must not scale an already-scaled rect.
     this.lastBounds.set(viewId, bounds)
 
     if (state?.blockedByPolicy) {
       view.setBounds({ x: -10000, y: -10000, width: 0, height: 0 })
     } else {
-      view.setBounds(bounds)
+      view.setBounds(this.toWindowBounds(viewId, bounds))
+    }
+  }
+
+  /**
+   * Convert renderer CSS pixels to main-window DIPs.
+   *
+   * The renderer measures the canvas container with getBoundingClientRect(),
+   * which reports CSS pixels inside the page's zoomed coordinate space, while
+   * setBounds() positions the view in unzoomed window DIPs. The two only
+   * coincide while appearance.displayScale is 1 — at any other scale the view
+   * lands short of its container (up and to the left) and is sized off by the
+   * same factor.
+   */
+  private toWindowBounds(viewId: string, bounds: BrowserViewBounds): BrowserViewBounds {
+    // Offscreen views live on the hidden host window, which is never zoomed,
+    // and their bounds are set in DIPs already.
+    if (this.offscreenViewIds.has(viewId)) return bounds
+    if (!this.mainWindow || this.mainWindow.isDestroyed()) return bounds
+
+    const zoom = this.mainWindow.webContents.getZoomFactor()
+    if (zoom === 1) return bounds
+
+    return {
+      x: Math.round(bounds.x * zoom),
+      y: Math.round(bounds.y * zoom),
+      width: Math.round(bounds.width * zoom),
+      height: Math.round(bounds.height * zoom),
     }
   }
 
