@@ -7,7 +7,7 @@ import { dirname, join } from 'path'
 import { homedir } from 'os'
 import { existsSync, mkdirSync, readFileSync, writeFileSync, renameSync } from 'fs'
 import { v4 as uuidv4 } from 'uuid'
-import { getDataFolderName } from './product-config'
+import { getDataFolderName, getServiceDefaults } from './product-config'
 
 // Import analytics config type
 import type { AnalyticsConfig } from '../services/analytics/types'
@@ -340,6 +340,50 @@ function migrateWecomBotToImChannelInstances(): void {
     })
   } catch (error) {
     console.error('[Config Migration] Failed to persist wecomBot migration:', error)
+  }
+}
+
+// ============================================================================
+// EMAIL CHANNEL SEED
+// ============================================================================
+// Enterprise builds declare their corporate SMTP endpoint in product.json
+// `serviceDefaults.email`. It is written into the user's config once so the
+// settings form opens with real, editable values, and so every consumer
+// (settings test, notification send, email MCP) resolves one identical config.
+//
+// Seeding only ever creates the block. An existing block is left untouched —
+// including values the user deliberately cleared.
+// ============================================================================
+
+function seedEmailChannelDefaults(): void {
+  const defaults = getServiceDefaults()?.email
+  if (!defaults) return
+
+  const configPath = getConfigPath()
+  if (!existsSync(configPath)) return
+
+  let parsed: Record<string, any>
+  try {
+    parsed = JSON.parse(readFileSync(configPath, 'utf-8'))
+  } catch {
+    return
+  }
+
+  if (parsed.notificationChannels?.email) return
+
+  parsed.notificationChannels = {
+    ...parsed.notificationChannels,
+    email: { enabled: false, ...defaults },
+  }
+
+  try {
+    writeFileSync(configPath, JSON.stringify(parsed, null, 2))
+    console.log('[Config Seed] Seeded email channel from product.json:', {
+      host: defaults.smtp?.host ?? '(none)',
+      port: defaults.smtp?.port ?? '(none)',
+    })
+  } catch (error) {
+    console.error('[Config Seed] Failed to persist email channel defaults:', error)
   }
 }
 
@@ -1052,7 +1096,7 @@ function serializeModelOverridesForSignature(
   return ids
     .map(id => {
       const v = overrides[id] || {}
-      return `${id}:${v.maxOutputTokens ?? ''}:${v.contextWindow ?? ''}`
+      return `${id}:${v.maxOutputTokens ?? ''}:${v.contextWindow ?? ''}:${v.reasoningEffort ?? ''}`
     })
     .join(';')
 }
@@ -1155,13 +1199,29 @@ export async function initializeApp(): Promise<void> {
 
   // Migrate single wecomBot config to multi-instance imChannels.instances[]
   migrateWecomBotToImChannelInstances()
+
+  // Seed the email channel from product.json on first run (enterprise builds)
+  seedEmailChannelDefaults()
 }
+
+/**
+ * Set while the on-disk config exists but cannot be read into a trustworthy
+ * in-memory shape (unreadable bytes, JSON.parse failure, or a decode/normalize
+ * step throwing). While set, saveConfig refuses to persist: the only base it
+ * could merge onto is DEFAULT_CONFIG, and writing that back wipes every key
+ * the defaults lack (imChannels, notificationChannels, spaces, ...). The
+ * corrupt-but-present file keeps all user data until a human repairs it.
+ * A later successful read clears the flag, so a transient failure heals
+ * itself on the next getConfig().
+ */
+let configReadFailed = false
 
 // Get configuration
 export function getConfig(): HaloConfig {
   const configPath = getConfigPath()
 
   if (!existsSync(configPath)) {
+    configReadFailed = false
     return DEFAULT_CONFIG
   }
 
@@ -1194,7 +1254,7 @@ export function getConfig(): HaloConfig {
     const aiSources = normalizeAiSources(parsed)
 
     // Deep merge to ensure all nested defaults are applied
-    return {
+    const merged: HaloConfig = {
       ...DEFAULT_CONFIG,
       ...parsed,
       api: { ...DEFAULT_CONFIG.api, ...parsed.api },
@@ -1213,7 +1273,10 @@ export function getConfig(): HaloConfig {
       // copilot: keep as-is (identity + simulation)
       copilot: parsed.copilot
     }
+    configReadFailed = false
+    return merged
   } catch (error) {
+    configReadFailed = true
     console.error('Failed to read config:', error)
     return DEFAULT_CONFIG
   }
@@ -1299,6 +1362,22 @@ export function saveConfig(config: Partial<HaloConfig>): HaloConfig {
   }
 
   const configPath = getConfigPath()
+
+  // The last read found the file existing but untrustworthy (corrupt bytes,
+  // JSON.parse failure). getConfig() above already retried the read; if it
+  // still fails, merging onto DEFAULT_CONFIG and writing back would wipe
+  // every key the defaults lack. Skip the write and keep the in-memory merge
+  // for the caller — throwing instead would crash the many startup callers
+  // (env overrides, device identity, migrations) that save unguarded.
+  if (configReadFailed) {
+    console.error(
+      '[Config] Skipping persist: config.json is unreadable/corrupt; ' +
+      'a write now would replace it with defaults and destroy user data. ' +
+      'Repair the file to re-enable saving.',
+    )
+    return newConfig
+  }
+
   const configDir = dirname(configPath)
   if (!existsSync(configDir)) {
     mkdirSync(configDir, { recursive: true })

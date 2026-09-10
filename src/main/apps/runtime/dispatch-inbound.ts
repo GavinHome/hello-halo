@@ -20,14 +20,18 @@
 import { tmpdir } from 'os'
 import type { InboundMessage, ReplyHandle, ProgressEvent } from '../../../shared/types/inbound-message'
 import { getAppManager } from '../manager'
-import { sendAppChatMessage, buildImSessionKey, clearImSession } from './app-chat'
+import {
+  sendAppChatMessage,
+  buildImSessionKey,
+  clearImSession,
+  isAppChatConversationGenerating,
+} from './app-chat'
 import type { ImSessionContext } from './im-channels/im-prompt'
 import { getImSessionRegistry } from './im-session-registry'
 import { getActiveImChannelManager } from './im-channels'
 import { sendToRenderer } from '../../foundation/window.service'
 import { broadcastToAll } from '../../http/websocket'
 import { stopGeneration } from '../../services/agent/control'
-import { activeSessions } from '../../services/agent/session-manager'
 import { setImPermissionContext, clearImPermissionContext } from './im-permission-registry'
 import { setImStreamHandle } from './im-stream-registry'
 import { analytics } from '../../services/analytics/analytics.service'
@@ -43,6 +47,7 @@ import {
 } from './pending-relays'
 import { resolveTranscriptPath } from './session-store'
 import { maybeClaimOwner } from './im-channels/owner-claim'
+import { resolveInboundIdentity } from './im-channels/identity-resolve'
 import { getImChannelsPermissionDefaults } from '../../foundation/product-config'
 
 // ============================================
@@ -91,6 +96,26 @@ function isStopCommand(body: string): boolean {
 /** Check whether a message is a clear-context command (case-insensitive, trimmed). */
 function isClearCommand(body: string): boolean {
   return CLEAR_COMMANDS.has(body.trim().toLowerCase())
+}
+
+/**
+ * Leading @mention(s) in group bodies. WeCom (and similar IM platforms) deliver
+ * a group message to the bot only when the bot is mentioned, so any leading
+ * mention necessarily targets this bot — no identity matching needed. Mentions
+ * elsewhere in the body are kept: they can point at other members and carry
+ * semantic meaning for the model.
+ */
+const LEADING_GROUP_MENTION = /^(?:@\S+\s+)+/
+
+/**
+ * Strip leading @mention prefix from group bodies. Direct chats pass through
+ * unchanged (mention prefixes never occur there). Applied once here, before
+ * every downstream consumer (session preview, commands, identity injection,
+ * relay quote), so command matching survives "@bot /stop".
+ */
+function normalizeInboundBody(body: string, chatType: 'direct' | 'group'): string {
+  if (chatType !== 'group') return body
+  return body.replace(LEADING_GROUP_MENTION, '')
 }
 
 /**
@@ -360,7 +385,7 @@ export function flushSupplementBuffer(conversationId: string): void {
     return
   }
 
-  if (activeSessions.has(conversationId)) {
+  if (isAppChatConversationGenerating(conversationId)) {
     console.log(
       `${LOG_TAG} flushSupplementBuffer deferred: conv=${conversationId} is ` +
       `busy (race with newly-arrived message), ${entries.length} supplement(s) ` +
@@ -504,6 +529,27 @@ export async function dispatchInboundMessage(
     return
   }
 
+  // Counted here, before every gate below (owner-claim, replyScope, /stop,
+  // /clear, busy-buffer). This is a true arrival count: the message.sent
+  // turn count downstream is a strict subset, and the gap between the two
+  // is messages the channel accepted but never handed to the engine. It is
+  // NOT a proxy for tool-permission denials — isOwner/guest policy (further
+  // down) restricts what a sender's turn may do, it does not drop the turn.
+  //
+  // Skipped for flushSupplementBuffer's merged re-dispatch (skipBusyCheck):
+  // each buffered message was already counted on its own original call: this
+  // one re-enters with a synthetic merged body, not a new arrival.
+  if (!options.skipBusyCheck) {
+    void analytics.track(AnalyticsEvents.MESSAGE_RECEIVED, {
+      source: 'im',
+      direction: 'inbound',
+      channel: msg.channel,
+      chatType: msg.chatType,
+      appId: app.id,
+      specId: app.specId,
+    })
+  }
+
   const channelManager = getActiveImChannelManager()
   let instanceCfg = channelManager?.getInstanceConfig(instanceId)
   // Default 'all': instances created before the field existed must not break.
@@ -577,6 +623,11 @@ export async function dispatchInboundMessage(
   // Build isolated session key
   const conversationId = buildImSessionKey(app.id, msg.channel, msg.chatType, msg.chatId)
 
+  // Normalize the body once at the single funnel every channel passes through.
+  // Pre-built paths (supplement flush) short-circuit identity injection below
+  // but still rely on the body for commands and previews.
+  msg.body = normalizeInboundBody(msg.body, msg.chatType)
+
   // Register session in ImSessionRegistry (idempotent — updates lastActiveAt on repeat)
   const registry = getImSessionRegistry()
   if (registry) {
@@ -604,7 +655,7 @@ export async function dispatchInboundMessage(
   // ── Stop command: abort generation, silently drop buffered supplements ──
   if (isStopCommand(msg.body)) {
     const dropped = clearSupplementBuffer(conversationId)
-    const isActive = activeSessions.has(conversationId)
+    const isActive = isAppChatConversationGenerating(conversationId)
     if (isActive) {
       console.log(
         `${LOG_TAG} Stop command received: channel=${msg.channel}, chatId=${msg.chatId}, ` +
@@ -644,7 +695,9 @@ export async function dispatchInboundMessage(
   }
 
   // ── Supplement buffering (busy → buffer, flush after generation ends) ──
-  if (!options.skipBusyCheck && activeSessions.has(conversationId)) {
+  // "Busy" covers an autonomous turn too: starting a round while one is running
+  // would let that turn claim this message's round and answer the wrong thing.
+  if (!options.skipBusyCheck && isAppChatConversationGenerating(conversationId)) {
     const entry: SupplementEntry = { msg, reply, appId, instanceId }
     const buffer = supplementBuffers.get(conversationId) ?? []
     buffer.push(entry)
@@ -667,12 +720,39 @@ export async function dispatchInboundMessage(
     return
   }
 
+  // ── Identity resolution (best-effort, channel-agnostic, fire-and-forget) ──
+  // Channels whose sender IDs are opaque (e.g. WeCom bots created after its
+  // April 2026 anonymization change) can expose identityCapability to
+  // recover real names via a separately-authorized directory lookup — see
+  // im-channels/identity-resolve.ts. Deliberately NOT awaited: the busy
+  // check above and the generation start further down have no other await
+  // between them, which is what lets a second inbound message on the same
+  // conversation see "still generating" and buffer instead of racing a
+  // concurrent turn. Awaiting a real network call here would reopen that
+  // window. The fetch runs in the background and benefits this sender's
+  // *next* message; this turn uses whatever is already cached.
+  const identityCapability = channelManager?.getInstance(instanceId)?.identityCapability
+  if (registry && identityCapability) {
+    void resolveInboundIdentity(instanceId, app.id, msg.channel, msg.chatId, identityCapability).catch((err) => {
+      console.error(`${LOG_TAG} Identity resolution failed (non-fatal):`, err)
+    })
+  }
+
   // ── Identity injection ───────────────────────────────
   // Direct: senderIdentity in system prompt. Group: per-message <msg-sender> tag.
   // Pre-built paths (from flushSupplementBuffer) short-circuit here.
   // Runtime tags are escaped out of the body first: the whole identity scheme
   // rests on those tags being system-emitted only.
-  const senderName = msg.fromName ?? msg.from
+  //
+  // resolvedName is a SESSION-level identity (a WeCom directory entry maps
+  // chat_id -> chat_name; for a group chat that chat_id is the group, not
+  // any individual member). It is only meaningful for direct chats, where
+  // chatId IS the counterpart. Applying it in a group would mislabel every
+  // member's <msg-sender> tag with the group's own name.
+  const resolvedSenderName = msg.chatType === 'direct'
+    ? registry?.findSession(app.id, msg.channel, msg.chatId)?.resolvedName
+    : undefined
+  const senderName = resolvedSenderName ?? msg.fromName ?? msg.from
   let messageText: string
   let senderIdentity: { id: string; name: string } | undefined
 
@@ -779,11 +859,14 @@ export async function dispatchInboundMessage(
   const imFileSend = resolveImFileSend(instanceId, msg.chatId, chatTypeNorm, exportGate)
 
   // Build IM session context for system prompt injection.
-  // Resolves display name with priority: customName > chatName > fromName > chatId.
-  // customName is user-set in the UI; chatName comes from the IM platform (often
-  // unavailable for group chats in WeCom); fromName/chatId are fallbacks.
+  // Resolves display name with priority: customName > resolvedName > chatName > fromName > chatId.
+  // customName is user-set in the UI; resolvedName is auto-recovered via a channel's
+  // optional identity resolution (see im-channels/identity-resolve.ts); chatName comes
+  // from the IM platform (often unavailable for group chats in WeCom); fromName/chatId
+  // are fallbacks.
   const registeredSession = registry?.findSession(app.id, msg.channel, msg.chatId)
   const sessionDisplayName = registeredSession?.customName
+    || registeredSession?.resolvedName
     || msg.chatName
     || msg.fromName
     || msg.chatId
@@ -803,16 +886,6 @@ export async function dispatchInboundMessage(
     `fileSend=${imFileSend ? 'yes' : 'no'}, ` +
     `sender=${msg.from}(${senderName}), isOwner=${isOwner}`
   )
-
-  // Telemetry: count inbound IM messages (no content). specId is gated by
-  // SENSITIVE_KEYS in the telemetry provider; open-source builds drop it.
-  void analytics.track(AnalyticsEvents.MESSAGE_RECEIVED, {
-    source: 'im',
-    channel: msg.channel,
-    chatType: msg.chatType,
-    appId: app.id,
-    specId: app.specId,
-  })
 
   // Send an immediate acknowledgment so the user sees the <think> block appear
   // right away instead of staring at silence while session + MCP servers init.
@@ -835,6 +908,10 @@ export async function dispatchInboundMessage(
       imFileSend,
       senderIdentity,
       imSession,
+
+      // IM has no Deep Thinking toggle, so replies take the same extended
+      // thinking this digital human's scheduled runs get.
+      thinkingEnabled: true,
 
       // Relay origin for pushes this run makes. Captured from the raw inbound
       // body (assembled text carries runtime tags and, after a relay was
@@ -865,10 +942,9 @@ export async function dispatchInboundMessage(
 
       // Use streaming.finish when available, else fall back to one-shot send
       onReply: (finalContent: string) => {
-        // Telemetry: count outbound replies (no content). specId is gated
-        // by SENSITIVE_KEYS at sanitize time.
         void analytics.track(AnalyticsEvents.MESSAGE_SENT, {
           source: 'im-reply',
+          direction: 'outbound',
           channel: msg.channel,
           chatType: msg.chatType,
           appId: app.id,

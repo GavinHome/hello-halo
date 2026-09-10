@@ -263,8 +263,11 @@ async function fetchAnthropicUpstream(
       // Override with merged beta (covers both SDK and provider betas)
       ...(mergedBeta && { 'anthropic-beta': mergedBeta }),
       // Skip x-api-key when the provider already injected an Authorization header
-      // (e.g. GitHub Copilot uses Bearer token instead of x-api-key)
-      ...(!hasAuthHeader && { 'x-api-key': apiKey }),
+      // (e.g. GitHub Copilot uses Bearer token instead of x-api-key), and when
+      // there is no key at all — a delegated caller's own Authorization header
+      // is already in sdkHeaders, and an empty x-api-key alongside it is a
+      // malformed request upstream may reject.
+      ...(!hasAuthHeader && apiKey && { 'x-api-key': apiKey }),
     }
 
     // Deduplicate content-type: sdkHeaders (lowercase from Express) and customHeaders
@@ -554,7 +557,10 @@ async function handleOpenAIConversion(
 
     // Convert request
     const requestToSend = { ...anthropicRequest, stream: wantStream }
-    const convertOptions = { visionOverride: config.visionOverride }
+    const convertOptions = {
+      visionOverride: config.visionOverride,
+      reasoningEffort: config.reasoningEffort
+    }
     const openaiRequest = apiType === 'responses'
       ? convertAnthropicToOpenAIResponses(requestToSend, convertOptions).request
       : convertAnthropicToOpenAIChat(requestToSend, convertOptions).request
