@@ -149,6 +149,7 @@
     "rehype-raw": "^7.0.0",
     "remark-gfm": "^4.0.1",
     "remark-math": "^6.0.0",
+    "setimmediate": "^1.0.5",
     "sm-crypto": "^0.4.0",
     "streamdown": "^2.2.0",
     "tailwind-merge": "^2.2.0",
