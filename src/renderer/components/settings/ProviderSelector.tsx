@@ -80,7 +80,7 @@ export function ProviderSelector({
   // State — seeded from `editingSource` (edit mode), `presetProvider` (preset
   // add mode), or hardcoded defaults (generic add mode), in that priority.
   const [selectedProvider, setSelectedProvider] = useState<ProviderId>(
-    editingSource?.provider || (presetProvider ? 'custom' : 'anthropic')
+    editingSource?.provider || (presetProvider ? 'custom' : 'openai')
   )
 
   const [apiKey, setApiKey] = useState(editingSource?.apiKey || '')

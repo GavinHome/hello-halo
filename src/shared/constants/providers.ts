@@ -55,12 +55,34 @@ export interface BuiltinProvider {
 
 /**
  * All built-in providers
- * Organized by: Protocol entries first (Claude/OpenAI Compatible), then presets by region
+ * Organized by: Protocol entries first (OpenAI Compatible/Claude), then presets by region
+ *
+ * OpenAI-compatible leads because most third-party gateways speak that wire
+ * format; picking Anthropic for one is a silent misconfiguration (its URL skips
+ * normalization and the SDK appends /v1/messages).
  */
 export const BUILTIN_PROVIDERS: BuiltinProvider[] = [
   // ============================================================================
   // Protocol Entries (Top 2 - Always visible, support custom URL)
   // ============================================================================
+  {
+    id: 'openai',
+    name: 'OpenAI API',
+    authType: 'api-key',
+    apiUrl: 'https://api.openai.com/v1',
+    modelsUrl: 'https://api.openai.com/v1/models',
+    models: [
+      { id: 'gpt-4o', name: 'GPT-4o' },
+      { id: 'gpt-4o-mini', name: 'GPT-4o Mini' },
+      { id: 'o1', name: 'o1' },
+      { id: 'o1-mini', name: 'o1-mini' }
+    ],
+    description: 'Official and all compatible providers',
+    website: 'https://platform.openai.com/',
+    region: 'global',
+    recommended: true,
+    icon: 'bot'
+  },
   {
     id: 'anthropic',
     name: 'Claude (Anthropic) API',
@@ -79,24 +101,6 @@ export const BUILTIN_PROVIDERS: BuiltinProvider[] = [
     region: 'global',
     recommended: true,
     icon: 'brain'
-  },
-  {
-    id: 'openai',
-    name: 'OpenAI API',
-    authType: 'api-key',
-    apiUrl: 'https://api.openai.com/v1',
-    modelsUrl: 'https://api.openai.com/v1/models',
-    models: [
-      { id: 'gpt-4o', name: 'GPT-4o' },
-      { id: 'gpt-4o-mini', name: 'GPT-4o Mini' },
-      { id: 'o1', name: 'o1' },
-      { id: 'o1-mini', name: 'o1-mini' }
-    ],
-    description: 'Official and all compatible providers',
-    website: 'https://platform.openai.com/',
-    region: 'global',
-    recommended: true,
-    icon: 'bot'
   },
 
   // ============================================================================

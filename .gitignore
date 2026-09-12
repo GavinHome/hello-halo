@@ -88,3 +88,7 @@ src/sdk/
 AGENTS.md
 .reasonix
 .qoder
+
+# Local multi-node cluster runtime: per-node .halo data dirs, logs, and the
+# node manifest, which holds plaintext access tokens.
+/.cluster/
