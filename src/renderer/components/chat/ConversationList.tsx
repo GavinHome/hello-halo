@@ -123,6 +123,8 @@ const listComponents: Components<ConversationRow> = {
   Header: () => <div className="h-1" />,
   Footer: () => <div className="h-3" />,
 }
+/** Pinned rows sit right under their header, and the pane's own bottom padding ends them. */
+const pinnedListComponents: Components<ConversationRow> = { Item: PaddedRow }
 
 // Titles run to the row's edge and fade out instead of ending in an ellipsis;
 // the hover actions float over that edge rather than reserving room for it.
@@ -429,15 +431,18 @@ export const ConversationList = memo(function ConversationList({
 
   // ── Panes: pinned and digital humans have their own height; conversations take the rest ──
   const listColumnRef = useRef<HTMLDivElement>(null)
-  const pinnedScrollRef = useRef<HTMLDivElement>(null)
-  const pinnedResize = usePaneResize('pinned', pinnedScrollRef, listColumnRef, () => pinnedScrollRef.current?.scrollHeight ?? 0)
+  // Virtuoso doesn't size itself to its rows, so each pane is held at the smaller
+  // of its rows' total height and the pane height.
+  const pinnedPaneRef = useRef<HTMLDivElement>(null)
+  const [pinnedListHeight, setPinnedListHeight] = useState(0)
+  const pinnedResize = usePaneResize('pinned', pinnedPaneRef, listColumnRef, () => pinnedListHeight)
 
   const digitalHumanPaneRef = useRef<HTMLDivElement>(null)
-  // Virtuoso doesn't size itself to its rows, so the pane is held at the smaller of
-  // the rows' total height and the pane height.
   const [digitalHumanListHeight, setDigitalHumanListHeight] = useState(0)
   const digitalHumanResize = usePaneResize('digital-humans', digitalHumanPaneRef, listColumnRef, () => digitalHumanListHeight)
-  // With the conversations pane folded or empty there is nothing to leave room for.
+  // With the conversations pane folded or empty there is nothing to leave room for, so the
+  // digital-humans pane drops its height cap and may grow up to the rest of the column —
+  // but only as tall as its rows, so whatever follows stays right under them.
   const digitalHumansFill = !conversationsOpen || conversationRows.length === 0
 
   // Handle drag resize
@@ -1036,12 +1041,22 @@ export const ConversationList = memo(function ConversationList({
             <SectionHeaderButton section="pinned" label={t('Pinned')} collapsed={!pinnedOpen} onToggle={toggleSection} />
           </div>
           {pinnedOpen && (
-            <div ref={pinnedScrollRef} className="min-h-8 overflow-y-auto overflow-x-hidden" style={{ maxHeight: pinnedResize.height }}>
-              {pinnedRows.map(row => (
-                <div key={row.key} className="px-2 pb-0.5">
-                  {row.type === 'dh-item' ? renderAppChatItem(row.row, row.standalone) : renderConversationItem(row.conversation)}
-                </div>
-              ))}
+            // Virtualized like the panes below: only the visible pins render, however many there are.
+            <div
+              ref={pinnedPaneRef}
+              className="min-h-8"
+              style={{ flex: `0 1 ${Math.min(pinnedResize.height, pinnedListHeight || pinnedRows.length * ROW_HEIGHT)}px` }}
+            >
+              <Virtuoso<ConversationRow>
+                data={pinnedRows}
+                overscan={200}
+                computeItemKey={(_, row) => row.key}
+                totalListHeightChanged={setPinnedListHeight}
+                style={{ height: '100%' }}
+                className="overflow-x-hidden"
+                components={pinnedListComponents}
+                itemContent={(_, row) => renderListRow(row)}
+              />
             </div>
           )}
           {pinnedOpen && (
@@ -1056,8 +1071,10 @@ export const ConversationList = memo(function ConversationList({
           className={cn(
             'group/section relative flex flex-col pb-1',
             pinnedRows.length > 0 && 'border-t border-border-faint',
-            // Otherwise shrinkable, so a short window squeezes this pane rather than overflowing the sidebar.
-            digitalHumansOpen && digitalHumansFill ? 'flex-1 min-h-[68px]' : 'min-h-0'
+            // Shrinkable, so a short window squeezes this pane rather than overflowing the sidebar.
+            // Filling, it grows from zero (flex-1) up to its rows (max-h-max): a basis of its full
+            // rows would make it squeeze the pinned pane in proportion to a long list.
+            digitalHumansOpen && digitalHumansFill ? 'flex-1 min-h-[68px] max-h-max' : 'min-h-0'
           )}
         >
           <div className={cn('flex-shrink-0 px-2', pinnedRows.length > 0 ? 'pt-2.5' : 'pt-1')}>
@@ -1073,9 +1090,12 @@ export const ConversationList = memo(function ConversationList({
           {digitalHumansOpen && (
             <div
               ref={digitalHumanPaneRef}
-              className={digitalHumansFill ? 'flex-1 min-h-0' : 'min-h-8'}
-              style={digitalHumansFill ? undefined : {
-                flex: `0 1 ${Math.min(digitalHumanResize.height, digitalHumanListHeight || digitalHumanRows.length * ROW_HEIGHT)}px`,
+              className="min-h-8"
+              style={{
+                flex: `0 1 ${Math.min(
+                  digitalHumansFill ? Infinity : digitalHumanResize.height,
+                  digitalHumanListHeight || digitalHumanRows.length * ROW_HEIGHT,
+                )}px`,
               }}
             >
               <Virtuoso

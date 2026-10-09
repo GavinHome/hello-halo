@@ -217,9 +217,14 @@ describe('Space Service', () => {
       expect(listSpaces().map(s => s.id)).toContain(space.id)
     })
 
-    it('rides out a briefly locked index and stays deleted after a restart', async () => {
+    // A retry would get past the single failure and delete, so `false` shows there is none.
+    it('does not retry a locked index: fails, and a later try succeeds', async () => {
       const space = createSpace({ name: 'Briefly locked', icon: 'folder' })
-      renameFault.failures = 2
+      renameFault.failures = 1
+
+      expect(await deleteSpace(space.id)).toBe(false)
+      expect(renameFault.failures).toBe(0)
+      expect(listSpaces().map(s => s.id)).toContain(space.id)
 
       expect(await deleteSpace(space.id)).toBe(true)
       _resetSpaceRegistry()

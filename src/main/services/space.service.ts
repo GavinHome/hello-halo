@@ -17,6 +17,7 @@
 import { shell } from 'electron'
 import { isAbsolute, join, resolve } from 'path'
 import { existsSync, mkdirSync, readFileSync, writeFileSync, readdirSync, statSync, rmSync, renameSync } from 'fs'
+import { rm } from 'fs/promises'
 import { getHaloDir, getTempSpacePath, getSpacesDir, resolveClaudeConfigDir } from '../foundation/config.service'
 import { canonicalPath, isPathWithin } from '../foundation/path-containment'
 import { v4 as uuidv4 } from 'uuid'
@@ -298,36 +299,14 @@ function tryReadMeta(spacePath: string): SpaceMeta | null {
 }
 
 /**
- * On Windows, replacing a file another process holds open (an antivirus or
- * indexer scanning it) fails with one of these until that process lets go.
- */
-const TRANSIENT_LOCK_CODES = new Set(['EPERM', 'EBUSY', 'EACCES'])
-const RENAME_RETRY_DELAYS_MS = [50, 100, 200, 400]
-
-function sleepSync(ms: number): void {
-  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms)
-}
-
-function renameWithRetry(from: string, to: string): void {
-  for (let attempt = 0; ; attempt++) {
-    try {
-      renameSync(from, to)
-      return
-    } catch (error) {
-      const code = (error as NodeJS.ErrnoException).code
-      if (!code || !TRANSIENT_LOCK_CODES.has(code) || attempt >= RENAME_RETRY_DELAYS_MS.length) throw error
-      console.warn(`[Space] Index rename hit ${code}, retry ${attempt + 1}/${RENAME_RETRY_DELAYS_MS.length}`)
-      sleepSync(RENAME_RETRY_DELAYS_MS[attempt])
-    }
-  }
-}
-
-/**
  * Persist the registry Map to disk as v3 (atomic write via tmp + rename).
  * Excludes halo-temp (isTemp entries are memory-only).
  *
  * Throws when the index could not be written, since a change kept only in
  * memory would come back undone on the next start. Callers undo or report it.
+ * One attempt only: this runs on the main process, which must never wait out
+ * a file another program (an antivirus or indexer on Windows) holds open.
+ * Activity writes retry on their own throttle timer; user actions fail and roll back.
  */
 function persistIndex(map: Map<string, SpaceIndexEntry>): void {
   // Filter out halo-temp before persisting
@@ -351,7 +330,7 @@ function persistIndex(map: Map<string, SpaceIndexEntry>): void {
       mkdirSync(dir, { recursive: true })
     }
     writeFileSync(tmpPath, JSON.stringify(data, null, 2))
-    renameWithRetry(tmpPath, indexPath)
+    renameSync(tmpPath, indexPath)
   } catch (error) {
     console.error(`[Space] Failed to persist index ${indexPath}:`, error)
     // Clean up tmp file if rename failed
@@ -674,8 +653,9 @@ export async function deleteSpace(spaceId: string): Promise<boolean> {
   // Centralized storage: delete the entire folder. Legacy custom path: only
   // its .halo folder, keeping the user's files.
   const target = isCentralized ? spacePath : join(spacePath, '.halo')
+  // Async: its retries (a file briefly held by another program) must not block the main process.
   try {
-    rmSync(target, { recursive: true, force: true, maxRetries: 4, retryDelay: 100 })
+    await rm(target, { recursive: true, force: true, maxRetries: 4, retryDelay: 100 })
   } catch (err) {
     console.error(`[Space] Deleted space ${spaceId} but could not remove ${target}:`, err)
   }
