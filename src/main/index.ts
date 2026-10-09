@@ -142,7 +142,7 @@ app.commandLine.appendSwitch('disable-blink-features', 'AutomationControlled')
 // Must be called before app.whenReady() and requestSingleInstanceLock() so that
 // each build variant (e.g. Halo vs Halo-Enterprise) uses its own userData directory.
 // This isolates cookies, sessions, localStorage, Claude SDK config, etc.
-import { getDataFolderName, DEFAULT_DATA_FOLDER_NAME, getMacIconPath, getUpdateChannel, loadProductConfig } from './foundation/product-config'
+import { getDataFolderName, DEFAULT_DATA_FOLDER_NAME, getMacIconPath, getUpdateChannel, loadProductConfig, getAppUserModelId } from './foundation/product-config'
 import {
   clearRunningInstance,
   explainLostSingleInstanceLock,
@@ -478,6 +478,8 @@ function createWindow(): void {
 
   // Create the browser window
   mainWindow = new BrowserWindow({
+    // Windows shows the window title on taskbar hover; the product name tells installed variants apart.
+    title: loadProductConfig().name,
     width: 1200,
     height: 800,
     minWidth: 900,
@@ -515,6 +517,9 @@ function createWindow(): void {
       additionalArguments: [`--halo-display-scale=${currentDisplayScale()}`]
     }
   })
+
+  // The page's own <title> is the same for every product, so it must not replace the product name.
+  mainWindow.on('page-title-updated', (event) => event.preventDefault())
 
   registerBrowserHostHandlers(mainWindow)
 
@@ -671,8 +676,7 @@ app.whenReady().then(async () => {
   // before whenReady cannot be marked, but is rare).
   checkAndArmSessionIntegrity()
 
-  // Set app user model id for windows
-  electronApp.setAppUserModelId('com.halo.app')
+  electronApp.setAppUserModelId(getAppUserModelId())
 
   // Preview the brand-correct Dock icon in unpackaged dev builds. Packaged
   // builds get their icon baked into the .app by electron-builder and don't

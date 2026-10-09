@@ -230,6 +230,8 @@ export interface StoreProductConfig {
  */
 export interface ProductConfig {
   name: string
+  /** macOS bundle id, Windows install registry key and the AppUserModelID on the installed shortcuts. */
+  appId?: string
   version: string
   /**
    * Data folder name for per-variant isolation (e.g. 'halo', 'halo-enterprise').
@@ -528,6 +530,18 @@ export function getDataFolderName(): string {
   return loadProductConfig().dataFolderName || DEFAULT_DATA_FOLDER_NAME
 }
 
+/** Default appId when product.json omits it (the open-source build's) */
+export const DEFAULT_APP_ID = 'com.halo.app'
+
+/**
+ * Windows AppUserModelID. Must equal the id on the installer's shortcuts (the
+ * product appId) so taskbar pins match the running window and side-by-side
+ * variants stay separate.
+ */
+export function getAppUserModelId(): string {
+  return loadProductConfig().appId || DEFAULT_APP_ID
+}
+
 /**
  * Get enterprise service defaults from product.json.
  * Returns undefined when no defaults are configured (open-source builds).
@@ -727,6 +741,7 @@ export function getMacIconPath(): string {
 function getDefaultProductConfig(): ProductConfig {
   return {
     name: 'Halo',
+    appId: DEFAULT_APP_ID,
     version: '1.0.0',
     authProviders: [
       {
