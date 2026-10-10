@@ -1,5 +1,5 @@
 import { test, expect } from '../fixtures/people'
-import { navigateToApps } from '../fixtures/helpers'
+import { navigateToApps, setTheme } from '../fixtures/helpers'
 
 test.setTimeout(60000)
 
@@ -53,8 +53,8 @@ test.describe('large directory and responsive detail', () => {
     await navigateToApps(window)
     for (const width of [1440, 375, 320]) {
       await window.setViewportSize({ width, height: width < 640 ? 812 : 1000 })
-      for (const theme of ['light', 'dark']) {
-        await window.evaluate(value => { document.documentElement.classList.remove('light', 'dark'); document.documentElement.classList.add(value) }, theme)
+      for (const theme of ['light', 'dark'] as const) {
+        await setTheme(window, theme)
         await expect(window.locator('article')).toHaveCount(24)
         const size = await window.evaluate(() => ({ content: document.documentElement.scrollWidth, viewport: document.documentElement.clientWidth }))
         expect(size.content).toBeLessThanOrEqual(size.viewport + 1)

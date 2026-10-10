@@ -132,8 +132,8 @@ const ROW_TITLE = 'flex-1 min-w-0 overflow-hidden whitespace-nowrap [mask-image:
 // Shown only while the row itself is highlighted (hover, open menu, keyboard
 // focus), since their fade-in backdrop is the row's highlight colour.
 const ROW_ACTIONS = 'absolute inset-y-0 right-1.5 flex items-center gap-0.5 pl-5 bg-[linear-gradient(to_right,transparent,hsl(var(--secondary))_20px)] opacity-0 pointer-events-none transition-opacity group-hover:opacity-100 group-hover:pointer-events-auto group-data-[menu-open]:opacity-100 group-data-[menu-open]:pointer-events-auto has-[:focus-visible]:opacity-100 has-[:focus-visible]:pointer-events-auto'
-// `dark-ui:` rows outrank plain state variants, so the open-menu text is restated for dark.
-const ROW_HIGHLIGHT = 'data-[menu-open]:bg-secondary data-[menu-open]:text-foreground dark-ui:data-[menu-open]:text-foreground has-[:focus-visible]:bg-secondary'
+// `theme-dark:` rows win over plain state variants, so the open-menu text is restated for dark.
+const ROW_HIGHLIGHT = 'data-[menu-open]:bg-secondary data-[menu-open]:text-foreground theme-dark:data-[menu-open]:text-foreground has-[:focus-visible]:bg-secondary'
 
 /**
  * A top-level section's fold toggle; its open-state arrow shows while the
@@ -159,7 +159,7 @@ function SectionHeaderButton({ section, label, hint, collapsed, attention, onTog
       }}
       aria-expanded={!collapsed}
       title={hint}
-      className="group flex w-full items-center gap-1 rounded-sm px-1.5 pb-1 text-xs font-medium text-subtle-foreground/70 dark-ui:text-subtle-foreground hover:text-subtle-foreground dark-ui:hover:text-muted-foreground transition-colors ease-halo"
+      className="group flex w-full items-center gap-1 rounded-sm px-1.5 pb-1 text-xs font-medium text-subtle-foreground/70 theme-dark:text-subtle-foreground hover:text-subtle-foreground theme-dark:hover:text-muted-foreground transition-colors ease-halo"
     >
       <span>{label}</span>
       {collapsed && attention && <TaskStatusDot status={attention} size="sm" />}
@@ -184,7 +184,7 @@ function PersonAvatarLink({ appId, name, size, dimmed, disabled, className }: {
   const { t } = useTranslation()
   const face = <AutomationAvatar name={name} size={size} />
   if (disabled) {
-    return <span className={cn('flex shrink-0', dimmed && 'opacity-50 dark-ui:opacity-70', className)}>{face}</span>
+    return <span className={cn('flex shrink-0', dimmed && 'opacity-50 theme-dark:opacity-70', className)}>{face}</span>
   }
   return (
     <button
@@ -198,7 +198,7 @@ function PersonAvatarLink({ appId, name, size, dimmed, disabled, className }: {
       aria-label={t('View {{name}}', { name })}
       className={cn(
         'flex shrink-0 rounded-full transition-[opacity,transform] ease-halo hover:opacity-100 hover:scale-110 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary',
-        dimmed && 'opacity-50 dark-ui:opacity-70 dark-ui:hover:opacity-100',
+        dimmed && 'opacity-50 theme-dark:opacity-70 theme-dark:hover:opacity-100',
         className
       )}
     >
@@ -693,7 +693,7 @@ export const ConversationList = memo(function ConversationList({
             ? 'bg-secondary text-foreground font-medium'
             // Rows are read, not just scanned: darker than the section labels in
             // light, the brighter secondary tone in dark; the selected one is marked by its fill.
-            : 'text-foreground/80 hover:bg-secondary hover:text-foreground dark-ui:text-muted-foreground dark-ui:hover:text-foreground'
+            : 'text-foreground/80 hover:bg-secondary hover:text-foreground theme-dark:text-muted-foreground theme-dark:hover:text-foreground'
         )}
       >
 
@@ -789,7 +789,7 @@ export const ConversationList = memo(function ConversationList({
             ? 'bg-secondary text-foreground font-medium'
             // Rows are read, not just scanned: darker than the section labels in
             // light, the brighter secondary tone in dark; the selected one is marked by its fill.
-            : 'text-foreground/80 hover:bg-secondary hover:text-foreground dark-ui:text-muted-foreground dark-ui:hover:text-foreground'
+            : 'text-foreground/80 hover:bg-secondary hover:text-foreground theme-dark:text-muted-foreground theme-dark:hover:text-foreground'
         )}
       >
 
@@ -904,7 +904,7 @@ export const ConversationList = memo(function ConversationList({
           className={cn(
             'flex flex-1 min-w-0 items-center pl-1.5 py-1.5 text-[13px] font-medium',
             // A group label, not a row to read: in the dark theme it sits with its sessions' tone.
-            row.uninstalled ? 'cursor-not-allowed' : 'text-foreground dark-ui:text-muted-foreground'
+            row.uninstalled ? 'cursor-not-allowed' : 'text-foreground theme-dark:text-muted-foreground'
           )}
         >
           <span className="flex-1 min-w-0 truncate text-left">{row.name}</span>

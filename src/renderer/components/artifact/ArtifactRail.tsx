@@ -368,7 +368,7 @@ export function ArtifactRail({
   return (
     <div
       ref={railRef}
-      className={`h-full flex-shrink-0 flex flex-col relative overflow-hidden ${isExpanded ? 'border-l border-border-faint bg-card' : ''}`}
+      className={`h-full flex-shrink-0 flex flex-col relative overflow-hidden ${isExpanded ? 'border-l border-border-faint bg-card theme-dark:bg-background' : ''}`}
       style={{
         width: displayWidth,
         // Disable transition when: dragging OR Canvas is open (prevent layout flicker)

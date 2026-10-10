@@ -210,16 +210,17 @@ export function getThoughtIcon(type: Thought['type'], toolName?: string): Lucide
  */
 export function getThoughtColor(type: Thought['type'], isError?: boolean): string {
   // Tool errors use amber (warning) instead of red (destructive) because
-  // they are internal AI feedback, not user-facing errors
+  // they are internal AI feedback, not user-facing errors. Tool icons and names
+  // stay bright amber in both themes. Elsewhere: tokens, with the dark hues set by `theme-dark:`.
   if (isError) return 'text-amber-500'
 
   switch (type) {
     case 'thinking':
-      return 'text-blue-400'
+      return 'text-primary theme-dark:text-blue-400'
     case 'tool_use':
       return 'text-amber-400'
     case 'tool_result':
-      return 'text-green-400'
+      return 'text-halo-success theme-dark:text-green-400'
     case 'text':
       return 'text-foreground'
     case 'system':

@@ -23,6 +23,18 @@ export async function waitForHomePage(window: Page) {
 }
 
 /**
+ * Switch the rendered theme the way App.tsx's applyTheme does: `light` for the
+ * light theme, `theme-dark` for dark-only rules. Toggling one alone mixes both.
+ */
+export async function setTheme(window: Page, theme: 'light' | 'dark') {
+  await window.evaluate((mode) => {
+    const root = document.documentElement
+    root.classList.toggle('light', mode === 'light')
+    root.classList.toggle('theme-dark', mode === 'dark')
+  }, theme)
+}
+
+/**
  * Navigate to the chat interface through the rail's Conversation entry.
  * Waits for the textarea input to appear, indicating the chat is ready.
  */

@@ -687,7 +687,7 @@ function InstanceCard({
             </div>
           )}
           {isEnabled && !isStandby && !isConnected && (
-            <div className="flex items-center gap-1.5 rounded-lg bg-amber-500/10 px-3 py-2 text-xs text-amber-600 dark-ui:text-amber-500">
+            <div className="flex items-center gap-1.5 rounded-lg bg-amber-500/10 px-3 py-2 text-xs text-amber-600 theme-dark:text-amber-500">
               <div className="w-1.5 h-1.5 rounded-full bg-amber-500" />
               {t('Disconnected')}
             </div>

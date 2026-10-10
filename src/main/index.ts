@@ -494,16 +494,16 @@ function createWindow(): void {
     // clearance from the same shared geometry.
     trafficLightPosition: isMac ? MAC_TRAFFIC_LIGHT_POSITION : undefined,
     // Windows/Linux: native window controls overlay in content area.
-    // Matches globals.css's dark-theme `--background`/`--foreground`
-    // (the default theme) exactly, for the brief window before the renderer
-    // loads and calls setTitleBarOverlay with the live (possibly light)
-    // theme's actual tokens — see App.tsx's applyTheme.
+    // Matches globals.css's dark-theme `--background`/`--foreground` (the
+    // default theme) and index.html's anti-flash color exactly, for the brief
+    // window before the renderer loads and calls setTitleBarOverlay with the
+    // live (possibly light) theme's actual tokens — see App.tsx's applyTheme.
     titleBarOverlay: !isMac ? {
-      color: '#0c0e12',
+      color: '#181b20',
       symbolColor: '#e7e9ee',
       height: TITLE_BAR_OVERLAY_HEIGHT
     } : undefined,
-    backgroundColor: '#0c0e12',
+    backgroundColor: '#181b20',
     webPreferences: {
       preload: join(__dirname, '../preload/index.cjs'),
       sandbox: true,
