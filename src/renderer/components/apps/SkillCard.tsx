@@ -12,9 +12,12 @@ import { Globe, MoreHorizontal, FolderInput, Trash2, Check, Power, PowerOff, Rot
 import type { InstalledApp } from '../../../shared/apps/app-types'
 import type { SkillSpec } from '../../../shared/apps/spec-types'
 import { useAppsStore } from '../../stores/apps.store'
+import { useAppsPageStore } from '../../stores/apps-page.store'
 import { useSpaceStore } from '../../stores/space.store'
 import { SpaceAvatar } from '../space/SpaceAvatar'
 import { AppTypeIcon } from '../store/AppTypeIcon'
+import { useStoreUpdateFlow } from '../store/useStoreUpdateFlow'
+import { findEntryUpdate } from '../../utils/store-install-state'
 import { Tooltip } from '../ui/Tooltip'
 import { useTranslation, getCurrentLanguage } from '../../i18n'
 import { resolveSpecI18n } from '../../utils/spec-i18n'
@@ -51,6 +54,8 @@ export function SkillCard({ app, spaceMap, usageCount, onOpen }: SkillCardProps)
   const haloSpace = useSpaceStore(s => s.haloSpace)
   const spaces = useSpaceStore(s => s.spaces)
   const { showConfirm, DialogComponent } = useConfirmDialog()
+  const update = useAppsPageStore(s => findEntryUpdate(app, s.availableUpdates))
+  const updateFlow = useStoreUpdateFlow(update?.entry, update)
 
   const [menuOpen, setMenuOpen] = useState(false)
   const [menuView, setMenuView] = useState<'main' | 'move'>('main')
@@ -77,7 +82,6 @@ export function SkillCard({ app, spaceMap, usageCount, onOpen }: SkillCardProps)
   const fileCount = Object.keys(spec.skill_files ?? {}).length
   const meta = [
     sourceLabel(spec.store?.install_source, t),
-    spec.version ? `v${spec.version}` : null,
     fileCount > 1 ? t('{{count}} files', { count: fileCount }) : null,
     usageCount ? t('Available to {{count}} digital humans', { count: usageCount }) : null,
   ].filter((v): v is string => v !== null)
@@ -125,8 +129,9 @@ export function SkillCard({ app, spaceMap, usageCount, onOpen }: SkillCardProps)
       role="button"
       tabIndex={0}
       onClick={onOpen}
-      onKeyDown={e => { if (e.key === 'Enter') onOpen() }}
-      className={`group relative text-left bg-card border rounded-lg p-4 transition-all cursor-pointer
+      // Only the card itself: Enter on a button inside it is that button's.
+      onKeyDown={e => { if (e.key === 'Enter' && e.target === e.currentTarget) onOpen() }}
+      className={`group relative flex flex-col text-left bg-card border rounded-lg p-4 transition-all cursor-pointer
         focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary
         ${isUninstalled
           ? 'border-dashed opacity-60 hover:opacity-100'
@@ -230,15 +235,37 @@ export function SkillCard({ app, spaceMap, usageCount, onOpen }: SkillCardProps)
         <p className="mt-2.5 text-xs text-halo-error truncate">{app.errorMessage}</p>
       )}
 
-      {meta.length > 0 && (
-        <div className="mt-2.5 flex items-center gap-1.5 text-[11px] text-muted-foreground">
-          {meta.map((part, i) => (
-            <span key={part}>{i > 0 && <span className="mr-1.5">·</span>}{part}</span>
-          ))}
+      {/* Version pinned to the right edge, followed by the update that replaces it. */}
+      {(meta.length > 0 || spec.version) && (
+        <div className="mt-auto pt-2.5 flex items-center gap-1.5 text-[11px] text-muted-foreground">
+          <div className="flex min-w-0 items-center gap-1.5 truncate">
+            {meta.map((part, i) => (
+              <span key={part}>{i > 0 && <span className="mr-1.5">·</span>}{part}</span>
+            ))}
+          </div>
+          {spec.version && (
+            <div className="ml-auto flex flex-shrink-0 items-center gap-1.5">
+              <span className="font-mono">v{spec.version}</span>
+              {update && (
+                <button
+                  type="button"
+                  disabled={updateFlow.busy}
+                  onClick={e => { e.stopPropagation(); updateFlow.start() }}
+                  className="px-1.5 py-0.5 rounded-full font-medium border border-halo-success/30 bg-halo-success/10 text-halo-success hover:bg-halo-success/20 transition-colors disabled:opacity-60"
+                >
+                  {t('Update to v{{version}}', { version: update.latestVersion })}
+                </button>
+              )}
+            </div>
+          )}
         </div>
       )}
 
       {DialogComponent}
+      {/* The update dialogs sit inside this clickable card; keep their clicks from opening it. */}
+      <div onClick={e => e.stopPropagation()} onKeyDown={e => e.stopPropagation()}>
+        {updateFlow.dialogs}
+      </div>
     </div>
   )
 }

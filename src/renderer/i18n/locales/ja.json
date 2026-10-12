@@ -2877,6 +2877,7 @@
   "Update failed": "アップデートに失敗しました",
   "Update in place": "その場で更新",
   "Update to": "アップデート先",
+  "Update to v{{version}}": "v{{version}} にアップデート",
   "Updated": "更新済み",
   "Updated by Halo {{time}}": "Halo が {{time}} に更新",
   "Updated by you {{time}}": "あなたが {{time}} に更新",

@@ -2931,6 +2931,7 @@
   "Update failed": "Error al actualizar",
   "Update in place": "Actualizar en el mismo lugar",
   "Update to": "Actualizar a",
+  "Update to v{{version}}": "Actualizar a v{{version}}",
   "Updated": "Actualizado",
   "Updated by Halo {{time}}": "Actualizado por Halo {{time}}",
   "Updated by you {{time}}": "Actualizado por ti {{time}}",

@@ -3112,6 +3112,7 @@
   "Update failed": "Update failed",
   "Update in place": "Update in place",
   "Update to": "Update to",
+  "Update to v{{version}}": "Update to v{{version}}",
   "Updated": "Updated",
   "Updated by Halo {{time}}": "Updated by Halo {{time}}",
   "Updated by you {{time}}": "Updated by you {{time}}",

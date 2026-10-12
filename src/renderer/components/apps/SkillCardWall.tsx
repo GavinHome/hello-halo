@@ -300,7 +300,7 @@ export function SkillCardWall({ spaceMap, onBrowseStore, onManualAdd }: SkillCar
                 )}
                 <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3.5">
                   {unmanaged.map(skill => (
-                    <div key={skill.path} className="bg-card border border-dashed border-border rounded-lg p-4 opacity-60 hover:opacity-100 transition-opacity">
+                    <div key={skill.path} className="flex flex-col bg-card border border-dashed border-border rounded-lg p-4 opacity-60 hover:opacity-100 transition-opacity">
                       <div className="flex items-start gap-2.5">
                         <AppTypeIcon type="skill" name={skill.name} size="md" />
                         <div className="min-w-0 flex-1">
@@ -313,7 +313,7 @@ export function SkillCardWall({ spaceMap, onBrowseStore, onManualAdd }: SkillCar
                         </div>
                       </div>
                       {skill.description && <p className="mt-2 text-xs text-muted-foreground line-clamp-2">{skill.description}</p>}
-                      <div className="mt-2.5 flex items-center justify-between gap-2">
+                      <div className="mt-auto pt-2.5 flex items-center justify-between gap-2">
                         <span className="text-[11px] text-muted-foreground/70 truncate" title={skill.path}>{skill.path}</span>
                         {isElectron() && (
                           <button

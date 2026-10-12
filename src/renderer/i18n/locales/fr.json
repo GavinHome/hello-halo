@@ -2931,6 +2931,7 @@
   "Update failed": "Mise à jour échouée",
   "Update in place": "Mettre à jour sur place",
   "Update to": "Mettre à jour vers",
+  "Update to v{{version}}": "Mettre à jour vers v{{version}}",
   "Updated": "Mis à jour",
   "Updated by Halo {{time}}": "Mis à jour par Halo {{time}}",
   "Updated by you {{time}}": "Mis à jour par vous {{time}}",

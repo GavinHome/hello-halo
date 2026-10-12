@@ -414,17 +414,19 @@ html.platform-desktop body::after {
   background: hsl(var(--muted-foreground) / 0.4);
 }
 
-/* Every scrollbar stays hidden until the pointer is over its scroller. The
-   thumb goes transparent rather than away, so its space never shifts content.
-   Kept after the variants above: equal specificity, so source order wins.
-   The two variants that set `scrollbar-color` need their own rule — Chromium
-   ignores ::-webkit-scrollbar styles on elements that set it. */
-:not(:hover)::-webkit-scrollbar-thumb {
+/* Every scrollbar stays hidden until the pointer is over its scroller, or for a
+   moment after the user scrolls it (`data-scrolling`, set by
+   lib/scrollbar-reveal.ts — hover alone misses wheel scrolling under a still
+   pointer). The thumb goes transparent rather than away, so its space never
+   shifts content. More specific than the variants above, so it wins. The two
+   variants that set `scrollbar-color` need their own rule — Chromium ignores
+   ::-webkit-scrollbar styles on elements that set it. */
+:not(:hover):not([data-scrolling])::-webkit-scrollbar-thumb {
   background: transparent;
 }
 
-.scrollbar-thin:not(:hover),
-.scrollbar-overlay:not(:hover) {
+.scrollbar-thin:not(:hover):not([data-scrolling]),
+.scrollbar-overlay:not(:hover):not([data-scrolling]) {
   scrollbar-color: transparent transparent;
 }
 
@@ -1314,18 +1316,17 @@ html.platform-desktop body::after {
   background-color: hsl(var(--halo-warning) / 0.32);
 }
 
-/* A file mention in a reply that names a file of the space. The box stays the
-   inline code's own: only colour and underline change, so nothing moves when
-   a mention turns into a link after the existence check answers. */
+/* A file mention in a reply that names a file of the space. Styled like the
+   reply's web links (colour, underline on hover only) and in the inline code's
+   own box, so nothing moves when it turns into a link after the existence check. */
 .markdown-content :is(code, span)[data-file-link] {
   color: hsl(var(--primary));
-  text-decoration: underline dashed hsl(var(--primary) / 0.5);
-  text-underline-offset: 3px;
+  text-underline-offset: 2px;
   cursor: pointer;
 }
 
 .markdown-content :is(code, span)[data-file-link]:hover {
-  text-decoration-style: solid;
+  text-decoration: underline;
 }
 
 .markdown-content :is(code, span)[data-file-link]:focus-visible {

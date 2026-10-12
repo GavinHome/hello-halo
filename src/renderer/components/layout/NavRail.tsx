@@ -17,7 +17,7 @@
 import { useId, type ReactNode } from 'react'
 import { ChatNavIcon, DigitalHumanNavIcon, KnowledgeNavIcon, SettingsNavIcon, StoreNavIcon, TasksNavIcon } from '../icons/NavIcons'
 import { useAppStore } from '../../stores/app.store'
-import { useAppsPageStore } from '../../stores/apps-page.store'
+import { openDigitalHumansPage } from '../../utils/people-navigation'
 import { useTaskPanelStore } from '../../stores/taskPanel.store'
 import { countTaskItems, useTaskCount, useTaskItems } from '../../stores/task.store'
 import { capCount, trackHome, trackNavigate } from '../../services/home-telemetry'
@@ -133,8 +133,7 @@ export function NavRail() {
   }
   const goDigitalHumans = () => {
     trackNavigate('apps', 'rail', 'nav_rail')
-    useAppsPageStore.getState().setCurrentTab('my-digital-humans')
-    navigate('apps')
+    openDigitalHumansPage()
   }
   const goStore = () => {
     trackNavigate('store', 'rail', 'nav_rail')

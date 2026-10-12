@@ -76,7 +76,7 @@ function SkillRow({
 
   return (
     <div className="rounded-lg border border-border bg-secondary/40">
-      {showDetail && installedApp && <CapabilityDialog title={t('Shared skill settings')} onClose={() => setShowDetail(false)}><SkillInfoCard appId={installedApp.id} /></CapabilityDialog>}
+      {showDetail && installedApp && <CapabilityDialog title={t('Shared skill settings')} onClose={() => setShowDetail(false)}><SkillInfoCard appId={installedApp.id} showUse={false} stickyHeader={false} /></CapabilityDialog>}
       <div className="flex items-center gap-2.5 px-3 py-2">
         <button
           onClick={() => setExpanded(v => !v)}
