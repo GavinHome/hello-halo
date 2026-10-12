@@ -95,7 +95,9 @@ export function withInertDocumentPolicy(response: Response): Response {
 
 // The renderer appends a ?v=<token> cache-buster to force <img> reloads when a
 // file is rewritten in place; the codec strips query/hash before resolving.
-export { haloFileUrlToPath } from '../../shared/halo-file-url'
+// Imported for the handler below and re-exported for the tests that follow it.
+import { haloFileUrlToPath } from '../../shared/halo-file-url'
+export { haloFileUrlToPath }
 
 const caseInsensitiveFs = process.platform === 'win32' || process.platform === 'darwin'
 const canonical = (path: string) => (caseInsensitiveFs ? path.toLowerCase() : path)
