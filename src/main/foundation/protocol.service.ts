@@ -93,13 +93,9 @@ export function withInertDocumentPolicy(response: Response): Response {
   })
 }
 
-/** Local filesystem path addressed by a halo-file:// URL. */
-export function haloFileUrlToPath(url: string): string {
-  // The renderer appends a ?v=<token> cache-buster to force <img> reloads when a
-  // file is rewritten in place; strip any query/hash before resolving the real path.
-  const raw = url.replace('halo-file://', '')
-  return decodeURIComponent(raw.split(/[?#]/)[0])
-}
+// The renderer appends a ?v=<token> cache-buster to force <img> reloads when a
+// file is rewritten in place; the codec strips query/hash before resolving.
+export { haloFileUrlToPath } from '../../shared/halo-file-url'
 
 const caseInsensitiveFs = process.platform === 'win32' || process.platform === 'darwin'
 const canonical = (path: string) => (caseInsensitiveFs ? path.toLowerCase() : path)
