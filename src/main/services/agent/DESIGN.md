@@ -39,6 +39,23 @@
 | Top-level orchestration | `agents.ts`, `index.ts` | Public surface; wires everything together. |
 | Constants & shared types | `constants.ts`, `types.ts`, `events.ts`, `helpers.ts` | — |
 
+`mcp/sdk-server.ts` preserves each tool's complete Zod contract through the MCP
+SDK's JSON Schema converter, including nested array items and object fields.
+Calls are validated against that same schema before reaching a handler; parsed
+defaults and transforms are retained. Invalid input returns an MCP tool error
+with its field paths, so the model can correct the request before domain writes.
+
+Codex tool identities also have to survive the model protocol boundary.
+`openai-compat-router/server/codex-responses-handler.ts` flattens a tool's
+namespace and name for upstream providers, then restores the exact registered
+pair on returning function calls. This applies to both Chat Completions and
+native Responses streams: forwarding a Responses stream unchanged loses the
+namespace and makes Codex reject the call before MCP dispatch. The return map
+preserves the original namespace, including whether it ends in `__`; plain
+built-in tool names stay plain. Native Responses rewriting changes only known
+tool identities in streamed items and the completed response's output, preserving
+reasoning, encrypted content and other event fields.
+
 ## 2) Single Source of Truth Contract
 
 - **Session state (thoughts, tool calls, token usage) is authoritative in the main process.** The renderer consumes events and must not persist agent state independently.
