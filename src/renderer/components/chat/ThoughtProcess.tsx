@@ -39,6 +39,11 @@ import { useTranslation } from '../../i18n'
 interface ThoughtProcessProps {
   thoughts: Thought[]
   isThinking: boolean
+  /**
+   * Inside a host that already frames and titles the turn: the steps render
+   * inline, always open, at full height, scrolled by the host.
+   */
+  embedded?: boolean
 }
 
 // How long the finished reasoning took, measured between its first and last
@@ -305,7 +310,7 @@ const LazyThoughtItem = memo(function LazyThoughtItem({
 })
 
 // Memoized: a text delta changes neither prop, and this panel can hold hundreds of steps.
-export const ThoughtProcess = memo(function ThoughtProcess({ thoughts, isThinking }: ThoughtProcessProps) {
+export const ThoughtProcess = memo(function ThoughtProcess({ thoughts, isThinking, embedded = false }: ThoughtProcessProps) {
   // Start collapsed, but auto-expand when streaming starts
   const [isExpanded, setIsExpanded] = useState(false)
   const [hasAutoExpanded, setHasAutoExpanded] = useState(false)
@@ -376,6 +381,44 @@ export const ThoughtProcess = memo(function ThoughtProcess({ thoughts, isThinkin
   // emit one — gate the expand affordance so the header isn't clickable into
   // an empty body.
   const hasBodyContent = hasDisplayContent || (latestTodos?.length ?? 0) > 0
+
+  // Built only where shown: a collapsed panel must not pay for hundreds of steps per render.
+  const renderSteps = () => displayThoughts.map((thought, index) => {
+    const isLast = index === displayThoughts.length - 1 && !latestTodos && !isThinking
+    // Last 3 items render eagerly (near the scroll bottom where the
+    // user is watching during streaming). The rest lazy-load via IO.
+    // Using a single component type for all items avoids React
+    // unmount/remount when an item shifts from "recent" to "old"
+    // as new thoughts arrive — which previously caused 1-2 frame flicker.
+    const isRecentItem = index >= displayThoughts.length - 3
+    // Task/Agent thoughts need their sub-agent steps for SubAgentTimeline
+    const isTaskThought = thought.type === 'tool_use' && (thought.toolName === 'Task' || thought.toolName === 'Agent')
+    return (
+      <LazyThoughtItem
+        key={thought.id}
+        thought={thought}
+        isLast={isLast}
+        scrollContainerRef={contentRef}
+        eager={isRecentItem}
+        allThoughts={isTaskThought ? childGroups.get(thought.id) ?? NO_CHILD_THOUGHTS : undefined}
+        isThinking={isTaskThought ? isThinking : undefined}
+      />
+    )
+  })
+  const todoCard = latestTodos && latestTodos.length > 0
+    ? <TodoCard todos={latestTodos} isAgentActive={isThinking} />
+    : null
+
+  // `contentRef` stays unattached here: the host scrolls, so lazy steps observe the viewport.
+  if (embedded) {
+    if (!hasBodyContent) return null
+    return (
+      <div className="animate-fade-in thought-content">
+        {renderSteps()}
+        {todoCard && <div className={hasDisplayContent ? 'pt-2' : ''}>{todoCard}</div>}
+      </div>
+    )
+  }
 
   const header = (
     <>
@@ -455,35 +498,14 @@ export const ThoughtProcess = memo(function ThoughtProcess({ thoughts, isThinkin
                 onScroll={handleScroll}
                 className={`px-4 pt-3 ${isMaximized ? 'max-h-[80vh]' : 'max-h-[300px]'} overflow-auto scrollbar-overlay transition-all duration-200`}
               >
-                {displayThoughts.map((thought, index) => {
-                  const isLast = index === displayThoughts.length - 1 && !latestTodos && !isThinking
-                  // Last 3 items render eagerly (near the scroll bottom where the
-                  // user is watching during streaming). The rest lazy-load via IO.
-                  // Using a single component type for all items avoids React
-                  // unmount/remount when an item shifts from "recent" to "old"
-                  // as new thoughts arrive — which previously caused 1-2 frame flicker.
-                  const isRecentItem = index >= displayThoughts.length - 3
-                  // Task/Agent thoughts need their sub-agent steps for SubAgentTimeline
-                  const isTaskThought = thought.type === 'tool_use' && (thought.toolName === 'Task' || thought.toolName === 'Agent')
-                  return (
-                    <LazyThoughtItem
-                      key={thought.id}
-                      thought={thought}
-                      isLast={isLast}
-                      scrollContainerRef={contentRef}
-                      eager={isRecentItem}
-                      allThoughts={isTaskThought ? childGroups.get(thought.id) ?? NO_CHILD_THOUGHTS : undefined}
-                      isThinking={isTaskThought ? isThinking : undefined}
-                    />
-                  )
-                })}
+                {renderSteps()}
               </div>
             )}
 
             {/* TodoCard - fixed at bottom, only one instance */}
-            {latestTodos && latestTodos.length > 0 && (
+            {todoCard && (
               <div className={`px-4 ${hasDisplayContent ? 'pt-2' : 'pt-3'} pb-3`}>
-                <TodoCard todos={latestTodos} isAgentActive={isThinking} />
+                {todoCard}
               </div>
             )}
 

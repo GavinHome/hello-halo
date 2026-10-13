@@ -64,6 +64,9 @@ export interface StreamingSectionProps {
   /** Additional className for the outer wrapper */
   className?: string
 
+  /** Inside a host card that frames and titles the turn: full width, steps inline. */
+  embedded?: boolean
+
   /** Messages queued for mid-turn injection (shown below StreamingBubble) */
   queuedMessages?: string[]
   /** Inputs accepted while this turn runs, at the point each became visible. */
@@ -95,10 +98,10 @@ const EMPTY_MESSAGES: Message[] = []
 const EMPTY_THOUGHTS: Thought[] = []
 const EMPTY_ARRIVAL_THOUGHTS: ArrivalThought[] = []
 
-const ArrivedInputSection = memo(function ArrivedInputSection({ input, thoughts, text }: LiveInputSection) {
+const ArrivedInputSection = memo(function ArrivedInputSection({ input, thoughts, text, embedded }: LiveInputSection & { embedded: boolean }) {
   return <>
-    <div className="w-[85%]">
-      {thoughts.length > 0 && <ThoughtProcess thoughts={thoughts} isThinking={thoughts.some(thought => thought.isStreaming || (thought.type === 'tool_use' && !thought.toolResult))} />}
+    <div className={embedded ? 'w-full' : 'w-[85%]'}>
+      {thoughts.length > 0 && <ThoughtProcess thoughts={thoughts} isThinking={thoughts.some(thought => thought.isStreaming || (thought.type === 'tool_use' && !thought.toolResult))} embedded={embedded} />}
       {text && <StreamingBubble content={text} isStreaming={false} thoughts={[]} textBlockVersion={input.textBlockVersion} />}
     </div>
     <MessageRow message={input.message} hideBrowserLiveView hideTerminalOpen />
@@ -118,6 +121,7 @@ export function StreamingSection({
   pendingQuestion,
   onAnswerQuestion,
   className = '',
+  embedded = false,
   queuedMessages = [],
   liveInputs = EMPTY_INPUTS,
   arrivals,
@@ -152,15 +156,15 @@ export function StreamingSection({
     : EMPTY_MESSAGES, [hasOwnThoughts, arrivalMessages, arrivalsOnly, layout.thoughts])
   return (
     <div className={`animate-fade-in pb-4 ${className}`}>
-      {layout.sections.map(section => <ArrivedInputSection key={section.input.message.clientKey ?? section.input.message.id} {...section} />)}
-      <div className="w-[85%] relative">
+      {layout.sections.map(section => <ArrivedInputSection key={section.input.message.clientKey ?? section.input.message.id} {...section} embedded={embedded} />)}
+      <div className={`${embedded ? 'w-full' : 'w-[85%]'} relative`}>
         {senderName && (
           <div className="mb-1 text-xs font-medium text-muted-foreground">{senderName}</div>
         )}
 
         {/* Real-time thought process */}
         {(replyThoughts.length > 0 || isThinking) && (
-          <ThoughtProcess thoughts={replyThoughts} isThinking={isThinking} />
+          <ThoughtProcess thoughts={replyThoughts} isThinking={isThinking} embedded={embedded} />
         )}
 
         {/* The model request failed and is waiting to be sent again */}

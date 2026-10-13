@@ -46,8 +46,9 @@ explicit decision entry instead selects the relevant member and question.
 New-task guidance explains this scope and links to active tasks. Member work
 links navigate to that task and, when owned, that member; status does not inject
 another task's context into the current conversation.
-Internal member conversations expose the latest execution as a collapsed row
-below collaboration messages, with the existing thought/tool rendering on expansion.
+Internal member conversations expose the latest execution as a row below
+collaboration messages, open while it runs, with the existing thought/tool
+rendering inline at full width under the row's own status (no second frame).
 Human-facing conversations use their normal process display without a duplicate
 status row. Completed internal execution stays collapsed; older rounds remain in
 execution history. Task activity can drill into a member's execution inputs, persisted results and live work using
