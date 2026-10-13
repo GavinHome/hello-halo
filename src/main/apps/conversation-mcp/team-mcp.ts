@@ -42,6 +42,7 @@ import {
 } from '../../../shared/apps/team-types'
 import type { TeamListItem } from '../../../shared/apps/team-types'
 import type { TeamService } from '../team'
+import type { AgentModelSelection } from '../../../shared/types/ai-sources'
 
 type TeamMcpResult = { content: Array<{ type: 'text'; text: string }>; isError?: boolean }
 
@@ -89,6 +90,7 @@ export interface SpaceTeamMcpScope {
   spaceId: string
   conversationId: string
   workDir: string
+  modelSelection?: AgentModelSelection
 }
 
 export function createSpaceTeamMcpServer(scope: SpaceTeamMcpScope) {
@@ -167,12 +169,16 @@ export function createSpaceTeamMcpServer(scope: SpaceTeamMcpScope) {
       const service = getTeamService()
       if (!service) return textResult(NOT_READY, true)
       try {
+        if (!scope.modelSelection) {
+          throw new Error('The coordinator model is unavailable. Restart this conversation before starting a collaboration.')
+        }
         const { team, epochId } = await service.createCollab({
           owningSpaceId: spaceId,
           conversationId,
           name,
           goal,
           members,
+          modelSelection: scope.modelSelection,
         })
         const roster = members
           .map((m) => `- ${m.memberName} (${m.role}) — ${m.responsibility}`)

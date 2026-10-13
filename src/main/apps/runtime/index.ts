@@ -289,6 +289,7 @@ export async function initAppRuntime(
         spaceId: scope.spaceId,
         conversationId: scope.conversationId,
         workDir: scope.workDir,
+        modelSelection: scope.modelSelection,
       }),
   })
   // Keep the shared MCP status cache honest: probe on enable/install/update,
