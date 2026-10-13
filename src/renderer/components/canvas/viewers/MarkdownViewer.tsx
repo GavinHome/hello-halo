@@ -16,6 +16,8 @@ import { Streamdown } from 'streamdown'
 import 'streamdown/styles.css'
 import { useCodePlugin } from '../../../lib/streamdown-plugins'
 import { splitMarkdownIntoChunks } from '../../../lib/markdown-chunks'
+import { MARKDOWN_REHYPE_PLUGINS } from '../../../lib/markdown-link-policy'
+import { conversationReferenceShortId } from '../../../../shared/conversation-reference'
 import { api } from '../../../api'
 import type { CanvasTab } from '../../../stores/canvas.store'
 import { useCanvasActions } from '../../../hooks/useCanvasLifecycle'
@@ -30,6 +32,7 @@ import {
   revealInElement,
   useTextReferences,
 } from '../../references'
+import { ConversationReferenceLink } from '../../chat/cross-conversation'
 import { CodeMirrorEditor, type CodeMirrorEditorRef } from './CodeMirrorEditor'
 import { countLines } from './count-lines'
 
@@ -235,6 +238,8 @@ export function MarkdownViewer({ tab, onScrollChange, onEditRequest }: MarkdownV
       },
       // Links - add target="_blank" (styling from tailwind.config.cjs)
       a({ href, children }: any) {
+        const conversation = typeof href === 'string' ? conversationReferenceShortId(href) : null
+        if (conversation) return <ConversationReferenceLink shortId={conversation}>{children}</ConversationReferenceLink>
         return (
           <a href={href} target="_blank" rel="noopener noreferrer">
             {children}
@@ -381,6 +386,7 @@ export function MarkdownViewer({ tab, onScrollChange, onEditRequest }: MarkdownV
                   controls={STREAMDOWN_CONTROLS}
                   plugins={streamdownPlugins}
                   components={markdownComponents}
+                  rehypePlugins={MARKDOWN_REHYPE_PLUGINS}
                 >
                   {chunk}
                 </Streamdown>
@@ -401,6 +407,7 @@ export function MarkdownViewer({ tab, onScrollChange, onEditRequest }: MarkdownV
               controls={STREAMDOWN_CONTROLS}
               plugins={streamdownPlugins}
               components={markdownComponents}
+              rehypePlugins={MARKDOWN_REHYPE_PLUGINS}
             >
               {content}
             </Streamdown>
