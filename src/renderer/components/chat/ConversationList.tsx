@@ -123,6 +123,8 @@ const listComponents: Components<ConversationRow> = {
   Header: () => <div className="h-1" />,
   Footer: () => <div className="h-3" />,
 }
+/** Pinned rows sit right under their header, and the pane's own bottom padding ends them. */
+const pinnedListComponents: Components<ConversationRow> = { Item: PaddedRow }
 
 // Titles run to the row's edge and fade out instead of ending in an ellipsis;
 // the hover actions float over that edge rather than reserving room for it.
@@ -130,8 +132,8 @@ const ROW_TITLE = 'flex-1 min-w-0 overflow-hidden whitespace-nowrap [mask-image:
 // Shown only while the row itself is highlighted (hover, open menu, keyboard
 // focus), since their fade-in backdrop is the row's highlight colour.
 const ROW_ACTIONS = 'absolute inset-y-0 right-1.5 flex items-center gap-0.5 pl-5 bg-[linear-gradient(to_right,transparent,hsl(var(--secondary))_20px)] opacity-0 pointer-events-none transition-opacity group-hover:opacity-100 group-hover:pointer-events-auto group-data-[menu-open]:opacity-100 group-data-[menu-open]:pointer-events-auto has-[:focus-visible]:opacity-100 has-[:focus-visible]:pointer-events-auto'
-// `dark-ui:` rows outrank plain state variants, so the open-menu text is restated for dark.
-const ROW_HIGHLIGHT = 'data-[menu-open]:bg-secondary data-[menu-open]:text-foreground dark-ui:data-[menu-open]:text-foreground has-[:focus-visible]:bg-secondary'
+// `theme-dark:` rows win over plain state variants, so the open-menu text is restated for dark.
+const ROW_HIGHLIGHT = 'data-[menu-open]:bg-secondary data-[menu-open]:text-foreground theme-dark:data-[menu-open]:text-foreground has-[:focus-visible]:bg-secondary'
 
 /**
  * A top-level section's fold toggle; its open-state arrow shows while the
@@ -157,7 +159,7 @@ function SectionHeaderButton({ section, label, hint, collapsed, attention, onTog
       }}
       aria-expanded={!collapsed}
       title={hint}
-      className="group flex w-full items-center gap-1 rounded-sm px-1.5 pb-1 text-xs font-medium text-subtle-foreground/70 dark-ui:text-subtle-foreground hover:text-subtle-foreground dark-ui:hover:text-muted-foreground transition-colors ease-halo"
+      className="group flex w-full items-center gap-1 rounded-sm px-1.5 pb-1 text-xs font-medium text-subtle-foreground/70 theme-dark:text-subtle-foreground hover:text-subtle-foreground theme-dark:hover:text-muted-foreground transition-colors ease-halo"
     >
       <span>{label}</span>
       {collapsed && attention && <TaskStatusDot status={attention} size="sm" />}
@@ -182,7 +184,7 @@ function PersonAvatarLink({ appId, name, size, dimmed, disabled, className }: {
   const { t } = useTranslation()
   const face = <AutomationAvatar name={name} size={size} />
   if (disabled) {
-    return <span className={cn('flex shrink-0', dimmed && 'opacity-50 dark-ui:opacity-70', className)}>{face}</span>
+    return <span className={cn('flex shrink-0', dimmed && 'opacity-50 theme-dark:opacity-70', className)}>{face}</span>
   }
   return (
     <button
@@ -196,7 +198,7 @@ function PersonAvatarLink({ appId, name, size, dimmed, disabled, className }: {
       aria-label={t('View {{name}}', { name })}
       className={cn(
         'flex shrink-0 rounded-full transition-[opacity,transform] ease-halo hover:opacity-100 hover:scale-110 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary',
-        dimmed && 'opacity-50 dark-ui:opacity-70 dark-ui:hover:opacity-100',
+        dimmed && 'opacity-50 theme-dark:opacity-70 theme-dark:hover:opacity-100',
         className
       )}
     >
@@ -429,15 +431,18 @@ export const ConversationList = memo(function ConversationList({
 
   // ── Panes: pinned and digital humans have their own height; conversations take the rest ──
   const listColumnRef = useRef<HTMLDivElement>(null)
-  const pinnedScrollRef = useRef<HTMLDivElement>(null)
-  const pinnedResize = usePaneResize('pinned', pinnedScrollRef, listColumnRef, () => pinnedScrollRef.current?.scrollHeight ?? 0)
+  // Virtuoso doesn't size itself to its rows, so each pane is held at the smaller
+  // of its rows' total height and the pane height.
+  const pinnedPaneRef = useRef<HTMLDivElement>(null)
+  const [pinnedListHeight, setPinnedListHeight] = useState(0)
+  const pinnedResize = usePaneResize('pinned', pinnedPaneRef, listColumnRef, () => pinnedListHeight)
 
   const digitalHumanPaneRef = useRef<HTMLDivElement>(null)
-  // Virtuoso doesn't size itself to its rows, so the pane is held at the smaller of
-  // the rows' total height and the pane height.
   const [digitalHumanListHeight, setDigitalHumanListHeight] = useState(0)
   const digitalHumanResize = usePaneResize('digital-humans', digitalHumanPaneRef, listColumnRef, () => digitalHumanListHeight)
-  // With the conversations pane folded or empty there is nothing to leave room for.
+  // With the conversations pane folded or empty there is nothing to leave room for, so the
+  // digital-humans pane drops its height cap and may grow up to the rest of the column —
+  // but only as tall as its rows, so whatever follows stays right under them.
   const digitalHumansFill = !conversationsOpen || conversationRows.length === 0
 
   // Handle drag resize
@@ -688,7 +693,7 @@ export const ConversationList = memo(function ConversationList({
             ? 'bg-secondary text-foreground font-medium'
             // Rows are read, not just scanned: darker than the section labels in
             // light, the brighter secondary tone in dark; the selected one is marked by its fill.
-            : 'text-foreground/80 hover:bg-secondary hover:text-foreground dark-ui:text-muted-foreground dark-ui:hover:text-foreground'
+            : 'text-foreground/80 hover:bg-secondary hover:text-foreground theme-dark:text-muted-foreground theme-dark:hover:text-foreground'
         )}
       >
 
@@ -784,7 +789,7 @@ export const ConversationList = memo(function ConversationList({
             ? 'bg-secondary text-foreground font-medium'
             // Rows are read, not just scanned: darker than the section labels in
             // light, the brighter secondary tone in dark; the selected one is marked by its fill.
-            : 'text-foreground/80 hover:bg-secondary hover:text-foreground dark-ui:text-muted-foreground dark-ui:hover:text-foreground'
+            : 'text-foreground/80 hover:bg-secondary hover:text-foreground theme-dark:text-muted-foreground theme-dark:hover:text-foreground'
         )}
       >
 
@@ -899,7 +904,7 @@ export const ConversationList = memo(function ConversationList({
           className={cn(
             'flex flex-1 min-w-0 items-center pl-1.5 py-1.5 text-[13px] font-medium',
             // A group label, not a row to read: in the dark theme it sits with its sessions' tone.
-            row.uninstalled ? 'cursor-not-allowed' : 'text-foreground dark-ui:text-muted-foreground'
+            row.uninstalled ? 'cursor-not-allowed' : 'text-foreground theme-dark:text-muted-foreground'
           )}
         >
           <span className="flex-1 min-w-0 truncate text-left">{row.name}</span>
@@ -1036,12 +1041,22 @@ export const ConversationList = memo(function ConversationList({
             <SectionHeaderButton section="pinned" label={t('Pinned')} collapsed={!pinnedOpen} onToggle={toggleSection} />
           </div>
           {pinnedOpen && (
-            <div ref={pinnedScrollRef} className="min-h-8 overflow-y-auto overflow-x-hidden" style={{ maxHeight: pinnedResize.height }}>
-              {pinnedRows.map(row => (
-                <div key={row.key} className="px-2 pb-0.5">
-                  {row.type === 'dh-item' ? renderAppChatItem(row.row, row.standalone) : renderConversationItem(row.conversation)}
-                </div>
-              ))}
+            // Virtualized like the panes below: only the visible pins render, however many there are.
+            <div
+              ref={pinnedPaneRef}
+              className="min-h-8"
+              style={{ flex: `0 1 ${Math.min(pinnedResize.height, pinnedListHeight || pinnedRows.length * ROW_HEIGHT)}px` }}
+            >
+              <Virtuoso<ConversationRow>
+                data={pinnedRows}
+                overscan={200}
+                computeItemKey={(_, row) => row.key}
+                totalListHeightChanged={setPinnedListHeight}
+                style={{ height: '100%' }}
+                className="overflow-x-hidden"
+                components={pinnedListComponents}
+                itemContent={(_, row) => renderListRow(row)}
+              />
             </div>
           )}
           {pinnedOpen && (
@@ -1056,8 +1071,10 @@ export const ConversationList = memo(function ConversationList({
           className={cn(
             'group/section relative flex flex-col pb-1',
             pinnedRows.length > 0 && 'border-t border-border-faint',
-            // Otherwise shrinkable, so a short window squeezes this pane rather than overflowing the sidebar.
-            digitalHumansOpen && digitalHumansFill ? 'flex-1 min-h-[68px]' : 'min-h-0'
+            // Shrinkable, so a short window squeezes this pane rather than overflowing the sidebar.
+            // Filling, it grows from zero (flex-1) up to its rows (max-h-max): a basis of its full
+            // rows would make it squeeze the pinned pane in proportion to a long list.
+            digitalHumansOpen && digitalHumansFill ? 'flex-1 min-h-[68px] max-h-max' : 'min-h-0'
           )}
         >
           <div className={cn('flex-shrink-0 px-2', pinnedRows.length > 0 ? 'pt-2.5' : 'pt-1')}>
@@ -1073,9 +1090,12 @@ export const ConversationList = memo(function ConversationList({
           {digitalHumansOpen && (
             <div
               ref={digitalHumanPaneRef}
-              className={digitalHumansFill ? 'flex-1 min-h-0' : 'min-h-8'}
-              style={digitalHumansFill ? undefined : {
-                flex: `0 1 ${Math.min(digitalHumanResize.height, digitalHumanListHeight || digitalHumanRows.length * ROW_HEIGHT)}px`,
+              className="min-h-8"
+              style={{
+                flex: `0 1 ${Math.min(
+                  digitalHumansFill ? Infinity : digitalHumanResize.height,
+                  digitalHumanListHeight || digitalHumanRows.length * ROW_HEIGHT,
+                )}px`,
               }}
             >
               <Virtuoso

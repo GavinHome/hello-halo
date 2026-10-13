@@ -9,7 +9,7 @@
  */
 
 import { test, expect } from '../fixtures/electron'
-import { navigateToApps } from '../fixtures/helpers'
+import { navigateToApps, setTheme } from '../fixtures/helpers'
 import type { Page } from '@playwright/test'
 import { openTeamWorkbench } from '../fixtures/team-workbench'
 
@@ -90,12 +90,9 @@ test.describe('Team render — §2 automatable subset', () => {
   test('2.4: theme toggle keeps the Teams view alive in both themes', async ({ window }) => {
     await navigateToTeams(window)
 
-    for (const theme of ['light', 'dark']) {
-      await window.evaluate((t) => {
-        document.documentElement.classList.remove('light', 'dark')
-        document.documentElement.classList.add(t)
-        localStorage.setItem('halo-theme', t)
-      }, theme)
+    for (const theme of ['light', 'dark'] as const) {
+      await setTheme(window, theme)
+      await window.evaluate((t) => localStorage.setItem('halo-theme', t), theme)
       await window.waitForTimeout(500)
       const alive = await window.getByRole('button', { name: /^Teams\b|^团队/ }).count()
       expect(alive, `Teams view died after switching to ${theme}`).toBeTruthy()
@@ -164,7 +161,7 @@ test.describe('Task workbench interaction', () => {
     await expect(activity).toHaveCount(0)
     await expect(segment).toHaveAttribute('open', '')
     await window.screenshot({ path: 'tests/e2e/results/team-workbench-desktop-dark.png' })
-    await window.evaluate(() => { document.documentElement.classList.remove('dark'); document.documentElement.classList.add('light') })
+    await setTheme(window, 'light')
     await window.waitForTimeout(400)
     await window.screenshot({ path: 'tests/e2e/results/team-workbench-desktop-light.png' })
   })
@@ -447,11 +444,8 @@ test.describe('Task workbench interaction', () => {
     await window.setViewportSize({ width: 375, height: 812 })
     const room = window.getByRole('region', { name: 'Task room' })
     await room.locator('details summary').click()
-    for (const theme of ['light', 'dark']) {
-      await window.evaluate(value => {
-        document.documentElement.classList.remove('light', 'dark')
-        document.documentElement.classList.add(value)
-      }, theme)
+    for (const theme of ['light', 'dark'] as const) {
+      await setTheme(window, theme)
       await window.waitForTimeout(400)
       await expect(room.locator('textarea')).toBeVisible()
       expect(await window.evaluate(() => document.documentElement.scrollWidth <= innerWidth + 1)).toBeTruthy()

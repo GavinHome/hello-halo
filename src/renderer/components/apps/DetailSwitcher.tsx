@@ -212,7 +212,7 @@ export function DetailSwitcher({ title, searchPlaceholder, items, selectedId, on
                   'flex items-center justify-center transition-[opacity,transform] ease-halo',
                   active
                     ? item.dimmed ? 'opacity-60' : 'opacity-100'
-                    : cn('scale-[0.8] group-hover:scale-90 group-hover:opacity-100', item.dimmed ? 'opacity-30 dark-ui:opacity-50' : 'opacity-50 dark-ui:opacity-70', 'dark-ui:group-hover:opacity-100')
+                    : cn('scale-[0.8] group-hover:scale-90 group-hover:opacity-100', item.dimmed ? 'opacity-30 theme-dark:opacity-50' : 'opacity-50 theme-dark:opacity-70', 'theme-dark:group-hover:opacity-100')
                 )}>
                   {item.icon}
                 </span>

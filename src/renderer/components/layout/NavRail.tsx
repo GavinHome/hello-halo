@@ -17,7 +17,7 @@
 import { useId, type ReactNode } from 'react'
 import { ChatNavIcon, DigitalHumanNavIcon, KnowledgeNavIcon, SettingsNavIcon, StoreNavIcon, TasksNavIcon } from '../icons/NavIcons'
 import { useAppStore } from '../../stores/app.store'
-import { useAppsPageStore } from '../../stores/apps-page.store'
+import { openDigitalHumansPage } from '../../utils/people-navigation'
 import { useTaskPanelStore } from '../../stores/taskPanel.store'
 import { countTaskItems, useTaskCount, useTaskItems } from '../../stores/task.store'
 import { capCount, trackHome, trackNavigate } from '../../services/home-telemetry'
@@ -87,10 +87,10 @@ function NavItem({ icon, label, tip, active, onClick, size = 'default', badge }:
       aria-current={active ? 'page' : undefined}
       aria-describedby={tooltipId}
       className={cn(
-        'group relative flex items-center justify-center transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary focus-visible:ring-offset-2 focus-visible:ring-offset-card',
+        'group relative flex items-center justify-center transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary focus-visible:ring-offset-2 focus-visible:ring-offset-card theme-dark:focus-visible:ring-offset-background',
         isLg ? 'w-11 h-11 rounded-lg' : 'w-10 h-10 rounded-md',
         active
-          ? 'bg-secondary dark-ui:bg-surface-hover text-primary'
+          ? 'bg-secondary theme-dark:bg-surface-hover text-primary'
           : 'text-subtle-foreground hover:bg-secondary hover:text-foreground'
       )}
     >
@@ -133,8 +133,7 @@ export function NavRail() {
   }
   const goDigitalHumans = () => {
     trackNavigate('apps', 'rail', 'nav_rail')
-    useAppsPageStore.getState().setCurrentTab('my-digital-humans')
-    navigate('apps')
+    openDigitalHumansPage()
   }
   const goStore = () => {
     trackNavigate('store', 'rail', 'nav_rail')
@@ -171,7 +170,7 @@ export function NavRail() {
     // a Header-height spacer.
     <div
       className={cn(
-        'flex flex-col items-center h-full flex-shrink-0 bg-card border-r border-border-faint pt-3 pb-3.5',
+        'flex flex-col items-center h-full flex-shrink-0 bg-card theme-dark:bg-background border-r border-border-faint pt-3 pb-3.5',
         !isMacElectron && 'w-14'
       )}
       // The macOS traffic-light group is wider than the prototype's 56px

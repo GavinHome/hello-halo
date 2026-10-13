@@ -64,6 +64,13 @@ module.exports = {
         'app-skill': 'hsl(var(--app-skill))',
         'app-mcp': 'hsl(var(--app-mcp))',
       },
+      // Text may take a darker shade of these than fills, dots and borders (light does; see globals.css).
+      textColor: {
+        // Object form so text-primary-foreground / -hover keep coming from colors.primary.
+        primary: { DEFAULT: 'hsl(var(--primary-text))' },
+        'halo-success': 'hsl(var(--halo-success-text))',
+        'halo-warning': 'hsl(var(--halo-warning-text))',
+      },
       borderRadius: {
         lg: 'var(--radius)',
         md: 'calc(var(--radius) - 2px)',
@@ -91,7 +98,7 @@ module.exports = {
             '--tw-prose-body': 'hsl(var(--foreground))',
             '--tw-prose-headings': 'hsl(var(--foreground))',
             '--tw-prose-lead': 'hsl(var(--muted-foreground))',
-            '--tw-prose-links': 'hsl(var(--primary))',
+            '--tw-prose-links': 'hsl(var(--primary-text))',
             '--tw-prose-bold': 'hsl(var(--foreground))',
             '--tw-prose-counters': 'hsl(var(--muted-foreground))',
             '--tw-prose-bullets': 'hsl(var(--muted-foreground))',
@@ -108,7 +115,7 @@ module.exports = {
             '--tw-prose-invert-body': 'hsl(var(--foreground))',
             '--tw-prose-invert-headings': 'hsl(var(--foreground))',
             '--tw-prose-invert-lead': 'hsl(var(--muted-foreground))',
-            '--tw-prose-invert-links': 'hsl(var(--primary))',
+            '--tw-prose-invert-links': 'hsl(var(--primary-text))',
             '--tw-prose-invert-bold': 'hsl(var(--foreground))',
             '--tw-prose-invert-counters': 'hsl(var(--muted-foreground))',
             '--tw-prose-invert-bullets': 'hsl(var(--muted-foreground))',
@@ -255,9 +262,11 @@ module.exports = {
   },
   plugins: [
     require('@tailwindcss/typography'),
-    // `dark-ui:` targets the app's dark theme: <html> without `.light`, which
-    // follows the theme setting (Tailwind's own `dark:` follows only the OS).
-    // Its selector outranks plain state variants, so restate them under it.
-    ({ addVariant }) => addVariant('dark-ui', ':root:not(.light) &'),
+    // `theme-dark:` targets only the dark theme (<html class="theme-dark">,
+    // set from the theme setting; Tailwind's own `dark:` follows only the OS),
+    // so a theme added later is left untouched. It ties `hover:` / `data-*:`
+    // on specificity and wins by source order, while `group-hover:` outranks
+    // it, so restate overridden states under `theme-dark:`.
+    ({ addVariant }) => addVariant('theme-dark', '.theme-dark &'),
   ],
 }

@@ -3127,6 +3127,7 @@
   "Update failed": "Update fehlgeschlagen",
   "Update in place": "An Ort und Stelle aktualisieren",
   "Update to": "Aktualisieren auf",
+  "Update to v{{version}}": "Auf v{{version}} aktualisieren",
   "Updated": "Aktualisiert",
   "Updated by Halo {{time}}": "Von Halo aktualisiert {{time}}",
   "Updated by you {{time}}": "Von Ihnen aktualisiert {{time}}",

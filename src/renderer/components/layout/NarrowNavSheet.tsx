@@ -17,7 +17,7 @@ import { useState } from 'react'
 import { Menu, X, Settings } from 'lucide-react'
 import { ChatNavIcon, DigitalHumanNavIcon, KnowledgeNavIcon, StoreNavIcon, TasksNavIcon } from '../icons/NavIcons'
 import { useAppStore } from '../../stores/app.store'
-import { useAppsPageStore } from '../../stores/apps-page.store'
+import { openDigitalHumansPage } from '../../utils/people-navigation'
 import { useTaskPanelStore } from '../../stores/taskPanel.store'
 import { countTaskItems, useTaskCount, useTaskItems } from '../../stores/task.store'
 import { capCount, trackHome, trackNavigate } from '../../services/home-telemetry'
@@ -49,10 +49,7 @@ export function NarrowNavSheet() {
   }
   const goDigitalHumans = () => {
     trackNavigate('apps', 'sheet', 'nav_sheet')
-    close(() => {
-      useAppsPageStore.getState().setCurrentTab('my-digital-humans')
-      navigate('apps')
-    })
+    close(openDigitalHumansPage)
   }
   const goKnowledge = () => {
     trackNavigate('tlon', 'sheet', 'nav_sheet')

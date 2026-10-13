@@ -15,6 +15,8 @@ import { api } from '../api'
 import { useAppStore } from '../stores/app.store'
 import { useChatStore } from '../stores/chat.store'
 import { useSpaceStore } from '../stores/space.store'
+import { deriveSkillCommand } from './skill-command'
+import { resolveStoreTargetSpace } from './store-target-space'
 
 export function navigateToConversation(spaceId: string, conversationId: string) {
   const chatStore = useChatStore.getState()
@@ -65,6 +67,30 @@ export function navigateToAppChat(appSpaceId: string, appId: string, conversatio
 
   useChatStore.setState({ pendingAppChatNavigation: { appId, conversationId } })
   spaceStore.setCurrentSpace(targetSpace)
+}
+
+/**
+ * "Use" an installed skill: open the space it is installed in (the current,
+ * first or built-in space for a global skill) with its slash command waiting
+ * in that space's composer.
+ */
+export function openSkillInComposer(skill: { spaceId: string | null; name: string; description?: string }) {
+  const spaceStore = useSpaceStore.getState()
+  const target = resolveStoreTargetSpace(skill.spaceId, spaceStore)
+  if (target) {
+    spaceStore.setCurrentSpace(target)
+    void spaceStore.refreshCurrentSpace()
+    const command = deriveSkillCommand(skill.name)
+    useChatStore.setState({
+      pendingComposerInput: {
+        spaceId: target.id,
+        text: `${command} `,
+        // Shown whether or not the space's session has announced this command itself.
+        slashPreview: { command, label: command.slice(1), description: skill.description },
+      },
+    })
+  }
+  useAppStore.getState().navigate('space')
 }
 
 /**

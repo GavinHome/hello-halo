@@ -3127,6 +3127,7 @@
   "Update failed": "更新失敗",
   "Update in place": "就地更新",
   "Update to": "更新至",
+  "Update to v{{version}}": "更新至 v{{version}}",
   "Updated": "已更新",
   "Updated by Halo {{time}}": "由 Halo 更新 {{time}}",
   "Updated by you {{time}}": "由你更新 {{time}}",

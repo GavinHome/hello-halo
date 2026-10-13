@@ -9,6 +9,7 @@ import fs from 'node:fs'
 import path from 'node:path'
 import { test, expect } from '../fixtures/electron-with-git-workspace'
 import { BASELINE, EXPECTED_STATUS } from '../fixtures/git-workspace'
+import { setTheme } from '../fixtures/helpers'
 import {
   chooseScope,
   clickRowAction,
@@ -384,8 +385,8 @@ test.describe('changes view', () => {
       if (layout === 'inline') await split.click()
       await expect(card.locator('.cm-editor')).toHaveCount(layout === 'split' ? 2 : 1)
       await expect(card.locator(layout === 'split' ? '.cm-merge-a .cm-changedText' : '.cm-deletedChunk').first()).toBeVisible()
-      for (const theme of ['light', 'dark']) {
-        await window.evaluate((mode) => document.documentElement.classList.toggle('light', mode === 'light'), theme)
+      for (const theme of ['light', 'dark'] as const) {
+        await setTheme(window, theme)
         await scroller.screenshot({ path: testInfo.outputPath(`diff-${layout}-${theme}.png`) })
         expect(await scroller.evaluate((element) => element.scrollWidth <= element.clientWidth + 1)).toBe(true)
         // Check the browser's cascade, including syntax spans and stacked line/word tints.
