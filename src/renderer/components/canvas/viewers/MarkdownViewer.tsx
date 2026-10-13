@@ -20,6 +20,7 @@ import { api } from '../../../api'
 import type { CanvasTab } from '../../../stores/canvas.store'
 import { useCanvasActions } from '../../../hooks/useCanvasLifecycle'
 import { useTranslation } from '../../../i18n'
+import { toHaloFileUrl } from '../../../../shared/halo-file-url'
 import {
   notifyRevealOutcome,
   openCommentCardAtComposer,
@@ -61,9 +62,9 @@ function resolveImageSrc(src: string | undefined, basePath: string): string {
   // No base path available, return original
   if (!basePath) return src
 
-  // Resolve relative paths to halo-file:// protocol
+  // Resolve relative paths against the file's directory, then encode
   if (src.startsWith('./')) {
-    return `halo-file://${basePath}/${src.slice(2)}`
+    return toHaloFileUrl(`${basePath}/${src.slice(2)}`)
   }
 
   if (src.startsWith('../')) {
@@ -73,15 +74,15 @@ function resolveImageSrc(src: string | undefined, basePath: string): string {
       parts.pop()
       srcParts.shift()
     }
-    return `halo-file://${parts.join('/')}/${srcParts.join('/')}`
+    return toHaloFileUrl(`${parts.join('/')}/${srcParts.join('/')}`)
   }
 
   if (src.startsWith('/')) {
-    return `halo-file://${src}`
+    return toHaloFileUrl(src)
   }
 
   // Relative path without prefix
-  return `halo-file://${basePath}/${src}`
+  return toHaloFileUrl(`${basePath}/${src}`)
 }
 
 const STREAMDOWN_CONTROLS = { code: true } as const
@@ -102,8 +103,12 @@ export function MarkdownViewer({ tab, onScrollChange, onEditRequest }: MarkdownV
   const [copied, setCopied] = useState(false)
   const codePlugin = useCodePlugin()
 
-  // Get the base directory of the markdown file for resolving relative paths
-  const basePath = tab.path ? tab.path.substring(0, tab.path.lastIndexOf('/')) : ''
+  // Get the base directory of the markdown file for resolving relative paths.
+  // tab.path uses the platform separator; normalize so lastIndexOf finds the
+  // directory cut on Windows too.
+  const basePath = tab.path
+    ? tab.path.replace(/\\/g, '/').replace(/\/[^/]*$/, '')
+    : ''
 
   const content = tab.content || ''
   const chunks = useMemo(
