@@ -51,6 +51,13 @@ export function ImChatView({ appId, spaceId, session, clearKey, footerAction }: 
   // Live reply detail for this conversation, desktop and remote alike.
   useConversationDetail(conversationId)
 
+  // A turn already running when the chat opens shows its steps so far and any
+  // retry it is waiting on, as the chat page does.
+  const handledByTeam = !!session.teamContext
+  useEffect(() => {
+    if (!handledByTeam) void useChatStore.getState().recoverRunningTurn(conversationId)
+  }, [conversationId, handledByTeam])
+
   // Persisted messages
   const [messages, setMessages] = useState<Message[]>([])
   const [loadState, setLoadState] = useState<LoadState>('loading')

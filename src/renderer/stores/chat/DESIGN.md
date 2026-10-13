@@ -31,7 +31,9 @@ Three kinds, three backends:
 - `virtual` — `backend/virtual.ts`: every other `app-chat:` key (IM, HTTP, team
   member). Only their live turn is tracked here; the transcript belongs to the
   view that shows it (`ImChatView`, team chat). `settleTurn` retires the streamed
-  state and nothing else.
+  state and nothing else. Nothing opens them through the store, so a view that
+  shows one picks up a turn already running with `recoverRunningTurn` — a read
+  made only while the store holds the session as running.
 
 Adding a conversation store means adding a backend, not a branch in a slice.
 

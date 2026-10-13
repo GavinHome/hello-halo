@@ -264,6 +264,13 @@ export interface ChatState {
   ensureMessageLoaded: (conversationId: string, messageId: string) => Promise<void>
   /** Re-read a conversation after events may have been missed (reconnect). */
   refreshConversation: (conversationId: string) => Promise<void>
+  /**
+   * Pick up a turn already running when a view that keeps its own transcript
+   * (IM, team member) opens it: the steps so far, an unanswered question, a
+   * retry the engine is waiting on. Reads only while this window holds the
+   * conversation as running.
+   */
+  recoverRunningTurn: (conversationId: string) => Promise<void>
 
   // Tool approval
   approveTool: (conversationId: string) => Promise<void>

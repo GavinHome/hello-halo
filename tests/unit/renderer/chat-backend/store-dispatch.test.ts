@@ -657,6 +657,35 @@ describe('sessions the chat board does not show', () => {
     expect(apiMock.appChatTranscript).not.toHaveBeenCalled()
     expect(apiMock.getConversation).not.toHaveBeenCalled()
   })
+
+  it('picks up the steps so far and the retry a running turn is waiting on', async () => {
+    const store = makeStore()
+    const im = `app-chat:${APP}:wecom:direct:someone`
+    store.getState().handleAgentTurnStart({ spaceId: SPACE, conversationId: im })
+    apiMock.getSessionState.mockResolvedValue({
+      success: true,
+      data: {
+        isActive: true,
+        spaceId: SPACE,
+        thoughts: [{ id: 't1', type: 'thinking', content: 'x', timestamp: 't' }],
+        apiRetry: { attempt: 5, maxRetries: 10, delayMs: 9000, errorStatus: 429, errorKind: 'rate_limit' },
+      },
+    })
+
+    await store.getState().recoverRunningTurn(im)
+
+    const session = store.getState().sessions.get(im)!
+    expect(session.thoughts.map(t => t.id)).toEqual(['t1'])
+    expect(session.apiRetry).toMatchObject({ attempt: 5, maxRetries: 10, errorStatus: 429 })
+  })
+
+  it('reads nothing for a session this window does not hold as running', async () => {
+    const store = makeStore()
+
+    await store.getState().recoverRunningTurn(`app-chat:${APP}:wecom:direct:someone`)
+
+    expect(apiMock.getSessionState).not.toHaveBeenCalled()
+  })
 })
 
 describe('space conversations through the same verbs', () => {

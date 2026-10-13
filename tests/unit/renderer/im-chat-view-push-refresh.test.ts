@@ -6,6 +6,9 @@
  * record only when a turn started or ended: the push appeared once the chat was
  * opened again. The session update that announces it is now the cue.
  *
+ * Opening the chat while its turn runs also picks that turn up — its steps so
+ * far and a retry it is waiting on — instead of a bare "thinking".
+ *
  * No DOM here: React's hooks are replaced by a small runner that runs the
  * effects whose dependencies changed.
  */
@@ -88,6 +91,7 @@ const chatState = {
   resetSession: vi.fn(),
   markSessionStopped: vi.fn(),
   handleAgentApiRetry: vi.fn(),
+  recoverRunningTurn: vi.fn(async () => {}),
 }
 
 vi.mock('../../../src/renderer/api', () => ({ api: env.api }))
@@ -131,6 +135,31 @@ beforeEach(() => {
     return () => { env.updateListeners = env.updateListeners.filter(l => l !== listener) }
   })
   env.api.appImChatMessages.mockClear()
+  chatState.recoverRunningTurn.mockClear()
+})
+
+describe('opening an IM chat in Halo', () => {
+  it('picks up the turn running in it, once per chat', async () => {
+    const runner = new Runner()
+    const view = () => ImChatView({ appId: 'dh', spaceId: 'space-1', session })
+    runner.render(view)
+    runner.render(view)
+    await settle()
+
+    expect(chatState.recoverRunningTurn).toHaveBeenCalledOnce()
+    expect(chatState.recoverRunningTurn).toHaveBeenCalledWith('app-chat:dh:wecom-bot:group:ops-group')
+
+    runner.render(() => ImChatView({ appId: 'dh', spaceId: 'space-1', session: { ...session, chatId: 'sales-group' } }))
+    expect(chatState.recoverRunningTurn).toHaveBeenLastCalledWith('app-chat:dh:wecom-bot:group:sales-group')
+  })
+
+  it('leaves a chat the team handles alone', () => {
+    new Runner().render(() => ImChatView({
+      appId: 'dh', spaceId: 'space-1', session: { ...session, teamContext: { teamId: 'team-1', epochId: 'epoch-1' } },
+    }))
+
+    expect(chatState.recoverRunningTurn).not.toHaveBeenCalled()
+  })
 })
 
 describe('an IM chat open in Halo', () => {
