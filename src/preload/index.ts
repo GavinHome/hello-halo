@@ -769,6 +769,7 @@ export interface HaloAPI extends BrowserHostBridge {
   gitGetChanges: GitRpcClient['gitGetChanges']
   gitGetFileContents: GitRpcClient['gitGetFileContents']
   gitListRevisionOptions: GitRpcClient['gitListRevisionOptions']
+  gitGetCommitGraph: GitRpcClient['gitGetCommitGraph']
   gitStage: GitRpcClient['gitStage']
   gitUnstage: GitRpcClient['gitUnstage']
   gitDiscard: GitRpcClient['gitDiscard']
