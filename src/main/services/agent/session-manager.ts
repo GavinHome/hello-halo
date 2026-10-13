@@ -146,8 +146,8 @@ function requestSessionRebuild(conversationId: string, reason = 'session rebuild
     return
   }
 
-  // Background results arrive through this same consumer as later turns.
-  if (consumer?.isRunning && (consumer.hasRunningTasks() || hasActiveTeamTasks(consumer.getTeamLifecycleThoughts()))) {
+  // Team agents report back through this same consumer as later turns.
+  if (consumer?.isRunning && hasActiveTeamTasks(consumer.getTeamLifecycleThoughts())) {
     pendingConsumerRebuilds.add(conversationId)
     return
   }
@@ -637,24 +637,12 @@ export interface ResidentSessionInfo {
   conversationId: string
   spaceId: string
   lastUsedAt: number
-  /** Mid-turn, awaiting init, holding team agents or background tasks, or being created — never evicted. */
+  /** Mid-turn, awaiting init, holding team agents, or being created — never evicted. */
   busy: boolean
-}
-
-/**
- * A task CC started in the background (a shell, agent or workflow) reports back
- * as a later turn of this session; evicting it would kill the task. The idle
- * sweep does not consult this, so a task whose completion never arrives cannot
- * pin the process forever.
- */
-function hasRunningTasks(conversationId: string): boolean {
-  const consumer = consumers.get(conversationId)
-  return !!consumer?.isRunning && consumer.hasRunningTasks()
 }
 
 function isEvictionUnsafe(conversationId: string): boolean {
   return isSessionBusy(conversationId)
-    || hasRunningTasks(conversationId)
     || turnsAwaitingInit.has(conversationId)
     || sessionsUnderCreation.has(conversationId)
     || inFlightSessionCreations.has(conversationId)
@@ -848,7 +836,7 @@ function closeV2SessionForRebuild(conversationId: string, reason = 'rebuild requ
 /**
  * True when a deferred rebuild is flagged for this conversation AND the session
  * is safely idle (no dispatched-but-unacknowledged turn, no active turn, no
- * running background or team tasks) — i.e. the flag can be applied right now instead of
+ * running team agents) — i.e. the flag can be applied right now instead of
  * waiting for the consumer's next turn boundary.
  */
 function hasConsumablePendingRebuild(conversationId: string): boolean {
@@ -857,7 +845,7 @@ function hasConsumablePendingRebuild(conversationId: string): boolean {
   if (turnsAwaitingInit.has(conversationId) || hasPendingSessionInput(conversationId)) return false
   const consumer = consumers.get(conversationId)
   if (consumer?.isRunning && consumer.getActiveSessionState()) return false
-  if (consumer?.isRunning && (consumer.hasRunningTasks() || hasActiveTeamTasks(consumer.getTeamLifecycleThoughts()))) return false
+  if (consumer?.isRunning && hasActiveTeamTasks(consumer.getTeamLifecycleThoughts())) return false
   return true
 }
 
@@ -1125,7 +1113,7 @@ export interface SessionGates {
 export class SessionOptionsStaleError extends Error {
   constructor(conversationId: string, reason: 'restricted-inputs' | 'source-switch') {
     super(reason === 'source-switch'
-      ? 'This conversation is still busy on its previous account (a reply or background task is running), ' +
+      ? 'This conversation is still busy on its previous account (a reply or team task is running), ' +
         'so this message was not sent. Send it again when that finishes, stop the running task, ' +
         'or start a new conversation to use the new account now.'
       : `The digital human is still busy with earlier work, so this request was not started. ` +
@@ -1149,7 +1137,7 @@ export function hasPendingSessionInput(conversationId: string): boolean {
 function assessRebuildDeferral(
   conversationId: string,
   consumer: ConsumerHandle | undefined
-): { leased: boolean; awaitingInit: boolean; activeTurn: boolean; idleWithTeamTasks: boolean; backgroundTasks: boolean; any: boolean } {
+): { leased: boolean; awaitingInit: boolean; activeTurn: boolean; idleWithTeamTasks: boolean; any: boolean } {
   const leased = sessionLeases.has(conversationId)
   const awaitingInit = turnsAwaitingInit.has(conversationId)
   const activeTurn = activeSessions.has(conversationId) || hasPendingSessionInput(conversationId) || Boolean(consumer?.isRunning && consumer.getActiveSessionState() !== null)
@@ -1158,14 +1146,12 @@ function assessRebuildDeferral(
       !consumer.getActiveSessionState() &&
       hasActiveTeamTasks(consumer.getTeamLifecycleThoughts())
   )
-  const backgroundTasks = Boolean(consumer?.isRunning && consumer.hasRunningTasks())
   return {
     leased,
     awaitingInit,
     activeTurn,
     idleWithTeamTasks,
-    backgroundTasks,
-    any: leased || awaitingInit || activeTurn || idleWithTeamTasks || backgroundTasks,
+    any: leased || awaitingInit || activeTurn || idleWithTeamTasks,
   }
 }
 
@@ -1295,18 +1281,18 @@ async function getOrCreateV2SessionInner(
           return existing.session
         }
 
-        // Idle background work still needs this receiver for its autonomous completion turns.
-        if (deferral.idleWithTeamTasks || deferral.backgroundTasks) {
+        // Idle team agents still need this receiver for their autonomous completion turns.
+        if (deferral.idleWithTeamTasks) {
           console.log(
-            `[Agent][${conversationId}] Session rebuild deferred — background or team work still needs its receiver ` +
-            `(gen ${existing.credentialsGeneration}→${currentGen}). Will rebuild after tasks complete.`
+            `[Agent][${conversationId}] Session rebuild deferred — active team agents still need their receiver ` +
+            `(gen ${existing.credentialsGeneration}→${currentGen}). Will rebuild after team tasks complete.`
           )
           pendingConsumerRebuilds.add(conversationId)
           existing.lastUsedAt = Date.now()
           return existing.session
         }
 
-        // No active processing or outstanding tasks — safe to rebuild now.
+        // No active processing or team agents — safe to rebuild now.
         console.log(`[Agent][${conversationId}] Session inputs changed (gen ${existing.credentialsGeneration}→${currentGen}, fp ${existing.credentialsFingerprint}→${currentFingerprint}, kb ${existing.knowledgeFingerprint}→${currentKnowledgeFingerprint}, tools ${existing.inputsFingerprint ?? '∅'}→${currentInputsFingerprint ?? '∅'}), recreating session`)
         closeV2SessionForRebuild(conversationId)
         // Fall through to create new session
@@ -1633,7 +1619,7 @@ export function consumePendingRebuild(conversationId: string): boolean {
   if (sessionLeases.has(conversationId) || turnsAwaitingInit.has(conversationId) ||
     inFlightSessionCreations.has(conversationId) || hasPendingSessionInput(conversationId)) return false
   const consumer = consumers.get(conversationId)
-  if (consumer?.isRunning && (consumer.hasRunningTasks() || hasActiveTeamTasks(consumer.getTeamLifecycleThoughts()))) return false
+  if (consumer?.isRunning && hasActiveTeamTasks(consumer.getTeamLifecycleThoughts())) return false
   if (pendingConsumerRebuilds.has(conversationId)) {
     pendingConsumerRebuilds.delete(conversationId)
     return true
@@ -1760,9 +1746,8 @@ export function invalidateSessionsForSpace(spaceId: string, reason = 'MCP change
 
 /**
  * Whether anything in the space is running or about to: a turn being created,
- * prepared, dispatched or answered, or background work whose results come back
- * as later turns. Synchronous, so a caller can act on a "no" before anything
- * else starts.
+ * prepared, dispatched or answered. Synchronous, so a caller can act on a "no"
+ * before anything else starts.
  */
 export function isSpaceBusy(spaceId: string): boolean {
   for (const state of activeSessions.values()) {
@@ -1774,8 +1759,6 @@ export function isSpaceBusy(spaceId: string): boolean {
   for (const [conversationId, info] of v2Sessions) {
     if (info.spaceId !== spaceId) continue
     if (isSessionBusy(conversationId) || turnsAwaitingInit.has(conversationId)) return true
-    const consumer = consumers.get(conversationId)
-    if (consumer?.isRunning && consumer.hasRunningTasks()) return true
   }
   return false
 }

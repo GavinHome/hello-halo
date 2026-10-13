@@ -96,7 +96,6 @@ async function open(conversationId: string, consumer: ConsumerState = { isRunnin
     get isRunning() { return consumer.isRunning },
     getActiveSessionState: () => consumer.turn,
     getTeamLifecycleThoughts: () => [],
-    hasRunningTasks: () => false,
     stop: vi.fn(),
   })
   await getOrCreateV2Session('space', conversationId, { systemPrompt: 'p', model: 'm' }, undefined, undefined, {} as never)
@@ -402,7 +401,7 @@ describe('acquisition while an MCP reconnect is pending', () => {
     createSession.mockResolvedValueOnce(second)
     startConsumer.mockReturnValueOnce({
       isRunning: true, getActiveSessionState: () => null,
-      getTeamLifecycleThoughts: () => [], hasRunningTasks: () => false, stop: vi.fn(),
+      getTeamLifecycleThoughts: () => [], stop: vi.fn(),
     })
     expect(sendIntoLiveTurn('conv', 'still working', undefined, { onWithdrawn: () => {} })).toBe(true)
     expect(first.sendIntoLiveTurn.mock.calls.map((call: any[]) => call[0])).toEqual(['still working'])

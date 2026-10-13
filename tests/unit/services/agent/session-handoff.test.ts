@@ -453,18 +453,18 @@ describe('session handoff through real chat entries', () => {
     } finally { listener.dispose() }
   })
 
-  describe.each(entries)('$name background work during an account change', entry => {
-    it.each(['idle', 'mid-turn'] as const)('keeps receiving all background completions after an account change while %s', async timing => {
-      const original = fakeSession('background-receiver')
+  describe.each(entries)('$name background task that never reports back', entry => {
+    it.each(['idle', 'mid-turn'] as const)('does not hold an account change while %s', async timing => {
+      const original = fakeSession('background-unreported')
       const replacement = fakeSession('after-background')
-      const reachedTasks = deferred<void>()
+      const reachedTask = deferred<void>()
       const finishTurn = deferred<void>()
       const stream = original.stream
       original.stream = async function* () {
         for await (const frame of stream()) {
           yield frame
-          if (timing === 'mid-turn' && frame.subtype === 'task_started' && frame.task_id === 'bg-b') {
-            reachedTasks.resolve()
+          if (timing === 'mid-turn' && frame.subtype === 'task_started') {
+            reachedTask.resolve()
             await finishTurn.promise
           }
         }
@@ -473,46 +473,23 @@ describe('session handoff through real chat entries', () => {
       queueSession(replacement)
       const pending = entry.send()
       await vi.waitFor(() => expect(original.send).toHaveBeenCalledTimes(1))
+      // CC 2.1.89 sends no task_notification for a background shell the model stopped with TaskStop.
       original.emit([
         { type: 'system', subtype: 'init', session_id: 'background-sdk', tools: [], mcp_servers: [] },
-        { type: 'system', subtype: 'task_started', task_id: 'bg-a' },
-        { type: 'system', subtype: 'task_started', task_id: 'bg-b' },
+        { type: 'system', subtype: 'task_started', task_id: 'bg-stopped' },
         { type: 'assistant', message: { id: 'started', content: [{ type: 'text', text: 'Background work started' }] } },
         { type: 'result', subtype: 'success', is_error: false, result: 'Background work started' },
       ])
-      if (timing === 'mid-turn') await reachedTasks.promise
+      if (timing === 'mid-turn') await reachedTask.promise
       else await vi.waitFor(() => expect(getConsumerHandle(entry.id)?.getActiveSessionState()).toBeNull())
       try {
         await reconfigureAccount()
-        expect(original.close).not.toHaveBeenCalled()
+        if (timing === 'mid-turn') expect(original.close).not.toHaveBeenCalled()
         finishTurn.resolve()
         await pending
-        await vi.waitFor(() => expect(getConsumerHandle(entry.id)?.getActiveSessionState()).toBeNull())
-        expect(getConsumerHandle(entry.id)?.isRunning).toBe(true)
-        expect(getConsumerHandle(entry.id)?.hasRunningTasks()).toBe(true)
-        expect(evictIdleSession(entry.id, 'fixture background receiver')).toBe(false)
-        for (const taskId of ['bg-a', 'bg-b']) {
-          const complete = deferred<void>()
-          const listener = onAgentEvent(event => {
-            if (event.conversationId === entry.id && event.channel === 'agent:complete') complete.resolve()
-          })
-          try {
-            original.emit([
-              { type: 'system', subtype: 'init', session_id: 'background-sdk', tools: [], mcp_servers: [] },
-              { type: 'system', subtype: 'task_notification', task_id: taskId, status: 'completed' },
-              { type: 'assistant', message: { id: taskId, content: [{ type: 'text', text: `${taskId} completed` }] } },
-              { type: 'result', subtype: 'success', is_error: false, result: `${taskId} completed` },
-            ])
-            await complete.promise
-            if (taskId === 'bg-a') {
-              expect(getConsumerHandle(entry.id)?.isRunning).toBe(true)
-              expect(original.close).not.toHaveBeenCalled()
-            }
-          } finally { listener.dispose() }
-        }
-        await vi.waitFor(() => expect(getConsumerHandle(entry.id)?.isRunning).toBe(false))
-        const next = entry.send('After background completion')
-        await completeSend(entry, replacement, next, 'After background completion')
+        await vi.waitFor(() => expect(getConsumerHandle(entry.id)?.isRunning ?? false).toBe(false))
+        const next = entry.send('After the account change')
+        await completeSend(entry, replacement, next, 'After the account change')
         expectRoute(replacement, 'account-a')
       } finally { finishTurn.resolve() }
     })
