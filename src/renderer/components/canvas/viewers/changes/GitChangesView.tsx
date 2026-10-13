@@ -633,7 +633,7 @@ export function GitChangesView({ tab, source }: { tab: TabState; source: GitSour
   } else if (listError) {
     page = <LoadErrorState message={gitErrorMessage(listError, t, memory.scope.kind === 'revision' || memory.scope.kind === 'commit' ? memory.scope.revision : undefined)} onRetry={() => void controller.load()} />
   } else if (!list && refreshing) {
-    // A scope or repository switch dropped the old list; the next one is on its way.
+    // A repository switch or a commit picked in the graph dropped the old list; the next one is on its way.
     page = <LoadingState />
   } else if (stackFiles.length === 0) {
     page = shown.length === 0 && files.length > 0
@@ -663,6 +663,9 @@ export function GitChangesView({ tab, source }: { tab: TabState; source: GitSour
       />
     )
   }
+
+  // Until a repository is ready (loading, no git, no repository, a failed first load) the graph sub-page shows that state instead.
+  const graphShown = memory.page === 'graph' && phase === 'ready'
 
   const changeScope = (scope: StoredCompareScope) => {
     update({ forced: [] })
@@ -747,11 +750,13 @@ export function GitChangesView({ tab, source }: { tab: TabState; source: GitSour
           {repoRoot && (memory.graphOpened || memory.page === 'graph') && (
             // The graph stands on its own: a failed change list (a gone branch, a pruned snapshot) must not hide it.
             // Once opened it stays mounted, hidden, so filters, scroll and loaded pages survive page switches.
-            <div hidden={memory.page !== 'graph'} className="h-full">
+            // Its branches and filters belong to one repository: another one starts a new graph.
+            <div hidden={!graphShown} className="h-full">
               <GitGraphPage
+                key={repoRoot}
                 spaceId={source.spaceId}
                 repoRoot={repoRoot}
-                active={memory.page === 'graph'}
+                active={graphShown}
                 selected={memory.scope.kind === 'commit' ? memory.scope.revision : null}
                 onCompare={(oid, subject) => {
                   update({ page: 'changes', detail: null, forced: [] })
@@ -760,7 +765,7 @@ export function GitChangesView({ tab, source }: { tab: TabState; source: GitSour
               />
             </div>
           )}
-          {memory.page !== 'graph' && page}
+          {!graphShown && page}
         </section>
         {panel && layout.dockedPanel && prefs.panelOpen && (
           <ResizableFilePanel containerRef={rootRef} preferredWidth={prefs.panelWidth} onWidthChange={prefs.setPanelWidth}>

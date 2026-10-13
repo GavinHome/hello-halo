@@ -2,20 +2,21 @@
  * The commit graph sub-page: a lane per branch line, one row per commit, drawn
  * as SVG curves from the lane layout. Rows load in pages as the view nears the
  * bottom; clicking a row compares that commit with its first parent on the
- * changes page. Read-only browsing — no checkout, no reset.
+ * changes page. Read-only browsing — no checkout, no reset. While hidden it
+ * runs no git at all.
  */
 
-import { useCallback, useEffect, useMemo, useRef, useState, type KeyboardEvent, type UIEvent } from 'react'
+import { useCallback, useEffect, useMemo, useReducer, useRef, useState, type KeyboardEvent, type UIEvent } from 'react'
 import { ChevronDown, GitBranch, Loader2, Search, User } from 'lucide-react'
-import type { GitGraphCommit, GitRevisionOption } from '../../../../../../shared/types/git'
-import { GIT_LIMITS } from '../../../../../../shared/types/git'
+import type { GitGraphQuery, GitRevisionOption } from '../../../../../../shared/types/git'
 import { useTranslation } from '../../../../../i18n'
 import { failureOf, gitClient } from '../state/git-client'
 import { useViewerResources } from '../../../viewer-resources'
-import { gitErrorMessage, type GitFailure } from '../state/git-errors'
+import { gitErrorMessage } from '../state/git-errors'
 import { LoadErrorState, LoadingState } from '../shared/EmptyStates'
 import { Menu, MenuItem, MenuLabel, MenuNote } from '../shared/Menu'
 import { formatTime } from '../shared/format'
+import { EMPTY_VIEW, GraphLoader, settleLoad, type GraphView } from './graph-pages'
 import { layoutGraph, type GraphRowLayout, type LaneState, type GraphSourceCommit } from './lanes'
 
 const ROW_H = 30
@@ -35,7 +36,7 @@ const laneX = (lane: number): number => GRAPH_PAD + lane * LANE_STEP
 interface GitGraphPageProps {
   spaceId: string
   repoRoot: string
-  /** False while another sub-page is shown: the page stays mounted, its data kept. */
+  /** False while another sub-page is shown: the page stays mounted, its data kept, and loads nothing. */
   active: boolean
   /** The commit the changes page is comparing, if any. */
   selected: string | null
@@ -50,20 +51,61 @@ export function GitGraphPage({ spaceId, repoRoot, active, selected, onCompare }:
   const [author, setAuthor] = useState('')
   const [messageDraft, setMessageDraft] = useState('')
   const [message, setMessage] = useState('')
-  const [commits, setCommits] = useState<GitGraphCommit[]>([])
-  const [more, setMore] = useState(false)
+  const [view, setView] = useState<GraphView>(EMPTY_VIEW)
   const [loading, setLoading] = useState(true)
   const [appending, setAppending] = useState(false)
-  const [error, setError] = useState<GitFailure | null>(null)
   const [scrollTop, setScrollTop] = useState(0)
   const [viewport, setViewport] = useState(0)
   const containerRef = useRef<HTMLDivElement>(null)
-  // A fetch older than the newest one is dropped; a page append carries the row count it asked to skip.
-  const loadGen = useRef(0)
-  const loadedCount = useRef(0)
-  const commitsRef = useRef<GitGraphCommit[]>([])
-  commitsRef.current = commits
-  const wasActive = useRef(active)
+  const { pages, failure } = view
+  const commits = pages.commits
+
+  const query = useMemo<GitGraphQuery>(
+    () => ({ branch: branch ?? undefined, author: author || undefined, message: message || undefined }),
+    [branch, author, message]
+  )
+  // A load reads the query and the list as they are when it starts, not when it was asked for.
+  const latest = useRef({ spaceId, repoRoot, query, read: pages.read })
+  latest.current = { spaceId, repoRoot, query, read: pages.read }
+  // Counts settled loads, even those that leave the view as it was.
+  const [settled, countSettled] = useReducer((n: number) => n + 1, 0)
+  const [loader] = useState(() => new GraphLoader(
+    (mode) => {
+      const current = latest.current
+      return gitClient.getCommitGraph(current.spaceId, current.repoRoot, { ...current.query, skip: mode === 'append' ? current.read : 0 })
+    },
+    (mode, outcome) => {
+      if (mode === 'reset') setLoading(false)
+      if (mode === 'append') setAppending(false)
+      // The one failure the view does not show: the rows on screen stay.
+      if (mode === 'refresh' && 'error' in outcome) console.warn('[ChangesView] Graph refresh failed:', failureOf(outcome.error))
+      setView((current) => settleLoad(current, mode, outcome))
+      countSettled()
+    }
+  ))
+  useEffect(() => () => loader.dispose(), [loader])
+
+  const startOver = useCallback(() => {
+    setView(EMPTY_VIEW)
+    setAppending(false)
+    setLoading(true)
+    setScrollTop(0)
+    if (containerRef.current) containerRef.current.scrollTop = 0
+    loader.load('reset')
+  }, [loader])
+
+  // The first page loads when the graph is first shown and again each time it is
+  // shown, so new commits appear; a new query starts over. Hidden, it loads nothing.
+  const listQuery = useRef<GitGraphQuery | null>(null)
+  useEffect(() => {
+    if (!active) return
+    if (listQuery.current === query) {
+      loader.load('refresh')
+      return
+    }
+    listQuery.current = query
+    startOver()
+  }, [active, query, loader, startOver])
 
   // Filters apply on Enter, not while typing; Escape puts the drafts back to what is applied.
   const applyFilters = useCallback(() => {
@@ -80,72 +122,6 @@ export function GitGraphPage({ spaceId, repoRoot, active, selected, onCompare }:
     }
   }, [applyFilters, author, message])
 
-  const fetchPage = useCallback(async (mode: 'reset' | 'append' | 'refresh') => {
-    const mine = ++loadGen.current
-    const skip = mode === 'append' ? loadedCount.current : 0
-    if (mode === 'reset') setLoading(true)
-    else if (mode === 'append') setAppending(true)
-    setError(null)
-    try {
-      const result = await gitClient.getCommitGraph(spaceId, repoRoot, {
-        branch: branch ?? undefined,
-        author: author || undefined,
-        message: message || undefined,
-        skip,
-      })
-      if (mine !== loadGen.current) return
-      if (mode === 'reset') {
-        setCommits(result.commits)
-        loadedCount.current = result.commits.length
-      } else if (mode === 'append') {
-        // Pages are point-in-time snapshots: a commit that arrived between pages can repeat.
-        const known = new Set(commitsRef.current.map((c) => c.oid))
-        const added = result.commits.filter((c) => !known.has(c.oid))
-        setCommits([...commitsRef.current, ...added])
-        loadedCount.current = skip + result.commits.length
-      } else if (!result.more) {
-        // Nothing follows the fresh first page any more: it is the whole list.
-        setCommits(result.commits)
-        loadedCount.current = result.commits.length
-      } else {
-        // Returning to the page: replace the first page in place, keep the deeper pages.
-        const fresh = new Set(result.commits.map((c) => c.oid))
-        const tail = commitsRef.current.slice(GIT_LIMITS.maxGraphCommits).filter((c) => !fresh.has(c.oid))
-        const merged = [...result.commits, ...tail]
-        setCommits(merged)
-        loadedCount.current = merged.length
-      }
-      setMore(result.more)
-    } catch (e) {
-      if (mine !== loadGen.current) return
-      setError(failureOf(e))
-      if (mode === 'reset') setCommits([])
-    } finally {
-      if (mine === loadGen.current) {
-        setLoading(false)
-        setAppending(false)
-      }
-    }
-  }, [spaceId, repoRoot, branch, author, message])
-
-  useEffect(() => {
-    loadedCount.current = 0
-    setCommits([])
-    setMore(false)
-    void fetchPage('reset')
-  }, [fetchPage])
-
-  // A branch filter belongs to one repository; switching resets it.
-  useEffect(() => { setBranch(null) }, [repoRoot])
-
-  // Coming back to the page: filters, scroll and loaded pages stay; only the first
-  // page is fetched again in the background so new commits appear.
-  useEffect(() => {
-    if (active === wasActive.current) return
-    wasActive.current = active
-    if (active && commitsRef.current.length > 0) void fetchPage('refresh')
-  }, [active, fetchPage])
-
   useEffect(() => {
     const el = containerRef.current
     if (!el) return
@@ -156,12 +132,19 @@ export function GitGraphPage({ spaceId, repoRoot, active, selected, onCompare }:
     return () => scope.dispose()
   }, [resources])
 
-  const onScroll = useCallback((e: UIEvent<HTMLDivElement>) => {
-    const el = e.currentTarget
-    setScrollTop(el.scrollTop)
-    if (!more || appending || loading) return
-    if (el.scrollTop + el.clientHeight > commits.length * ROW_H - PREFETCH_ROWS * ROW_H) void fetchPage(false)
-  }, [more, appending, loading, commits.length, fetchPage])
+  const onScroll = useCallback((e: UIEvent<HTMLDivElement>) => setScrollTop(e.currentTarget.scrollTop), [])
+
+  // The rows in view come near the end of the list: the next page. Asked for when
+  // that first holds and after each settled load while it still does, never per
+  // scroll event: while another load runs, it waits for that one to settle.
+  // After a failure, only the user's retry asks again.
+  const nearEnd = active && !loading && !failure && pages.more
+    && scrollTop + viewport > (commits.length - PREFETCH_ROWS) * ROW_H
+  useEffect(() => {
+    if (!nearEnd || loader.busy) return
+    setAppending(true)
+    loader.load('append')
+  }, [nearEnd, settled, loader])
 
   // The layout extends page by page: appending a page lays out only the new rows,
   // so a deep scroll never recomputes — or blocks — on everything above it.
@@ -222,26 +205,26 @@ export function GitGraphPage({ spaceId, repoRoot, active, selected, onCompare }:
       <div ref={containerRef} onScroll={onScroll} className="min-h-0 flex-1 overflow-y-auto">
         {loading ? (
           <LoadingState />
-        ) : error ? (
-          <LoadErrorState message={gitErrorMessage(error, t)} onRetry={() => void fetchPage(true)} />
+        ) : failure?.mode === 'reset' ? (
+          <LoadErrorState message={gitErrorMessage(failureOf(failure.error), t)} onRetry={startOver} />
         ) : commits.length === 0 ? (
           <div className="flex h-full min-h-[240px] items-center justify-center p-6 text-sm text-subtle-foreground">
             {author || message || branch ? t('No commits match') : t('No commits yet')}
           </div>
         ) : (
-          <div className="relative" style={{ height: commits.length * ROW_H }} role="list">
+          <div className="relative" style={{ height: commits.length * ROW_H }}>
             {shown.map((commit, offset) => {
               const index = first + offset
               const row = layout.rows[index]
               const isSelected = commit.oid === selected
               return (
-                <div
+                <button
                   key={commit.oid}
-                  role="listitem"
-                  aria-selected={isSelected}
+                  type="button"
+                  aria-current={isSelected || undefined}
                   onClick={() => onCompare(commit.oid, commit.subject)}
                   style={{ top: index * ROW_H, height: ROW_H }}
-                  className={`absolute inset-x-0 flex cursor-pointer select-none items-center gap-2 pr-3 text-[12.5px] transition-colors ${
+                  className={`absolute inset-x-0 flex cursor-pointer select-none items-center gap-2 pr-3 text-left text-[12.5px] transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring/60 ${
                     isSelected ? 'bg-primary/10' : 'hover:bg-surface-hover'
                   }`}
                 >
@@ -276,12 +259,19 @@ export function GitGraphPage({ spaceId, repoRoot, active, selected, onCompare }:
                   <span className="shrink-0 text-subtle-foreground">{commit.author}</span>
                   <span className="shrink-0 text-subtle-foreground">{formatTime(Date.parse(commit.date), i18n.language, now)}</span>
                   <span className="shrink-0 font-mono text-[11.5px] text-faint-foreground">{commit.shortOid}</span>
-                </div>
+                </button>
               )
             })}
-            {appending && (
+            {appending ? (
               <div className="absolute inset-x-0 flex items-center justify-center gap-2 py-2 text-[12px] text-subtle-foreground" style={{ top: commits.length * ROW_H }}>
                 <Loader2 size={13} className="animate-spin" aria-hidden />{t('Loading more…')}
+              </div>
+            ) : failure && (
+              <div className="absolute inset-x-0 flex items-center justify-center gap-2 px-3 py-2 text-[12px] text-subtle-foreground" style={{ top: commits.length * ROW_H }}>
+                <span className="min-w-0 truncate">{gitErrorMessage(failureOf(failure.error), t)}</span>
+                <button type="button" onClick={() => setView((current) => ({ ...current, failure: null }))} className="shrink-0 text-primary hover:underline">
+                  {t('Try again')}
+                </button>
               </div>
             )}
           </div>
