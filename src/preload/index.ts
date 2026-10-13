@@ -112,7 +112,7 @@ export interface HaloAPI extends BrowserHostBridge {
   authDelegatedActivate: () => Promise<IpcResponse>
 
   // Config
-  getConfig: () => Promise<IpcResponse & { configEpoch?: number }>
+  getConfig: RpcClient<typeof configRpc>['getConfig']
   setConfig: (updates: Record<string, unknown>, snapshotEpoch?: number) => Promise<IpcResponse>
   getCredentialFailures: () => Promise<IpcResponse>
   getConfigReadFailure: () => Promise<IpcResponse>
