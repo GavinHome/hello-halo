@@ -97,6 +97,24 @@ describe('getCommitGraph', () => {
     // The busiest setup in the suite: the most git spawns, so the most time.
   }, 60_000)
 
+  it('leaves out refs that are not history, and reads a branch that shares its name with a file', async () => {
+    const repo = repoInSpace()
+    // Without `--`, git refuses `main` as ambiguous: it names the branch and this file.
+    repo.write('main', 'one\n')
+    const tip = repo.commitAll('add main')
+    repo.write('main', 'two\n')
+    repo.git('stash', '-q')
+    repo.git('notes', 'add', '-m', 'a note', tip)
+    // Commits that only a filter-branch backup or a maintenance prefetch reaches.
+    const offHistory = (message: string) => repo.git('commit-tree', `${tip}^{tree}`, '-p', tip, '-m', message).trim()
+    repo.git('update-ref', 'refs/original/refs/heads/main', offHistory('before the rewrite'))
+    repo.git('update-ref', 'refs/prefetch/remotes/origin/main', offHistory('prefetched'))
+    const all = await getCommitGraph('s', repo.root, {})
+    expect(all.commits.map((c) => c.oid)).toEqual([tip])
+    const onMain = await getCommitGraph('s', repo.root, { branch: 'main' })
+    expect(onMain.commits.map((c) => c.oid)).toEqual([tip])
+  }, 30_000)
+
   it('keeps merge parents in topo order', async () => {
     const repo = repoInSpace()
     const { mainTip, featureTip, mergeTip } = forkAndMerge(repo)

@@ -25,7 +25,7 @@ const MAX_SUBJECT_CHARS = 200
 const LOG_TIMEOUT_MS = 120_000
 
 /** A query from a client, checked field by field. */
-export function assertGraphQuery(value: unknown): GitGraphQuery {
+function assertGraphQuery(value: unknown): GitGraphQuery {
   const query = (value ?? {}) as GitGraphQuery
   if (query.branch !== undefined && query.branch !== null) query.branch = assertRevisionSyntax(query.branch)
   if (query.author !== undefined && query.author !== null) {
@@ -75,12 +75,18 @@ async function readGraph(ctx: RepoContext, query: GitGraphQuery): Promise<GitCom
     ...(query.author || query.message ? ['-i', '-F'] : []),
     ...(query.author ? [`--author=${query.author}`] : []),
     ...(query.message ? [`--grep=${query.message}`] : []),
-    query.branch ?? '--all',
+    // Every ref but those whose commits are not the project's history: the stash,
+    // notes, filter-branch backups and the prefetches of `git maintenance`.
+    ...(query.branch
+      ? [query.branch]
+      : ['--exclude=refs/stash', '--exclude=refs/notes/*', '--exclude=refs/original/*', '--exclude=refs/prefetch/*', '--all']),
+    // A file named like the branch must not make the name ambiguous.
+    '--',
   ]
   // Exit 128: no commits at all, or the branch does not exist.
   const result = await read(ctx, args, { okExitCodes: [0, 128], timeoutMs: LOG_TIMEOUT_MS })
   if (result.exitCode !== 0) {
-    const stderr = result.stderr.toString('utf8')
+    const stderr = result.stderr
     if (query.branch) throw new GitError('GIT_REVISION_NOT_FOUND', `No branch or commit named ${query.branch}`)
     // An unborn repository has no graph yet, not an error.
     if (/does not have any commits yet/i.test(stderr)) return { commits: [], more: false }

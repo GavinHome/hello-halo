@@ -17,7 +17,6 @@ export { getWorkingTreeStatus } from './status'
 export { getChangeList, assertCompareScope } from './changes'
 export { readFileContents } from './contents'
 export { listRevisionOptions } from './revisions'
-/** `assertGraphQuery` validates a graph request from a client (throws GIT_INVALID_ARGUMENT). */
-export { getCommitGraph, assertGraphQuery } from './graph'
+export { getCommitGraph } from './graph'
 export { createSnapshot, countChangedSince } from './snapshot'
 export { stagePaths, unstagePaths, discardPaths, commitChanges, syncBranch } from './operations'
