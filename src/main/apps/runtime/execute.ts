@@ -77,6 +77,7 @@ import { appConsolidationInputs } from './memory-control'
 import { registerActiveRun, unregisterActiveRun, notifyActiveRunReady, type RunSupplement } from './active-runs'
 import { describeSelfInstance, formatInstanceTag } from './live-instances'
 import { stopEngineOnAbort } from './engine-stop'
+import { renderTriggerContext } from './event-input'
 
 // ============================================
 // Types
@@ -437,9 +438,7 @@ export async function executeRun(options: ExecuteRunOptions): Promise<AppRunResu
       : (trigger.type === 'escalation_followup' && existingRunId && trigger.escalation)
         ? buildEscalationResumeMessage(trigger.escalation)
         : buildInitialMessage({
-            triggerContext: trigger.type === 'event' && trigger.eventPayload
-              ? `${trigger.description}\n\nEvent data:\n${JSON.stringify(trigger.eventPayload, null, 2)}`
-              : trigger.description,
+            triggerContext: renderTriggerContext(trigger),
             userConfig: mergedConfig,
             appName: app.spec.name,
             memorySnapshot,

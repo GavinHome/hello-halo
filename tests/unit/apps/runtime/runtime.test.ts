@@ -1832,6 +1832,43 @@ describe('AppRuntimeService', () => {
       expect(options.recordedInputs).toHaveLength(2)
     })
 
+    it('keeps webhook request headers and caller address out of a live event addition', async () => {
+      const webhook = (path: string) => ({
+        type: 'webhook.received',
+        payload: { path, body: { order: path }, headers: { authorization: 'Bearer secret-token' }, ip: '10.1.2.3' },
+      })
+      await service.activate(app.id)
+      const running = service.triggerManually(app.id)
+      readyRun()
+      const handler = mockEventRouter.on.mock.calls[0][1]
+      await handler(webhook('/live'))
+      expect(send.mock.calls[0][0]).toContain('/live')
+      expect(send.mock.calls[0][0]).not.toContain('secret-token')
+      expect(send.mock.calls[0][0]).not.toContain('10.1.2.3')
+      finish()
+      await running
+    })
+
+    it('keeps webhook request headers and caller address out of a batched event run', async () => {
+      const webhook = (path: string) => ({
+        type: 'webhook.received',
+        payload: { path, body: { order: path }, headers: { authorization: 'Bearer secret-token' }, ip: '10.1.2.3' },
+      })
+      await service.activate(app.id)
+      const running = service.triggerManually(app.id)
+      const handler = mockEventRouter.on.mock.calls[0][1]
+      await handler(webhook('/first'))
+      await handler(webhook('/second'))
+      finish()
+      await running
+      await vi.waitFor(() => expect(executeRun).toHaveBeenCalledTimes(2))
+      const { trigger } = vi.mocked(executeRun).mock.calls[1][0]
+      const shown = `${trigger.description}\n${JSON.stringify(trigger.eventPayload)}`
+      expect(shown).toMatch(/\/first[\s\S]*\/second/)
+      expect(shown).not.toContain('secret-token')
+      expect(shown).not.toContain('10.1.2.3')
+    })
+
     it('injects an answered decision into its original live run and settles it when that run finishes', async () => {
       const running = service.triggerManually(app.id)
       readyRun()

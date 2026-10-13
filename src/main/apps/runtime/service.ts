@@ -50,6 +50,7 @@ import type {
 import { AppNotRunnableError, EscalationNotFoundError, ConcurrencyLimitError } from './errors'
 import { Semaphore } from './concurrency'
 import { executeRun } from './execute'
+import { eventPayloadForModel, renderEventInput } from './event-input'
 import { tryInjectIntoActiveRun, isRunActive, listActiveRuns, onActiveRunReady, getActiveRun, markRunInputsStopped, type RunSupplement } from './active-runs'
 import { automaticEnabled, blockedReason, deriveRuntimeStatus } from './app-state'
 import { getActiveTeamRuntime } from './team'
@@ -196,7 +197,7 @@ export function createAppRuntimeService(deps: AppRuntimeDeps): AppRuntimeService
       if ('skipReason' in admission) throw new Error(admission.skipReason)
       const trigger: TriggerContext = triggers.length === 1 ? triggers[0] : {
         type: 'event', description: triggers.map(renderEventInput).join('\n\n'),
-        eventPayload: { events: triggers.map((entry) => ({ description: entry.description, payload: entry.eventPayload })) },
+        eventPayload: { events: triggers.map((entry) => ({ description: entry.description, payload: entry.eventPayload && eventPayloadForModel(entry.eventPayload) })) },
       }
       void executeWithConcurrency(admission.app, trigger, {
         ...(triggers.length > 1 ? { recordedInputs: triggers.map((entry) => ({ text: renderEventInput(entry) })) } : {}),
@@ -232,10 +233,6 @@ export function createAppRuntimeService(deps: AppRuntimeDeps): AppRuntimeService
     } catch (error) {
       console.error('[Runtime] Unread run input could not be withdrawn before the stop', { appId, runId, error })
     }
-  }
-
-  function renderEventInput(trigger: TriggerContext): string {
-    return `[New automation event]\n${trigger.description}\n\n${JSON.stringify(trigger.eventPayload ?? {}, null, 2)}`
   }
 
   async function deliverAutomationEvent(appId: string, event: AutomationEvent, subscription: string): Promise<void> {
