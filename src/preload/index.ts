@@ -507,7 +507,7 @@ export interface HaloAPI extends BrowserHostBridge {
   imChannelsReload: () => Promise<IpcResponse>
   imChannelsProviders: () => Promise<IpcResponse>
   imChannelsPermissionDefaults: () => Promise<IpcResponse>
-  imChannelsSetInstanceApp: (instanceId: string, appId: string) => Promise<IpcResponse>
+  imChannelsSetInstanceApp: (instanceId: string, appId: string, expectedAppId?: string) => Promise<IpcResponse>
   imChannelsCreateInstance: (instance: unknown) => Promise<IpcResponse>
   imChannelsUnbindInstance: (instanceId: string) => Promise<IpcResponse>
 

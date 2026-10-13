@@ -391,7 +391,10 @@ export async function initAppRuntime(
   // ── IM Channel Manager (multi-instance) ─────────────────────────────
   // Manages all IM channel instances (WeCom Bot, Feishu Bot, DingTalk Bot, etc.)
   // Each instance is a separate connection bound to a specific digital human.
-  const imChannelManager = new ImChannelManager()
+  const imChannelManager = new ImChannelManager((appId) => {
+    const app = deps.appManager.getApp(appId)
+    return app && app.status !== 'uninstalled' ? app.spec.name : undefined
+  })
   imChannelManagerInstance = imChannelManager
 
   // Expose via module-level accessor so dispatch-inbound.ts can resolve

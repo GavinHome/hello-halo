@@ -1632,6 +1632,15 @@ src/main/apps/runtime/
                                 (wecom-bot.provider.ts, weixin-ilink.provider.ts, ...)
 ```
 
+IM status reads return a per-provider `ordinal` derived from the full config order,
+not a filtered UI list, and the currently bound `appName`. Runtime passes a name
+resolver to the manager at construction; the manager deduplicates name lookups
+within each list read and retains no name cache or numbering state. IPC and HTTP
+both consume these status reads. `setInstanceApp` accepts an optional
+`expectedAppId`; a mismatched current binding returns `BINDING_CHANGED` without
+writing or reconnecting, so a stale UI confirmation cannot transfer another
+person's newly rebound bot.
+
 ### 4.1 identityCapability pattern
 
 Optional per-instance capability (same shape as `fileCapability`) letting a
