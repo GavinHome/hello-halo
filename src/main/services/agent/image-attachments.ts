@@ -19,6 +19,7 @@ import { createHash } from 'crypto'
 import { existsSync, mkdirSync, writeFileSync } from 'fs'
 import { join } from 'path'
 import { supportsVisionById } from '../../../shared/constants/model-capabilities'
+import { toHaloFileUrl } from '../../../shared/halo-file-url'
 import { getSpace } from '../space.service'
 import type { ApiCredentials, ImageAttachment, ImageMediaType } from './types'
 import type { ToolsetScope } from './toolsets/types'
@@ -172,7 +173,7 @@ export function withInputImageFiles(
           mkdirSync(dir, { recursive: true })
           writeFileSync(filePath, Buffer.from(image.data, 'base64'))
         }
-        return { ...image, data: '', url: `halo-file://${filePath.replace(/%/g, '%25').replace(/#/g, '%23').replace(/\?/g, '%3F')}` }
+        return { ...image, data: '', url: toHaloFileUrl(filePath) }
       } catch (error) {
         console.error(`[Agent] Live input image could not be materialized: space=${spaceId} image=${image.id}`, error)
         return image
