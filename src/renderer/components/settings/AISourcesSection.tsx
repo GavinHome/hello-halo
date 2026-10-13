@@ -212,7 +212,7 @@ export function AISourcesSection({ config, setConfig }: AISourcesSectionProps) {
     return (
       <div
         key={source.id}
-        className={`border rounded-lg transition-colors ${isCurrent ? 'border-primary/50 bg-primary/[0.04] dark-ui:bg-primary/10' : 'border-border bg-card'}`}
+        className={`border rounded-lg transition-colors ${isCurrent ? 'border-primary/50 bg-primary/[0.04] theme-dark:bg-primary/10' : 'border-border bg-card'}`}
       >
         {/* Header */}
         <div

@@ -30,9 +30,15 @@ import {
   ChevronDown,
   AlertCircle,
   Share2,
+  Power,
+  PowerOff,
 } from 'lucide-react'
 import { useAppsStore } from '../../stores/apps.store'
+import { useAppsPageStore } from '../../stores/apps-page.store'
 import { useSpaceStore } from '../../stores/space.store'
+import { useStoreUpdateFlow } from '../store/useStoreUpdateFlow'
+import { findEntryUpdate } from '../../utils/store-install-state'
+import { openSkillInComposer } from '../../utils/conversation-navigation'
 import { AppStatusDot } from './AppStatusDot'
 import { useTranslation, getCurrentLanguage } from '../../i18n'
 import { resolveSpecI18n } from '../../utils/spec-i18n'
@@ -55,6 +61,10 @@ interface SkillInfoCardProps {
   appId: string
   /** Display name for the scope: resolved space name, or the translated "Global" string */
   spaceName?: string
+  /** Offer "Use" (opens a space's composer); off where leaving the current screen is out of place. */
+  showUse?: boolean
+  /** Keep the header pinned while the page scrolls; off inside a dialog that pins its own title. */
+  stickyHeader?: boolean
 }
 
 // ============================================
@@ -74,12 +84,14 @@ function statusLabel(status: AppStatus, t: (s: string) => string): string {
 // Component
 // ============================================
 
-export function SkillInfoCard({ appId, spaceName }: SkillInfoCardProps) {
+export function SkillInfoCard({ appId, spaceName, showUse = true, stickyHeader = true }: SkillInfoCardProps) {
   const { t } = useTranslation()
   const { apps, pauseApp, resumeApp, uninstallApp, updateAppSpec, moveAppToSpace } = useAppsStore()
   const spaces    = useSpaceStore(s => s.spaces)
   const haloSpace = useSpaceStore(s => s.haloSpace)
   const app = apps.find(a => a.id === appId)
+  const update = useAppsPageStore(s => findEntryUpdate(app ?? null, s.availableUpdates))
+  const updateFlow = useStoreUpdateFlow(update?.entry, update)
   const [pendingChange, setPendingChange] = useState<{ title: string; apply: () => Promise<void> } | null>(null)
 
   const [toggling, setToggling]         = useState(false)
@@ -94,6 +106,16 @@ export function SkillInfoCard({ appId, spaceName }: SkillInfoCardProps) {
   const [showShareDialog, setShowShareDialog] = useState(false)
   const [showCopy, setShowCopy] = useState(false)
   const dropdownRef                     = useRef<HTMLDivElement>(null)
+  // The header's divider shows only once it is pinned, i.e. once this marker above it has scrolled away.
+  const headerSentinelRef               = useRef<HTMLDivElement>(null)
+  const [headerPinned, setHeaderPinned] = useState(false)
+  useEffect(() => {
+    const sentinel = headerSentinelRef.current
+    if (!stickyHeader || !sentinel) return
+    const observer = new IntersectionObserver(([entry]) => setHeaderPinned(!entry.isIntersecting))
+    observer.observe(sentinel)
+    return () => observer.disconnect()
+  }, [stickyHeader, app?.id])
 
   // Close the space dropdown when the user clicks outside it
   useEffect(() => {
@@ -217,21 +239,48 @@ export function SkillInfoCard({ appId, spaceName }: SkillInfoCardProps) {
   // ── Render ────────────────────────────────
 
   return (
-    <div className="flex-1 overflow-y-auto py-4 sm:py-6 px-6 sm:px-10 space-y-5">
+    // No scroller of its own: the page or dialog around it scrolls, and the sticky header pins to that.
+    <div className="flex-1 py-4 sm:py-6 px-6 sm:px-10 space-y-5">
       {pendingChange && <CapabilityChangeDialog appId={appId} title={pendingChange.title} onConfirm={pendingChange.apply} onClose={() => setPendingChange(null)} />}
       <CapabilityImpact appId={appId} />
       {showCopy && <SkillCopyDialog spec={spec} content={isEditing ? draftContent : skillContent} spaceId={app.spaceId} onClose={() => setShowCopy(false)} onSaved={() => { setIsEditing(false); setDraft('') }} />}
 
       {/* ── Header ── */}
-      <div className="flex items-start justify-between gap-3">
+      {stickyHeader && <div ref={headerSentinelRef} aria-hidden="true" className="!mt-0 h-px" />}
+      <div className={stickyHeader
+        // Bleeds into the page padding so the pinned bar spans the full width.
+        ? `sticky top-0 z-20 -mx-6 sm:-mx-10 px-6 sm:px-10 py-3 bg-background flex items-start justify-between gap-3 border-b transition-colors ${headerPinned ? 'border-border-faint' : 'border-transparent'}`
+        : 'flex items-start justify-between gap-3'}>
         <div className="min-w-0 flex-1">
-          <h2 className="text-base font-semibold text-foreground truncate">{name}</h2>
+          <div className="flex items-center gap-2 min-w-0">
+            <h2 className="text-base font-semibold text-foreground truncate">{name}</h2>
+            {/* Enabled is the norm; only the other states are called out. */}
+            {!isEnabled && (
+              <span className="inline-flex flex-shrink-0 items-center gap-1.5 text-[11px] px-2 py-0.5 rounded-full bg-muted/60 text-muted-foreground">
+                <AppStatusDot status={status} size="sm" />
+                {statusLabel(status, t)}
+              </span>
+            )}
+          </div>
 
           {/* Author + scope badge row */}
           <div className="flex items-center gap-2 mt-1.5 flex-wrap">
             <p className="text-xs text-muted-foreground">
               {t('by')} {spec.author}
+              {spec.version && <span> · v{spec.version}</span>}
             </p>
+            {/* The update sits beside the version it replaces. */}
+            {update && (
+              <button
+                type="button"
+                onClick={updateFlow.start}
+                disabled={updateFlow.busy}
+                className="inline-flex items-center gap-1 text-[11px] px-2 py-0.5 rounded-full font-medium border border-halo-success/30 bg-halo-success/10 text-halo-success hover:bg-halo-success/20 transition-colors disabled:opacity-60"
+              >
+                {updateFlow.busy && <Loader2 className="w-3 h-3 animate-spin" />}
+                {t('Update to v{{version}}', { version: update.latestVersion })}
+              </button>
+            )}
 
             {/* Scope badge — interactive dropdown to switch the skill's space */}
             <div ref={dropdownRef} className="relative">
@@ -310,13 +359,35 @@ export function SkillInfoCard({ appId, spaceName }: SkillInfoCardProps) {
           </div>
         </div>
 
-        {/* Status indicator + inline toggle */}
         <div className="flex flex-col items-end gap-1 flex-shrink-0">
           <div className="flex items-center gap-2">
-            <div className="flex items-center gap-1.5 text-xs text-muted-foreground">
-              <AppStatusDot status={status} size="sm" />
-              <span>{statusLabel(status, t)}</span>
-            </div>
+            {showUse && isEnabled && (
+              <button
+                type="button"
+                onClick={() => openSkillInComposer({ spaceId: app.spaceId, name: spec.name, description })}
+                className="h-7 px-3 text-xs font-medium border border-border-soft bg-background text-foreground rounded-md hover:border-muted-foreground/40 transition-colors"
+              >
+                {t('Use')}
+              </button>
+            )}
+            {/* Labelled with what a click does, like the skill card's power button. Enabling is
+                the page's main action once disabled; disabling stays quiet, since red is
+                the uninstall button's and disabling is reversible. */}
+            <button
+              type="button"
+              disabled={!canToggle || toggling}
+              onClick={() => setPendingChange({ title: t('Change shared resource availability?'), apply: handleToggle })}
+              className={`inline-flex items-center gap-1.5 h-7 px-3 text-xs font-medium border rounded-md transition-colors disabled:opacity-50 disabled:cursor-not-allowed ${
+                isEnabled
+                  ? 'border-border-soft bg-background text-foreground hover:border-halo-error/40 hover:text-halo-error'
+                  : 'border-halo-success/30 bg-halo-success/10 text-halo-success hover:bg-halo-success/20'
+              }`}
+            >
+              {toggling
+                ? <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                : isEnabled ? <PowerOff className="w-3.5 h-3.5" /> : <Power className="w-3.5 h-3.5" />}
+              {isEnabled ? t('Disable') : t('Enable')}
+            </button>
             <button
               type="button"
               onClick={() => setShowShareDialog(true)}
@@ -325,28 +396,6 @@ export function SkillInfoCard({ appId, spaceName }: SkillInfoCardProps) {
               className="p-1.5 text-muted-foreground hover:text-foreground hover:bg-secondary rounded-md transition-colors"
             >
               <Share2 className="w-3.5 h-3.5" />
-            </button>
-            <button
-              type="button"
-              role="switch"
-              aria-label={isEnabled ? t('Disable') : t('Enable')}
-              aria-checked={isEnabled}
-              disabled={!canToggle || toggling}
-              onClick={() => setPendingChange({ title: t('Change shared resource availability?'), apply: handleToggle })}
-              className={`relative inline-flex h-6 w-11 flex-shrink-0 rounded-full transition-colors duration-200
-                focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary focus-visible:ring-offset-2
-                disabled:opacity-50 disabled:cursor-not-allowed
-                ${isEnabled ? 'bg-primary' : 'bg-muted'}`}
-            >
-              {toggling ? (
-                <Loader2 className="absolute inset-0 m-auto w-3.5 h-3.5 animate-spin text-white/70" />
-              ) : (
-                <span
-                  className={`inline-block h-5 w-5 rounded-full bg-white shadow-sm
-                    transform transition-transform duration-200 mt-0.5
-                    ${isEnabled ? 'translate-x-5' : 'translate-x-0.5'}`}
-                />
-              )}
             </button>
           </div>
           {toggleError && (
@@ -494,6 +543,7 @@ export function SkillInfoCard({ appId, spaceName }: SkillInfoCardProps) {
           onClose={() => setShowShareDialog(false)}
         />
       )}
+      {updateFlow.dialogs}
 
     </div>
   )

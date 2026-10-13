@@ -335,7 +335,7 @@ function MineRow({ pub, busy, onOpen, onUnpublish, onPublishVersion }: MineRowPr
             // leaves the public index, which frees its skill name for another
             // author, and only the publish path re-runs that uniqueness check.
             isSelfTakedown && (
-              <button onClick={onPublishVersion} className="text-xs font-medium text-halo-success hover:text-halo-success/80 transition-colors">
+              <button onClick={onPublishVersion} className="text-xs font-medium text-halo-success hover:underline">
                 {t('Relist')}
               </button>
             )

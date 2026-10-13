@@ -48,6 +48,18 @@ export async function openWorkNotification(target: WorkNavigationTarget) {
   useAppStore.getState().navigate('apps')
 }
 
+/**
+ * The navigation entry for the Digital Humans page. Coming from elsewhere it
+ * returns to where the page was left (tab and open detail); pressed while
+ * already on the page it goes back to the digital-humans tab.
+ */
+export function openDigitalHumansPage() {
+  if (useAppStore.getState().view === 'apps') {
+    useAppsPageStore.getState().setCurrentTab('my-digital-humans')
+  }
+  useAppStore.getState().navigate('apps')
+}
+
 /** Open a digital human's page on its activity thread. */
 export function openPersonActivity(appId: string) {
   useAppsPageStore.getState().setInitialAppId(null)

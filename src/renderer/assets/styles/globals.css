@@ -27,9 +27,11 @@
    ============================================ */
 
 :root {
-  /* Dark theme (default). Neutrals carry a cool (blue-adjacent, H~220) tint
-     rather than pure gray — matched to the prototype's own token values. */
-  --background: 220 20% 6%;
+  /* Dark theme (default). Neutrals carry a cool tint (H~220). Each surface
+     steps ~3–5 L* above the one below; fills are
+     reserved for raised or interactive elements so the canvas does not read
+     as a gray wash. */
+  --background: 220 14% 11%;
   /* Browser gutters match Chromium's default page surface in either theme. */
   --browser-background: 0 0% 100%;
   /* Blocking portals cover resource sheets and the search overlay (100/101). */
@@ -37,39 +39,37 @@
   --layer-workspace-sheet: 70;
   --layer-global-modal: 120;
   --foreground: 223 17% 92%;
-  --card: 220 18% 10%;
+  --card: 220 12% 15%;
   --card-foreground: 223 17% 92%;
-  --popover: 220 18% 10%;
+  --popover: 220 12% 15%;
   --popover-foreground: 223 17% 92%;
   --primary: 217 91% 60%;
   --primary-foreground: 0 0% 100%;
   --primary-hover: 221 83% 53%;
-  /* Raised from 13%: the selected/hovered fill must read against the 6%
-     canvas, not just exist. */
-  --secondary: 220 19% 16%;
+  --secondary: 220 12% 19%;
   --secondary-foreground: 223 17% 92%;
-  --muted: 220 19% 16%;
-  --muted-foreground: 217 12% 72%;
+  --muted: 220 12% 19%;
+  --muted-foreground: 217 12% 75%;
   /* Tertiary text, used on 10–13px labels. Clears WCAG AA 4.5 on every
      surface it sits on, hovered rows (--surface-hover) included. */
-  --subtle-foreground: 220 9% 63%;
+  --subtle-foreground: 220 9% 68%;
   /* Low-frequency icon controls only (never text): recedes until hovered.
      Kept at the 3:1 floor for interactive graphics, including on the
      secondary-tinted toolbars and hovered rows it sits on. */
-  --faint-foreground: 220 8% 50%;
+  --faint-foreground: 220 8% 57%;
   --accent: 217 91% 60%;
   --accent-foreground: 0 0% 100%;
   --accent-on-dark: 212 96% 78%;
-  --surface-hover: 222 17% 19%;
+  --surface-hover: 220 11% 22%;
   --destructive: 0 62% 50%;
   --destructive-foreground: 0 0% 98%;
-  --border: 220 15% 20%;
-  /* Soft and faint dividers. Solid here: an alpha border on a near-black
-     canvas all but vanishes. The light theme defines them as alphas of
-     --border instead. */
-  --border-soft: hsl(220 15% 18%);
-  --border-faint: hsl(220 15% 16%);
-  --input: 220 19% 13%;
+  --border: 220 10% 26%;
+  /* Soft and faint dividers. Solid here: an alpha border on a dark canvas
+     all but vanishes. The light theme defines them as alphas of --border
+     instead. */
+  --border-soft: hsl(220 10% 22%);
+  --border-faint: hsl(220 10% 19%);
+  --input: 220 12% 14%;
   --ring: 217 91% 60%;
   --radius: 0.75rem;
   /* Chat transcript and composer column. Fixed, not fluid: on wide screens a
@@ -87,6 +87,9 @@
   --halo-glow: 217 91% 60%;
   --halo-success: 142 71% 45%;
   --halo-warning: 38 92% 50%;
+  /* `text-halo-success` / `text-halo-warning` read these (tailwind.config textColor). */
+  --halo-success-text: var(--halo-success);
+  --halo-warning-text: var(--halo-warning);
   --halo-error: 0 62% 50%;
 
   /* Diff text (+N / −N, status letters) and, at low alpha, line and word
@@ -96,10 +99,10 @@
   --diff-del: 0 72% 63%;
   --diff-mod: 38 92% 50%;
   /* Diff-only syntax, contrasted against layered line and word tints. */
-  --diff-syntax-keyword: 277 45% 75%;
-  --diff-syntax-function: 213 65% 74%;
-  --diff-syntax-string: 146 40% 70%;
-  --diff-syntax-number: 32 50% 72%;
+  --diff-syntax-keyword: 277 45% 80%;
+  --diff-syntax-function: 213 65% 80%;
+  --diff-syntax-string: 146 40% 76%;
+  --diff-syntax-number: 32 50% 78%;
 
   /* App type accent colors (skill = cyan, mcp = amber). Brightened for the
      dark default; .light carries the source values. */
@@ -155,6 +158,10 @@
   --halo-glow: 217 91% 55%;
   --halo-success: 142 71% 40%;
   --halo-warning: 38 92% 45%;
+  /* Text needs a darker shade than fills: these clear 4.5 on white, card,
+     secondary, hovered rows and the tinted status chips. */
+  --halo-success-text: 142 71% 25%;
+  --halo-warning-text: 38 92% 27%;
   --halo-error: 0 72% 51%;
 
   --diff-add: 142 72% 29%;
@@ -407,17 +414,19 @@ html.platform-desktop body::after {
   background: hsl(var(--muted-foreground) / 0.4);
 }
 
-/* Every scrollbar stays hidden until the pointer is over its scroller. The
-   thumb goes transparent rather than away, so its space never shifts content.
-   Kept after the variants above: equal specificity, so source order wins.
-   The two variants that set `scrollbar-color` need their own rule — Chromium
-   ignores ::-webkit-scrollbar styles on elements that set it. */
-:not(:hover)::-webkit-scrollbar-thumb {
+/* Every scrollbar stays hidden until the pointer is over its scroller, or for a
+   moment after the user scrolls it (`data-scrolling`, set by
+   lib/scrollbar-reveal.ts — hover alone misses wheel scrolling under a still
+   pointer). The thumb goes transparent rather than away, so its space never
+   shifts content. More specific than the variants above, so it wins. The two
+   variants that set `scrollbar-color` need their own rule — Chromium ignores
+   ::-webkit-scrollbar styles on elements that set it. */
+:not(:hover):not([data-scrolling])::-webkit-scrollbar-thumb {
   background: transparent;
 }
 
-.scrollbar-thin:not(:hover),
-.scrollbar-overlay:not(:hover) {
+.scrollbar-thin:not(:hover):not([data-scrolling]),
+.scrollbar-overlay:not(:hover):not([data-scrolling]) {
   scrollbar-color: transparent transparent;
 }
 
@@ -1046,6 +1055,20 @@ html.platform-desktop body::after {
   border: 1px solid hsl(var(--border) / 0.5);
 }
 
+/* Dark: replies sit on the canvas; a filled card per reply washes the whole
+   transcript gray. With no box, side padding would indent the text past the
+   sender label above it. */
+.theme-dark .message-assistant {
+  background: transparent;
+  border-color: transparent;
+  padding-left: 0;
+  padding-right: 0;
+}
+
+.theme-dark .message-working::before {
+  display: none;
+}
+
 /* Streaming message style */
 .streaming-message {
   position: relative;
@@ -1293,18 +1316,17 @@ html.platform-desktop body::after {
   background-color: hsl(var(--halo-warning) / 0.32);
 }
 
-/* A file mention in a reply that names a file of the space. The box stays the
-   inline code's own: only colour and underline change, so nothing moves when
-   a mention turns into a link after the existence check answers. */
+/* A file mention in a reply that names a file of the space. Styled like the
+   reply's web links (colour, underline on hover only) and in the inline code's
+   own box, so nothing moves when it turns into a link after the existence check. */
 .markdown-content :is(code, span)[data-file-link] {
   color: hsl(var(--primary));
-  text-decoration: underline dashed hsl(var(--primary) / 0.5);
-  text-underline-offset: 3px;
+  text-underline-offset: 2px;
   cursor: pointer;
 }
 
 .markdown-content :is(code, span)[data-file-link]:hover {
-  text-decoration-style: solid;
+  text-decoration: underline;
 }
 
 .markdown-content :is(code, span)[data-file-link]:focus-visible {

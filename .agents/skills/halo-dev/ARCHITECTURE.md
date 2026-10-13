@@ -641,12 +641,21 @@ CSS variable-based theming. **Do not use hardcoded colors.**
   only the OS, so it is wrong whenever the user picks a theme explicitly.
 - Soft dividers: `border-border-soft` / `border-border-faint` (also `divide-`).
   Light resolves them to `--border` at 0.6 / 0.5; dark uses solid colors,
-  because an alpha border vanishes on a near-black canvas. Put no `/NN` on
+  because an alpha border vanishes on a dark canvas. Put no `/NN` on
   `border-border` or on these two (older `/20`–`/70` uses still fade in dark).
-- Dark-only tweaks: the `dark-ui:` variant (`:root:not(.light) &`). Its
-  selector outranks every plain state variant (`hover:`, `group-hover:`,
-  `data-[…]:`), so restate each state it overrides under `dark-ui:` too.
-  Changing one theme must leave the other identical.
+- Status colors: `text-halo-success` / `text-halo-warning` read
+  `--halo-*-text` (tailwind `textColor`), a darker shade in light so small
+  text clears 4.5; `bg-` / `border-` and CSS read the fill token
+  `--halo-success` / `--halo-warning`. Text on a solid status fill uses a contrasting neutral (e.g.
+  `text-background`), never a status token.
+- Dark-only tweaks: the `theme-dark:` variant (`.theme-dark &`; in CSS,
+  `.theme-dark …`). `applyTheme` in `App.tsx` and the `index.html` anti-flash
+  script set `theme-dark` only for the dark theme, so a theme added later is
+  never hit. Never scope by "not light" (`:root:not(.light)`): that would
+  reach every future theme. `theme-dark:` ties `hover:` / `data-[…]:` on
+  specificity and wins by source order, while `group-hover:` outranks it —
+  restate each overridden state under `theme-dark:` (e.g.
+  `theme-dark:hover:…`). Changing one theme must leave every other identical.
 
 ```css
 /* Correct */

@@ -31,7 +31,7 @@ import { api } from '@/api'
 import { useChatStore, selectActiveConversationId } from '@/stores/chat.store'
 import { useSpaceStore } from '@/stores/space.store'
 import { useAppStore } from '@/stores/app.store'
-import { useAppsPageStore } from '@/stores/apps-page.store'
+import { useAppsPageStore, tabForAppType } from '@/stores/apps-page.store'
 import { useTlonStore } from '@/stores/tlon.store'
 import { useSearchStore } from '@/stores/search.store'
 import { useTranslation } from '@/i18n'
@@ -151,6 +151,8 @@ export function SearchPanel({ isOpen, onClose }: SearchPanelProps) {
     if (item.type === 'agent' && item.appId) {
       trackNavigate('apps', 'search', 'search')
       navigate('apps')
+      // The page keeps the tab it was left on; a digital human opens in its own tab.
+      useAppsPageStore.getState().setCurrentTab(tabForAppType('automation'))
       useAppsPageStore.getState().selectApp(item.appId)
       onClose()
       return

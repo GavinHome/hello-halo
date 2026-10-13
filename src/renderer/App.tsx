@@ -83,7 +83,7 @@ function PageLoader() {
 }
 
 /**
- * Resolves an HSL CSS variable (e.g. "220 20% 6%", the format every color
+ * Resolves an HSL CSS variable (e.g. "220 14% 11%", the format every color
  * token in globals.css uses) to a hex string. Electron's titleBarOverlay
  * (Windows/Linux) needs a literal opaque color — it can't read CSS
  * variables from the main process — so this reads the same `--background`/
@@ -119,6 +119,7 @@ function applyTheme(theme: 'light' | 'dark' | 'system') {
     isDark = theme === 'dark'
     root.classList.toggle('light', theme === 'light')
   }
+  root.classList.toggle('theme-dark', isDark)
 
   // Update titleBarOverlay colors (Windows/Linux only) — read back the
   // header's own tokens now that .light was just toggled above, so the

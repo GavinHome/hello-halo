@@ -118,18 +118,19 @@ const ThoughtItem = memo(function ThoughtItem({ thought, isLast, allThoughts, is
   const truncatedContent = needsTruncate ? displayContent.substring(0, maxPreviewLength) : displayContent
 
   // Status indicator for tool_use - now includes execution status
-  // Tool errors use warning style (amber) instead of error style (red) because
+  // Tool errors use warning style instead of error style (red) because
   // these are internal AI feedback (e.g. "read file first"), not user-facing errors.
   // The AI will auto-recover from these, so a softer visual treatment avoids misleading users.
   const getToolStatus = () => {
     if (thought.type !== 'tool_use') return null
-    if (!isToolReady) return { label: t('Generating'), color: 'text-amber-400', icon: 'loading' }
+    // Tokens by default; `theme-dark:` sets the dark hues.
+    if (!isToolReady) return { label: t('Generating'), color: 'text-halo-warning theme-dark:text-amber-400', icon: 'loading' }
     if (hasToolResult) {
       return thought.toolResult!.isError
-        ? { label: t('Hint'), color: 'text-amber-500', icon: 'warning' }
-        : { label: t('Done'), color: 'text-green-400', icon: 'success' }
+        ? { label: t('Hint'), color: 'text-halo-warning', icon: 'warning' }
+        : { label: t('Done'), color: 'text-halo-success theme-dark:text-green-400', icon: 'success' }
     }
-    return { label: t('Running'), color: 'text-blue-400', icon: 'running' }
+    return { label: t('Running'), color: 'text-primary theme-dark:text-blue-400', icon: 'running' }
   }
   const toolStatus = getToolStatus()
 
@@ -139,7 +140,7 @@ const ThoughtItem = memo(function ThoughtItem({ thought, isLast, allThoughts, is
       {/* Timeline line */}
       <div className="flex flex-col items-center">
         <div className={`w-7 h-7 rounded-full flex items-center justify-center ${
-          thought.isError || thought.toolResult?.isError ? 'bg-amber-500/20' : isStreaming ? 'bg-primary/20' : 'bg-primary/10'
+          thought.isError || thought.toolResult?.isError ? 'bg-halo-warning/20' : isStreaming ? 'bg-primary/20' : 'bg-primary/10'
         } ${thought.toolResult?.isError ? 'text-amber-500' : color}`}>
           {hasToolResult ? (
             thought.toolResult!.isError ? <AlertTriangle size={14} /> : <CheckCircle2 size={14} />
@@ -201,7 +202,7 @@ const ThoughtItem = memo(function ThoughtItem({ thought, isLast, allThoughts, is
                   {(thought.type === 'thinking' || thought.type === 'text') && needsTruncate && (
                     <button
                       onClick={() => setIsContentExpanded(!isContentExpanded)}
-                      className="ml-1 text-primary/60 hover:text-primary not-italic"
+                      className="ml-1 text-primary hover:underline not-italic"
                     >
                       {isContentExpanded ? t('Collapse') : t('Expand')}
                     </button>

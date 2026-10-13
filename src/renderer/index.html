@@ -10,7 +10,7 @@
   <title>Halo - AI that gets things done</title>
     <style>
       /* Anti-flash: set background before CSS loads */
-      html, body, #root { background-color: #0a0a0a; }
+      html, body, #root { background-color: #181b20; }
       html.light, html.light body, html.light #root { background-color: #ffffff; }
     </style>
     <script>
@@ -21,6 +21,8 @@
           var prefersDark = window.matchMedia('(prefers-color-scheme: dark)').matches;
           if (theme === 'light' || (theme === 'system' && !prefersDark)) {
             document.documentElement.classList.add('light');
+          } else if (theme === 'dark' || theme === 'system') {
+            document.documentElement.classList.add('theme-dark');
           }
         } catch (e) {}
         // Platform class for conditional CSS (e.g. backdrop-filter only on GPU-enabled platforms)

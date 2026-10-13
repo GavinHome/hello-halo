@@ -42,6 +42,8 @@ interface CollapsedThoughtProcessProps {
   messageId?: string
 }
 
+// Dark: the expanded list follows the replies (no card), a rule down its left side instead.
+const EXPANDED_LIST_DARK = 'theme-dark:ml-1.5 theme-dark:py-1 theme-dark:bg-transparent theme-dark:rounded-none theme-dark:border-y-0 theme-dark:border-r-0 theme-dark:border-border-soft'
 
 // Single thought item in expanded view
 function ThoughtItem({ thought, allThoughts }: { thought: Thought; allThoughts?: Thought[] }) {
@@ -68,7 +70,7 @@ function ThoughtItem({ thought, allThoughts }: { thought: Thought; allThoughts?:
   const needsTruncate = content.length > maxLen
 
   return (
-    <div className="py-1.5 text-xs border-b border-border/20 last:border-b-0">
+    <div className="py-2 text-xs">
       {/* First row: Icon + Tool name + Timestamp */}
       <div className="flex items-center gap-2">
         <Icon size={14} className={`${color} shrink-0`} />
@@ -101,7 +103,7 @@ function ThoughtItem({ thought, allThoughts }: { thought: Thought; allThoughts?:
                 {(thought.type === 'thinking' || thought.type === 'text') && needsTruncate && (
                   <button
                     onClick={() => setIsContentExpanded(!isContentExpanded)}
-                    className="ml-1 text-primary/60 hover:text-primary"
+                    className="ml-1 text-primary hover:underline"
                   >
                     {isContentExpanded ? t('Collapse') : t('Expand')}
                   </button>
@@ -201,7 +203,7 @@ function LazyCollapsedThoughtItem({
   }
 
   return (
-    <div ref={ref} style={{ minHeight: COLLAPSED_THOUGHT_ESTIMATED_HEIGHT }} className="border-b border-border/20 last:border-b-0" />
+    <div ref={ref} style={{ minHeight: COLLAPSED_THOUGHT_ESTIMATED_HEIGHT }} />
   )
 }
 
@@ -250,14 +252,9 @@ export function CollapsedThoughtProcess({ thoughts, defaultExpanded = false, def
     <div className="mb-2">
       <button
         onClick={() => setIsExpanded(!isExpanded)}
-        className={`
-          flex items-center gap-2 px-3 py-1.5 rounded-lg text-xs
-          transition-all duration-200 w-full border
-          ${isExpanded
-            ? 'bg-primary/[0.12] border-primary/25'
-            : 'bg-card/80 hover:bg-secondary/60 border-border-faint'
-          }
-        `}
+        // A plain disclosure: the chevron shows the state. -ml-2 offsets px-2
+        // so the chevron lines up with the text above.
+        className="flex items-center gap-2 w-fit -ml-2 px-2 py-1.5 rounded-lg text-xs transition-colors duration-200 hover:bg-secondary/60"
       >
         {/* Expand icon */}
         <ChevronRight
@@ -283,7 +280,7 @@ export function CollapsedThoughtProcess({ thoughts, defaultExpanded = false, def
 
       {/* Expanded content */}
       {isExpanded && (
-        <div className="mt-1 py-2 bg-card/80 rounded-lg border border-border-faint animate-slide-down thought-content">
+        <div className={`mt-1 py-2 bg-card/80 rounded-lg border border-border-faint ${EXPANDED_LIST_DARK} animate-slide-down thought-content`}>
           {/* Thought items — lazy-loaded: only items near the scroll viewport are rendered */}
           {displayThoughts.length > 0 && (
             <div ref={scrollContainerRef} className={`${isMaximized ? 'max-h-[80vh]' : 'max-h-[300px]'} scrollbar-overlay px-3 transition-all duration-200`}>
@@ -377,7 +374,7 @@ export function LazyCollapsedThoughtProcess({ thoughtsSummary, onLoadThoughts, a
       <button
         onClick={handleClick}
         disabled={isLoading || unavailable}
-        className="flex items-center gap-2 px-3 py-1.5 rounded-lg text-xs transition-all duration-200 w-full bg-card/80 hover:bg-secondary/60 border border-border-faint disabled:hover:bg-card/80"
+        className="flex items-center gap-2 w-fit -ml-2 px-2 py-1.5 rounded-lg text-xs transition-colors duration-200 hover:bg-secondary/60 disabled:hover:bg-transparent"
       >
         {isLoading ? (
           <Loader2 size={12} className="text-muted-foreground animate-spin" />

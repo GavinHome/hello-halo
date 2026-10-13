@@ -10,9 +10,6 @@ import { api } from '../../api'
 import { ArrowLeft, ChevronDown, ChevronUp, Loader2, Check, Download, AlertCircle, RotateCcw, Globe, User } from 'lucide-react'
 import { useAppsPageStore } from '../../stores/apps-page.store'
 import { useAppsStore } from '../../stores/apps.store'
-import { useAppStore } from '../../stores/app.store'
-import { useSpaceStore } from '../../stores/space.store'
-import { useChatStore } from '../../stores/chat.store'
 import { useStoreCategories, categoryDisplay } from '../../hooks/useStoreCategories'
 import { getEntryVersions, getEntryInstalls } from '../../../shared/store/store-meta'
 import { useStoreEntryInstallState } from '../../hooks/useStoreEntryInstallState'
@@ -27,8 +24,7 @@ import { AppTypeIcon } from './AppTypeIcon'
 import { installVerb, installedVerb } from './install-verb'
 import { StoreDocumentation } from './StoreDocumentation'
 import { SkillFileTree } from './SkillFileTree'
-import { deriveSkillCommand } from '../../utils/skill-command'
-import { resolveStoreTargetSpace } from '../../utils/store-target-space'
+import { openSkillInComposer } from '../../utils/conversation-navigation'
 import type { AppType } from '../../../shared/apps/spec-types'
 
 function formatVersionDate(iso: string): string {
@@ -80,12 +76,6 @@ export function StoreDetail() {
   const setCurrentTab = useAppsPageStore(state => state.setCurrentTab)
   const consumeStoreAutoInstall = useAppsPageStore(state => state.consumeStoreAutoInstall)
   const checkUpdates = useAppsPageStore(state => state.checkUpdates)
-  const navigate = useAppStore(state => state.navigate)
-  const spaces = useSpaceStore(state => state.spaces)
-  const haloSpace = useSpaceStore(state => state.haloSpace)
-  const currentSpace = useSpaceStore(state => state.currentSpace)
-  const setCurrentSpace = useSpaceStore(state => state.setCurrentSpace)
-  const refreshCurrentSpace = useSpaceStore(state => state.refreshCurrentSpace)
 
   const [showSystemPrompt, setShowSystemPrompt] = useState(false)
   const [showVersions, setShowVersions] = useState(false)
@@ -185,31 +175,11 @@ export function StoreDetail() {
   }, [checkUpdates])
 
   // "Use" an already-installed app: digital humans open in their dedicated tab;
-  // skills run inside a space conversation, so we open the space they're
-  // installed in — checking both dedicated spaces and the built-in default
-  // space (haloSpace, tracked separately from `spaces`) — falling back to the
-  // current/first/default space for global installs.
+  // skills run inside a space conversation.
   const handleUse = useCallback(() => {
     if (!installedApp || !entry) return
     if (entry.type === 'skill') {
-      const target = resolveStoreTargetSpace(installedApp.spaceId, { spaces, currentSpace, haloSpace })
-      if (target) {
-        setCurrentSpace(target)
-        void refreshCurrentSpace()
-        // Pre-fill the skill's slash command into that space's composer (consumed
-        // once by InputArea on arrival); same slugging as SkillInfoCard's trigger display.
-        const slug = deriveSkillCommand(installedApp.spec.name).slice(1)
-        useChatStore.setState({
-          pendingComposerInput: {
-            spaceId: target.id,
-            text: `/${slug} `,
-            // Shown regardless of whether the target space's conversation
-            // session (if any) has announced this command itself.
-            slashPreview: { command: `/${slug}`, label: slug, description: entry.description },
-          }
-        })
-      }
-      navigate('space')
+      openSkillInComposer({ spaceId: installedApp.spaceId, name: installedApp.spec.name, description: entry.description })
       return
     }
     clearStoreSelection()
@@ -218,12 +188,6 @@ export function StoreDetail() {
   }, [
     installedApp,
     entry,
-    spaces,
-    haloSpace,
-    currentSpace,
-    setCurrentSpace,
-    refreshCurrentSpace,
-    navigate,
     clearStoreSelection,
     setCurrentTab,
     selectApp,
