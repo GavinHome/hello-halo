@@ -133,7 +133,10 @@ as diffs. `openChanges(source, { reveal })` keeps one tab per source:
   newest request first; folding or selecting another file cancels reads before
   they start (`state/request-queue.ts`). Texts share a 32M-character cache per
   load. Generated and very large diffs wait for "Load diff"; binary and
-  over-limit files never load text.
+  over-limit files never load text. Lines wrap, except in a file other than
+  prose (Markdown, plain text, no extension) with a few lines too long to wrap
+  (`wrapsLines`: a bundle, one-line data), which scrolls sideways instead;
+  reveals and F7 then scroll across as well.
 - **One order.** The diffs are in the file list's order (`inPanelOrder`): its
   groups, then Tree (folders first) or List (whole paths), names compared
   naturally. Next file, F7 and "k of N" walk the list as it reads.
