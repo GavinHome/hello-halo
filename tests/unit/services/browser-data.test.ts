@@ -2,10 +2,11 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 
 const native = vi.hoisted(() => ({
   clearStorageData: vi.fn(), clearCache: vi.fn(), fromPartition: vi.fn(),
-  handle: vi.fn(), initialize: vi.fn(),
+  handle: vi.fn(), initialize: vi.fn(), getAllWebContents: vi.fn(),
 }))
 vi.mock('electron', () => ({
   BrowserWindow: vi.fn(), session: { fromPartition: native.fromPartition },
+  webContents: { getAllWebContents: native.getAllWebContents },
   ipcMain: { handle: native.handle },
 }))
 vi.mock('../../../src/main/services/browser-host', () => ({ browserHostManager: { initialize: native.initialize } }))
@@ -19,6 +20,7 @@ beforeEach(() => {
   native.clearStorageData.mockReset().mockResolvedValue(undefined)
   native.clearCache.mockReset().mockResolvedValue(undefined)
   native.fromPartition.mockReset().mockReturnValue(native)
+  native.getAllWebContents.mockReset().mockReturnValue([])
 })
 
 function clearData(): Promise<void> {
@@ -32,6 +34,21 @@ describe('shared browser data cleanup', () => {
     expect(native.fromPartition.mock.calls).toEqual([['persist:browser']])
     expect(native.clearStorageData.mock.calls).toEqual([[]])
     expect(native.clearCache.mock.calls).toEqual([[]])
+  })
+
+  it('reloads every open page on the browser session so it cannot write cleared data back', async () => {
+    const page = (session: unknown, destroyed = false) => ({ id: Math.random(), session, isDestroyed: () => destroyed, reload: vi.fn() })
+    const loginWindow = page(native)
+    const closedPopup = page(native, true)
+    const appWindow = page({})
+    native.getAllWebContents.mockReturnValue([loginWindow, closedPopup, appWindow])
+    const log = vi.spyOn(console, 'log').mockImplementation(() => {})
+    await clearData()
+    expect(loginWindow.reload).toHaveBeenCalledOnce()
+    expect(closedPopup.reload).not.toHaveBeenCalled()
+    expect(appWindow.reload).not.toHaveBeenCalled()
+    expect(native.clearCache.mock.invocationCallOrder[0]).toBeLessThan(native.getAllWebContents.mock.invocationCallOrder[0])
+    log.mockRestore()
   })
 
   it('shares in-flight cleanup and permits another completed request', async () => {

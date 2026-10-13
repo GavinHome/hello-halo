@@ -1,6 +1,6 @@
 /** Browser page state and policy, independent of the guest's DOM host. */
 
-import { BrowserWindow, session, type WebContents } from 'electron'
+import { BrowserWindow, session, webContents as electronWebContents, type Session, type WebContents } from 'electron'
 import { browserHostManager, captureBrowserPage } from './browser-host'
 import { isUrlAllowedByPolicy } from './browser-policy.service'
 import { resolveUserAgent } from './user-agent-resolver'
@@ -445,6 +445,23 @@ class BrowserPageManager {
     }
     view.webContents.reload()
     return true
+  }
+
+  /** Reloads every live page on `browserSession` (managed views, login windows, popups); returns how many. */
+  reloadSessionPages(browserSession: Session): number {
+    const managed = new Set<number>()
+    for (const [viewId, view] of this.views) {
+      if (view.webContents.isDestroyed()) continue
+      managed.add(view.webContents.id)
+      this.reload(viewId)
+    }
+    let reloaded = managed.size
+    for (const contents of electronWebContents.getAllWebContents()) {
+      if (managed.has(contents.id) || contents.isDestroyed() || contents.session !== browserSession) continue
+      contents.reload()
+      reloaded++
+    }
+    return reloaded
   }
 
   /**
@@ -1049,9 +1066,14 @@ let browserDataCleanup: Promise<void> | null = null
 export function clearBrowserData(): Promise<void> {
   if (browserDataCleanup) return browserDataCleanup
   browserDataCleanup = (async () => {
+    const startedAt = Date.now()
     const browserSession = session.fromPartition('persist:browser')
     await browserSession.clearStorageData()
     await browserSession.clearCache()
+    // A page left running keeps its session in memory and would write the
+    // cleared cookies/storage straight back, so every open page starts over.
+    const reloaded = browserViewManager.reloadSessionPages(browserSession)
+    console.log('[Browser] Shared browser data cleared', { reloadedPages: reloaded, ms: Date.now() - startedAt })
   })().finally(() => { browserDataCleanup = null })
   return browserDataCleanup
 }
