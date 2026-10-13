@@ -261,8 +261,8 @@ export function createGitChangesController(
     if (root === get().repoRoot) return
     memory.repoRoot = root
     memory.detail = null
-    // A named revision or a graph-picked commit belongs to the old repository; it cannot be resolved in the new one.
-    if (memory.scope.kind === 'revision' || memory.scope.kind === 'commit') memory.scope = { kind: 'uncommitted' }
+    // A commit picked in the old repository's graph is not one of the new repository's.
+    if (memory.scope.kind === 'commit') memory.scope = { kind: 'uncommitted' }
     set({ list: null, status: null, review: null, listError: null })
     await load()
   }
@@ -270,8 +270,9 @@ export function createGitChangesController(
   async function setScope(scope: StoredCompareScope): Promise<void> {
     memory.scope = scope
     memory.detail = null
-    // The old list belongs to the old scope: drop it rather than show it under the new label.
-    set({ list: null, listError: null })
+    // A commit picked in the graph opens the changes page at once: the list left there
+    // must not pass for the commit's while the commit's loads.
+    if (scope.kind === 'commit') set({ list: null, listError: null })
     await load()
   }
 
