@@ -147,6 +147,25 @@ export function describeReviewReading(task: CodeReviewTask, workDir: string): Re
         notes: [],
       }
     }
+    case 'commit': {
+      // The change list always resolves the base: the first parent, or the empty tree for a root commit.
+      if (!rev) throw new Error('A commit review needs the revision its change list compared it with')
+      const commit = shellArg(task.scope.revision)
+      return {
+        compare: `the commit ${inlineCode(inlineText(task.scope.revision, 200))} against ${rev}, its first parent (the empty tree for a first commit): only the changes that commit made.`,
+        commands: [
+          { command: `${git} show --no-patch --format=fuller ${commit}`, shows: 'the commit message, for intent' },
+          { command: `${git} diff --stat ${rev} ${commit}`, shows: 'the size of each change' },
+          { command: `${git} diff ${rev} ${commit} -- <path>`, shows: "one file's diff" },
+          { command: `${git} show ${commit}:<path>`, shows: 'a file as the commit left it' },
+        ],
+        notes: ['The files on disk may have changed since this commit and are not under review; read a file as the commit left it with `git show`, not from disk.'],
+      }
+    }
+    default: {
+      const _exhaustive: never = task.scope
+      throw new Error(`Unknown compare scope: ${(_exhaustive as GitCompareScope).kind}`)
+    }
   }
 }
 
