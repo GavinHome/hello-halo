@@ -176,7 +176,7 @@ export function GitGraphPage({ spaceId, repoRoot, active, selected, onCompare }:
     <div className="flex h-full min-h-0 flex-col">
       <div className="flex h-10 shrink-0 items-center gap-2 border-b border-border px-2">
         <BranchPicker spaceId={spaceId} repoRoot={repoRoot} branch={branch} onBranch={setBranch} />
-        <label className="flex h-7 w-[140px] min-w-[90px] items-center gap-1.5 rounded-md border border-border bg-background px-2 focus-within:border-primary">
+        <label className="flex h-7 w-[96px] min-w-[72px] items-center gap-1.5 rounded-md border border-border bg-background px-2 focus-within:border-primary sm:w-[140px] sm:min-w-[90px]">
           <User size={13} className="shrink-0 text-faint-foreground" aria-hidden />
           <input
             value={authorDraft}
@@ -198,7 +198,7 @@ export function GitGraphPage({ spaceId, repoRoot, active, selected, onCompare }:
             className="min-w-0 flex-1 bg-transparent text-[13px] outline-none placeholder:text-subtle-foreground"
           />
         </label>
-        <span className="ml-auto shrink-0 text-[12px] text-subtle-foreground">
+        <span className="ml-auto hidden shrink-0 text-[12px] text-subtle-foreground sm:inline">
           {loading ? t('Loading…') : t('{{count}} commits', { count: commits.length })}
         </span>
       </div>
@@ -241,12 +241,13 @@ export function GitGraphPage({ spaceId, repoRoot, active, selected, onCompare }:
                     <circle cx={laneX(row.lane)} cy={ROW_H / 2} r={3.5} fill={laneColor(row.lane)} />
                   </svg>
                   {commit.refs.length > 0 && (
-                    <span className="flex shrink-0 items-center gap-1">
-                      {commit.refs.slice(0, 3).map((ref) => (
+                    // Narrow rows show one ref, and refs that would push the row past its width shrink.
+                    <span className="flex min-w-0 items-center gap-1">
+                      {commit.refs.slice(0, 3).map((ref, i) => (
                         // A ref carries the color of the lane its commit sits in.
                         <span
                           key={ref}
-                          className="max-w-[140px] truncate rounded border px-1 font-mono text-[11px]"
+                          className={`max-w-[96px] truncate rounded border px-1 font-mono text-[11px] sm:max-w-[140px] ${i > 0 ? 'hidden sm:inline' : ''}`}
                           style={{ color: laneColor(row.lane), borderColor: `${laneColor(row.lane)}59`, backgroundColor: `${laneColor(row.lane)}14` }}
                           title={ref}
                         >
@@ -256,9 +257,9 @@ export function GitGraphPage({ spaceId, repoRoot, active, selected, onCompare }:
                     </span>
                   )}
                   <span className="min-w-0 flex-1 truncate text-foreground" title={commit.subject}>{commit.subject}</span>
-                  <span className="shrink-0 text-subtle-foreground">{commit.author}</span>
+                  <span className="hidden shrink-0 text-subtle-foreground sm:inline">{commit.author}</span>
                   <span className="shrink-0 text-subtle-foreground">{formatTime(Date.parse(commit.date), i18n.language, now)}</span>
-                  <span className="shrink-0 font-mono text-[11.5px] text-faint-foreground">{commit.shortOid}</span>
+                  <span className="hidden shrink-0 font-mono text-[11.5px] text-faint-foreground sm:inline">{commit.shortOid}</span>
                 </button>
               )
             })}
@@ -316,7 +317,7 @@ function BranchPicker({ spaceId, repoRoot, branch, onBranch }: {
         onClick={() => setOpen((v) => !v)}
         aria-haspopup="menu"
         aria-expanded={open}
-        className="inline-flex h-7 min-w-0 max-w-[200px] shrink-0 items-center gap-1.5 rounded-sm px-1.5 text-[13px] text-muted-foreground transition-colors hover:bg-secondary hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/60"
+        className="inline-flex h-7 min-w-0 max-w-[140px] shrink-0 items-center gap-1.5 rounded-sm px-1.5 text-[13px] text-muted-foreground transition-colors hover:bg-secondary hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/60 sm:max-w-[200px]"
       >
         <GitBranch size={14} className="shrink-0 text-faint-foreground" aria-hidden />
         <span className="truncate">{branch ?? t('All branches')}</span>
