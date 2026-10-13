@@ -14,7 +14,7 @@
  *   coordinator IS this space conversation. The agent then drives members
  *   directly with the same coordination tools team members use (team_send,
  *   team_post_task, the board, artifacts) — member replies and turn-end
- *   notices arrive back in this conversation as new turns. `collab_save`
+ *   notices reach this conversation after its current tool call. `collab_save`
  *   keeps the team for later.
  *
  * - Delegation: `team_run` hands a brief to a SAVED team's own lead and
@@ -58,7 +58,7 @@ export const TEAM_TOOLSET_GUIDE =
   'dispatch must be self-contained: the member sees none of this conversation, so include the ' +
   'goal, the inputs, the success criteria and the expected output form.\n' +
   '- Sending a message is not completion. Members work in the background and their replies and ' +
-  'turn-end notices arrive as new turns of yours; reconcile with `team_read_board` instead of ' +
+  'turn-end notices arrive after your current tool call, without ending your turn; reconcile with `team_read_board` instead of ' +
   'guessing, read deliverables with `team_read_artifact`, and check what a member actually did ' +
   'with `team_read_member`.\n' +
   '- Never claim work is done that a member has not reported done. When the goal is met, call ' +
@@ -145,7 +145,7 @@ export function createSpaceTeamMcpServer(scope: SpaceTeamMcpScope) {
     'Assemble a temporary team for the current piece of work and become its coordinator. ' +
       'Members are AI agents created for this collaboration only (they do not appear in the ' +
       'people directory). After this succeeds, dispatch work with team_send or team_post_task ' +
-      'in this same turn — replies arrive later as new turns of yours.\n\n' +
+      'in this same turn — replies arrive after your current tool call while you continue working.\n\n' +
       'Use only when the task genuinely benefits from parallel roles. One collaboration per ' +
       'conversation: finish the current one (team_complete) before starting another.',
     {
@@ -186,7 +186,7 @@ export function createSpaceTeamMcpServer(scope: SpaceTeamMcpScope) {
           `Collaboration "${team.name}" is ready (team id: ${team.id}). Members:\n${roster}\n\n` +
             `You are the coordinator ("${SPACE_COORDINATOR_MEMBER_NAME}"). Dispatch self-contained work with ` +
             'team_send or team_post_task now. Members reply asynchronously — their messages and turn-end ' +
-            'notices arrive as new turns. Tell the user the team is working and that they can watch it in ' +
+            'notices arrive after your current tool call. Continue your own work until finished. Tell the user the team is working and that they can watch it in ' +
             `the Team view.${folderNote}`
         )
       } catch (error) {

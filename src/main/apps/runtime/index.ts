@@ -64,6 +64,8 @@ import { dispatchInboundMessage, clearSupplementBuffersForInstance, releaseSuppl
 import { clearAllImPermissionContexts } from './im-permission-registry'
 import { clearAllImStreamHandles } from './im-stream-registry'
 import { destroyAllChatBrowserContexts } from './app-chat-browser'
+import { disposeAppChatDelivery } from './app-chat'
+import { shutdownPendingRelayDelivery } from './pending-relay-delivery'
 import { getConfig, getHaloDir } from '../../foundation/config.service'
 import { onMcpAppsChange } from '../manager/service'
 import { createHaloAppsMcpServer, createSpaceTeamMcpServer, TEAM_TOOLSET_GUIDE } from '../conversation-mcp'
@@ -143,7 +145,7 @@ export {
   renameChatSession,
 } from './app-chat'
 export type { AppChatRequest, NativeSessionResult } from './app-chat'
-export { injectIntoAppChatWhenLive } from './app-chat-live-turn'
+export { injectIntoAppChatWhenLive, getAppChatTurnIdentity } from './app-chat-live-turn'
 export { createDigitalHumanConversationSource } from './conversation-source'
 export { createRunConversationSource } from './run-conversation-source'
 
@@ -606,6 +608,8 @@ export async function shutdownAppRuntime(): Promise<void> {
   }
   stopReleasingSupplements?.()
   stopReleasingSupplements = null
+  disposeAppChatDelivery()
+  shutdownPendingRelayDelivery()
 
   imSessionRegistryInstance = null
   activityStoreRef = null

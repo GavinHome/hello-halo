@@ -17,6 +17,8 @@ import type { StoreApi } from 'zustand'
 import type { GoalInput } from '../../../shared/types/goal'
 import type { ApiRetryEvent } from '../../../shared/types/api-retry'
 import type { ContentReference } from '../../../shared/types/content-reference'
+import type { AgentInputArrivedEvent, AgentInputStoppedEvent } from '../../../shared/types/agent-input'
+import type { LiveInput } from '../../types/live-input'
 
 // Conversation cache bounds (backend/cache.ts): entries, and estimated heap
 // (one conversation can hold megabytes of inline images or v1 thoughts).
@@ -76,6 +78,8 @@ export interface SessionState {
   pendingQuestion: PendingQuestion | null
   // Messages queued for mid-turn injection (shown below StreamingBubble during generation)
   queuedMessages: string[]
+  /** Accepted input placement within this turn; canonical records remain in the transcript. */
+  liveInputs?: LiveInput[]
   // Monotonically increasing turn counter — used to detect stale handleAgentComplete callbacks.
   // Incremented by sendMessage() and handleAgentTurnStart(); checked by handleAgentComplete().
   turnId: number
@@ -269,6 +273,8 @@ export interface ChatState {
   continueAfterInterrupt: (conversationId: string) => void
 
   // Event handlers (called from App component) - with session IDs
+  handleAgentInputArrived: (data: AgentInputArrivedEvent) => void
+  handleAgentInputStopped: (data: AgentInputStoppedEvent) => void
   handleAgentMessage: (data: AgentEventBase & { content: string; isComplete: boolean }) => void
   handleAgentToolCall: (data: AgentEventBase & ToolCall) => void
   handleAgentToolResult: (data: AgentEventBase & { toolId: string; result: string; isError: boolean }) => void

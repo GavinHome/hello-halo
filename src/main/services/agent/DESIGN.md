@@ -169,6 +169,13 @@ not the per-turn abort: normal interruption still drains the result and persists
 the partial turn. A retired consumer never clears a successor's awaiting-init/rebuild
 state, persists its result, or emits a late completion into that conversation.
 
+**A lease exposes native liveness and retirement.** `isUsable` checks both the
+acquired instance and its transport; `onRetired` runs only after that exact
+instance has been fully removed. A runtime can then retire a stale preparation
+and release its own mailbox reservation without waiting for an outstanding
+configuration or memory await. It unsubscribes when its request finishes; late
+cleanup cannot release a successor.
+
 **Messages before acknowledgement have instance-owned failure settlement.** Chat acquisitions register `onFailureBeforeInit` before handoff. Its pending record survives successful send acceptance until `system:init`, and is removed when unused preparation is released. Unexpected process exit, a dead transport discovered on acquisition/sweep, or a pre-init consumer failure settles those callers synchronously before replacement. Each entry persists the failed message and emits error/completion once; subsequent stale preparation or send rejection remains suppressed. Deliberate close and idle retirement do not invent failed requests. Background task IDs also block every safe-rebuild gate through the final completion turn; the existing bounded idle-timeout policy is unchanged.
 
 **Adding a chat entry point = writing a sink.** The consumer must never learn
@@ -186,24 +193,132 @@ Do not bypass `subagent-handler` for nested invocations — it owns the lifecycl
 
 ## 5) External Injection (Mid-Turn Delivery)
 
-Two entries push text into a session's RUNNING turn from outside the normal
-user-input path. Both ride the same engine primitive — the subprocess absorbs
-the text at the turn's next tool-round boundary and still ends with a single
-result; no second turn starts. They differ in who owns the record of the
-message:
+`live-turn.ts` is the persistence-free entry for all surfaces. Callers decide
+which permission identity may join a turn before calling it. A rebuild requested
+while a turn runs (configuration, toolset or MCP change, MCP recovery) is deferred
+to the turn end and never refuses live input: the running turn keeps what it
+started with, and the next turn starts on the rebuilt session. A send that needs
+a rebuilt session takes the existing one or the existing explicit busy error; it
+never parks waiting for background work. `inject-message.ts` wraps
+it for a space user's concurrent message, preserving references and the existing
+injection source. A refusal leaves no persisted duplicate: the UI's normal-send
+fallback starts the next turn.
 
-- `inject-message.ts` (`injectMessage`) — persists to the conversation store
-  (source: 'injection'), then sends. Throws when no live session exists. Backs
-  the user's "type while generating"; called from `ipc/agent.ts`.
-- `live-turn.ts` (`hasLiveTurn`, `sendIntoLiveTurn`) — the turn-in-flight probe
-  plus the same send with NO persistence, for a caller that owns its own record
-  (an app chat's JSONL transcript). Returns false instead of throwing whenever
-  nothing reached the engine, so a caller holding a fallback queue can take the
-  message back. Consumed by `apps/runtime/app-chat-live-turn.ts` for the team
-  runtime's mid-turn delivery.
+Every stop states its reason (`stopGeneration(id, { reason })`). A person's stop
+(`'user'`: the Stop button, a review stop, and whatever the surfaces classify so)
+means stop everything: `onUserStop` fires first so delivery gates can hold what
+they still buffer, then every live input the engine accepted but has not read is
+withdrawn and never runs, and only then is the turn interrupted (or the process
+closed); `onUserStopSettled` follows, because a withdrawn continuation that had
+not started produces no turn end. The sender's `onWithdrawn` decides what becomes of its input; a person's
+own space-chat addition is marked `inputOutcome: 'stopped'` and announced through
+detail-only `agent:input-stopped`. A system stop (`'internal'`) keeps the older
+behavior: whatever the turn had not read is handled right after, as a turn of its
+own. dsh has no cancel, so any stop closes its session.
 
-Callers wanting the ordinary "wait for the current turn, then start a new one"
-behavior do not inject — they go through the normal send path and queue.
+`sendIntoLiveTurn(conversationId, text, images, { onWithdrawn })` transfers ownership synchronously.
+True means the engine accepted the input for the next model step after the current
+tool returns, or for an immediate continuation when the current turn is already
+ending. False means nothing was enqueued, and the caller retains its fallback.
+Every engine implements the synchronous SDK `sendIntoLiveTurn(message, options)`
+primitive and `withdrawUnreadInput()`, which takes back the live input accepted
+before the call that the engine has not read; a promise from ordinary `send` is
+never treated as proof of live acceptance.
+Accepted records are announced through detail-only `agent:input-arrived` batches.
+This carries the original transcript record, never the model's framed input;
+source ownership stays with the space store or app sink. The UI positions each
+arrival within the active work without a per-message transcript reload.
+
+The SDK's `hasPendingInput()` reports accepted input awaiting consumption or an
+immediate continuation. It remains true across a final-result / next-init gap,
+and becomes false before the result that finishes that input, or at once when a
+person's stop withdraws it (no further result follows). Session reuse,
+cleanup, rebuilds, and surface completion observers honor this signal.
+`hasPendingSessionInput(id)` exposes it for manager-owned sessions. Headless runs
+own their SDK session directly and keep reading `stream()` until its pending
+input is consumed. `agent:turn-start` follows the consumer's active-state update,
+so delivery mailboxes can flush messages that arrived during session startup.
+
+- **Claude Code:** the SDK patch provides synchronous enqueue and adds UUIDs to
+  live inputs. `--replay-user-messages` acknowledges consumption; matching native
+  replay frames clear pending input, including messages consumed in a continuation.
+  The CLI runs some input as a turn of its own without acknowledging it (a local
+  slash command, text carrying a tag CC reserves): input still pending at the
+  previous result stops counting at the next one. Withdrawal drops input still in
+  the SDK's own queue (never written), and cancels written input in the CLI's
+  command queue (`cancel_async_message`; `cancelled:false` = the CLI dequeued it,
+  i.e. read). User messages reach stdin through the SDK's input stream while
+  control requests are written directly, so the cancel waits one macrotask, by
+  which time everything the stream dequeued is written and the cancel cannot
+  overtake its message. A cancel the CLI leaves unanswered for 2 s is reported
+  like a failed one ("may still run") so the stop goes on to interrupt or close;
+  if the CLI confirms it later, or its process is gone by then, the input is
+  still withdrawn and its `onWithdrawn` runs late. The CLI echoes every control
+  response the SDK writes; echoes answering none of the SDK's own requests are
+  skipped before parsing. It also echoes every user input: an echo the stream
+  drops anyway (no `<local-command-stdout>`, no `tool_result`) is recognized from
+  its line shape (the CLI's key order and `JSON.stringify` output) and replaced
+  by a minimal stand-in carrying its uuid, in the same stream position, so an
+  input's size is not parsed twice. Any other shape is parsed as before.
+  `tests/unit/services/agent/cc-live-input-e2e.test.ts` (`CC_E2E=1`) checks all
+  of this against the bundled CLI; rerun it when bumping either package.
+- **Halo SDK:** accepted messages remain ordered in the session inbox. The query
+  loop drains one combined user message before each model step and checks again
+  before its final result. `UserPromptSubmit` hooks execute in input order when
+  that batch is consumed. Pending messages and image blocks survive a late result.
+  Withdrawal removes live entries the loop has not drained.
+- **Codex:** one serialized dispatcher sends `turn/steer` with `expectedTurnId`
+  while a turn is active, never resets that turn's normalizer, and retains rejected
+  steering for one combined `turn/start` after completion. Its protocol subset is
+  checked against the bundled binary's generated schema; turn ids come from
+  `turn.id`, including the start response. Steering the server accepted is read;
+  withdrawal waits out a request in flight and removes live input still queued.
+- **dsh:** Halo's runtime JSON-RPC plugin adds `session/steer` using the public
+  agent registry and `agent.steer`. The runtime rechecks steering before committing
+  a turn end and wakes an idle agent itself. The adapter handles receipts racing
+  idle and combines rejected steering into its next prompt. The extension remains
+  entirely inside the experimental engine boundary. Input is read once its inbox
+  splice receipt arrives; the runtime cannot give accepted input back, so
+  withdrawing it ends the runtime, as its stop does anyway.
+
+### 5.1) Delivery parity does not expand native permissions
+
+This change preserves the existing capability boundary. Claude Code and Halo SDK
+advertise `features.permissionRules: true`; Codex and dsh advertise false. Those
+flags and the app-chat refusal when `applyCapabilityPolicy(...).enforced` is true
+already existed before the live-delivery change. A native sandbox or a reduced
+MCP list is not a substitute for the tool/file/skill rules the caller relies on.
+
+| Admitted work | Claude Code | Halo SDK | Codex | dsh |
+|---|---|---|---|---|
+| Owner/local unrestricted work, including compatible live additions | Supported | Supported | Supported | Supported |
+| IM guest work (`strict` policy) | Supported with policy enforcement | Supported with policy enforcement | Refused before native acquisition/send | Refused before native acquisition/send |
+| Borrowed external/remote team work (`strict` policy) | Supported with policy enforcement | Supported with policy enforcement | Refused before native acquisition/send | Refused before native acquisition/send |
+| Local teammate work with an explicitly restrictive delegated policy | Supported with policy enforcement | Supported with policy enforcement | Refused before native acquisition/send | Refused before native acquisition/send |
+
+`strict` always requires enforcement, even if individual grants look broad.
+Local owner conversation and locally initiated teammate work with no restrictions
+retain their existing unrestricted path. A guest or external input is never
+reclassified as owner merely because its selected engine cannot enforce policy.
+Space coordinators accept only the owner-authorized local collaboration path.
+
+Live delivery may join only an already admitted compatible execution. On Codex
+and dsh there can therefore be no legitimately admitted restricted guest/external
+turn to join. Input isolated behind an owner turn is tried as its own batch after
+that turn, then receives the same capability refusal; it is not silently run with
+owner permissions. The low-level native live-input primitive remains permission
+agnostic: the registered source/mailbox must establish sender authority first.
+
+A capability refusal is final for that admitted batch. The app-chat delivery
+wrapper rejects its waiting callers and releases its generation-owned reservation;
+it does not throw the asynchronous run failure back into the generic inbox retry
+path. Team orchestration converts that rejection to an error completion and
+releases the member slot. These failure settlements are distinct from retaining a
+message after a native live handoff refuses ownership.
+
+Explicit cancellation and process failure still settle through the existing
+session error/stop lifecycle. Pending input is never mistaken for an idle session
+that may be safely rebuilt.
 
 ## 6) Integration Points
 

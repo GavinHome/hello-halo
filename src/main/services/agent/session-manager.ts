@@ -12,7 +12,7 @@ import path from 'path'
 import os from 'os'
 import { existsSync, copyFileSync, mkdirSync } from 'fs'
 import { app } from 'electron'
-import { createSession } from './resolved-sdk'
+import { createSession, getActiveEngine } from './resolved-sdk'
 import { onApiConfigChange, getCredentialsGeneration, type ApiConfigChange } from '../../foundation/config.service'
 import { getConversation } from '../conversation.service'
 import type {
@@ -211,12 +211,17 @@ interface ManagedSessionLease extends V2SessionLease {
 
 const sessionLeases = new Map<string, Set<V2SessionLease>>()
 const pendingSessionTurns = new WeakMap<V2SDKSession, Set<ManagedSessionLease>>()
+const sessionRetirementListeners = new WeakMap<V2SDKSession, Set<() => void>>()
 
 /** Holds the acquired instance through preparation; dispatch transfers protection to the consumer. */
 export interface V2SessionLease {
   readonly session: V2SDKSession
   /** Instance ownership, independent of whether dispatch released its reservation. */
   readonly isCurrent: boolean
+  /** Current instance whose native transport can still accept input. */
+  readonly isUsable: boolean
+  /** Runs after this exact instance is removed; unsubscribe when the caller finishes. */
+  onRetired(listener: () => void): () => void
   /** Reports a rejection synchronously before cleanup, only while this instance is current. */
   send(message: Parameters<V2SDKSession['send']>[0], onFailure?: (error: unknown) => void): Promise<void>
   release(): void
@@ -242,6 +247,21 @@ function leaseSession(
     session,
     get isCurrent() {
       return !failed && v2Sessions.get(conversationId)?.session === session
+    },
+    get isUsable() {
+      return !failed && v2Sessions.get(conversationId)?.session === session && isSessionTransportReady(session)
+    },
+    onRetired(listener) {
+      if (v2Sessions.get(conversationId)?.session !== session) {
+        try { listener() } catch (error) {
+          console.error(`[Agent][${conversationId}] Late retired-session listener failed:`, error)
+        }
+        return () => {}
+      }
+      const listeners = sessionRetirementListeners.get(session) ?? new Set<() => void>()
+      listeners.add(listener)
+      sessionRetirementListeners.set(session, listeners)
+      return () => { listeners.delete(listener) }
     },
     get awaitingInit() { return dispatched && !acknowledged },
     acknowledge() {
@@ -300,7 +320,8 @@ function leaseSession(
     close() {
       if (sessionLeases.get(conversationId) === holders && holders.has(lease) &&
         v2Sessions.get(conversationId)?.session === session) {
-        closeV2SessionForRebuild(conversationId, 'leased session cleanup')
+        closeV2SessionForRebuild(conversationId, 'leased session cleanup',
+          isSessionTransportReady(session) ? undefined : new Error('Chat session ended before the message was processed.'))
       }
     },
   }
@@ -348,7 +369,16 @@ export function markTurnInitReceived(conversationId: string): void {
  * results.
  */
 export function isSessionBusy(conversationId: string): boolean {
-  if (sessionLeases.has(conversationId) || activeSessions.has(conversationId)) return true
+  return turnsAwaitingInit.has(conversationId) || isSessionWorking(conversationId)
+}
+
+/**
+ * Busy without counting a dispatched turn that has not inited yet. The idle
+ * sweep uses this so a turn that never inits is still recycled after the idle
+ * timeout (see turnsAwaitingInit) instead of pinning its process forever.
+ */
+function isSessionWorking(conversationId: string): boolean {
+  if (sessionLeases.has(conversationId) || activeSessions.has(conversationId) || hasPendingSessionInput(conversationId)) return true
   const consumer = consumers.get(conversationId)
   if (!consumer?.isRunning) return false
   // Actively processing a turn — definitely busy.
@@ -417,6 +447,13 @@ function cleanupSession(conversationId: string, reason: string, failure?: Error)
   // conversation record is preserved and rehydrated on the next session, so
   // this is safe on rebuild.
   dropConversationState(conversationId)
+  const retired = sessionRetirementListeners.get(info.session)
+  sessionRetirementListeners.delete(info.session)
+  for (const listener of [...(retired ?? [])]) {
+    try { listener() } catch (error) {
+      console.error(`[Agent][${conversationId}] Retired-session listener failed:`, error)
+    }
+  }
 }
 
 // ============================================
@@ -573,7 +610,7 @@ function startSessionCleanup(): void {
       // Check 2: Clean up idle sessions (not used for 30 minutes)
       // Skip sessions with an in-flight request — they are not idle.
       // Covers both legacy activeSessions and consumer-based conversations.
-      if (isSessionBusy(convId)) {
+      if (isSessionWorking(convId)) {
         info.lastUsedAt = now // keep the clock fresh so timeout resets after task ends
         continue
       }
@@ -817,7 +854,7 @@ function closeV2SessionForRebuild(conversationId: string, reason = 'rebuild requ
 function hasConsumablePendingRebuild(conversationId: string): boolean {
   if (!pendingConsumerRebuilds.has(conversationId)) return false
   if (sessionLeases.has(conversationId) || activeSessions.has(conversationId)) return false
-  if (turnsAwaitingInit.has(conversationId)) return false
+  if (turnsAwaitingInit.has(conversationId) || hasPendingSessionInput(conversationId)) return false
   const consumer = consumers.get(conversationId)
   if (consumer?.isRunning && consumer.getActiveSessionState()) return false
   if (consumer?.isRunning && (consumer.hasRunningTasks() || hasActiveTeamTasks(consumer.getTeamLifecycleThoughts()))) return false
@@ -1097,6 +1134,11 @@ export class SessionOptionsStaleError extends Error {
   }
 }
 
+/** True while an engine owns accepted input awaiting consumption or continuation. */
+export function hasPendingSessionInput(conversationId: string): boolean {
+  return v2Sessions.get(conversationId)?.session.hasPendingInput?.() === true
+}
+
 /**
  * The conditions under which a needed rebuild is deferred instead of performed,
  * one per guard in getOrCreateV2SessionInner. requireFreshInputs refuses changed
@@ -1110,7 +1152,7 @@ function assessRebuildDeferral(
 ): { leased: boolean; awaitingInit: boolean; activeTurn: boolean; idleWithTeamTasks: boolean; backgroundTasks: boolean; any: boolean } {
   const leased = sessionLeases.has(conversationId)
   const awaitingInit = turnsAwaitingInit.has(conversationId)
-  const activeTurn = activeSessions.has(conversationId) || Boolean(consumer?.isRunning && consumer.getActiveSessionState() !== null)
+  const activeTurn = activeSessions.has(conversationId) || hasPendingSessionInput(conversationId) || Boolean(consumer?.isRunning && consumer.getActiveSessionState() !== null)
   const idleWithTeamTasks = Boolean(
     consumer?.isRunning &&
       !consumer.getActiveSessionState() &&
@@ -1308,7 +1350,7 @@ async function getOrCreateV2SessionInner(
 
   // Handle session resumption with migration support
   let effectiveSessionId = sessionId
-  if (sessionId && workDir) {
+  if (sessionId && workDir && getActiveEngine() !== 'codex' && getActiveEngine() !== 'dsh') {
     // Attempt to migrate session file from old config directory if needed
     const sessionExists = migrateSessionIfNeeded(workDir, sessionId)
     if (sessionExists) {
@@ -1584,7 +1626,7 @@ export function updateConsumerDisplayModel(
  */
 export function consumePendingRebuild(conversationId: string): boolean {
   if (sessionLeases.has(conversationId) || turnsAwaitingInit.has(conversationId) ||
-    inFlightSessionCreations.has(conversationId)) return false
+    inFlightSessionCreations.has(conversationId) || hasPendingSessionInput(conversationId)) return false
   const consumer = consumers.get(conversationId)
   if (consumer?.isRunning && (consumer.hasRunningTasks() || hasActiveTeamTasks(consumer.getTeamLifecycleThoughts()))) return false
   if (pendingConsumerRebuilds.has(conversationId)) {

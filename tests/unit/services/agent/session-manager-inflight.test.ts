@@ -791,3 +791,24 @@ describe('independent account session lifecycle', () => {
     expect(first.close).not.toHaveBeenCalled()
   })
 })
+
+
+describe('lease retirement', () => {
+  it('exposes native liveness and retires its listeners after removing the exact instance', async () => {
+    let ready = true
+    const original = fakeSession('retiring')
+    original.query.transport.isReady = () => ready
+    createSession.mockResolvedValueOnce(original)
+    const lease = await acquireV2Session('space', 'conv-retiring', accountOptions('account-a'))
+    const retired = vi.fn(() => expect(v2Sessions.has('conv-retiring')).toBe(false))
+    lease.onRetired(retired)
+    expect(lease.isUsable).toBe(true)
+    ready = false
+    expect(lease.isCurrent).toBe(true)
+    expect(lease.isUsable).toBe(false)
+    lease.close()
+    expect(retired).toHaveBeenCalledOnce()
+    closeAllV2Sessions()
+    expect(retired).toHaveBeenCalledOnce()
+  })
+})

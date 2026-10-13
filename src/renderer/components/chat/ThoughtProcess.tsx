@@ -19,6 +19,8 @@ import { TodoCard } from '../tool/TodoCard'
 import { describeThoughtActivity, parseTodoInput } from '../../utils/thought-activity'
 import { ToolResultViewer } from './tool-result'
 import { SubAgentTimeline } from './SubAgentTimeline'
+import { ArrivalCard, arrivalIcon } from './ArrivalCard'
+import { isArrivalThought, workSeconds } from './transcript'
 import { ErrorContent } from './ErrorContent'
 import {
   getThoughtIcon,
@@ -44,10 +46,7 @@ interface ThoughtProcessProps {
 // time: a duration read off `Date.now()` keeps growing every time the panel
 // re-renders, so a long-finished turn silently inflates on screen.
 function elapsedSeconds(thoughts: Thought[]): string {
-  if (thoughts.length === 0) return '0.0'
-  const first = new Date(thoughts[0].timestamp).getTime()
-  const last = new Date(thoughts[thoughts.length - 1].timestamp).getTime()
-  return Math.max(0, (last - first) / 1000).toFixed(1)
+  return Math.max(0, workSeconds(thoughts)).toFixed(1)
 }
 
 // Individual thought item (for non-special tools)
@@ -58,6 +57,25 @@ const ThoughtItem = memo(function ThoughtItem({ thought, isLast, allThoughts, is
   const { t } = useTranslation()
   const color = getThoughtColor(thought.type, thought.isError)
   const Icon = getThoughtIcon(thought.type, thought.toolName)
+
+  if (isArrivalThought(thought)) {
+    const ArrivalIcon = arrivalIcon(thought.arrival)
+    return (
+      <div className="flex gap-3 group animate-fade-in">
+        <div className="flex flex-col items-center">
+          <div className="w-7 h-7 rounded-full flex items-center justify-center bg-primary/10 text-primary">
+            <ArrivalIcon size={14} />
+          </div>
+          {!isLast && <div className="w-0.5 flex-1 bg-border/30 mt-1" />}
+        </div>
+        <div className="flex-1 pb-4 min-w-0">
+          <div className="rounded-lg border border-border-soft bg-muted/15 overflow-hidden">
+            <ArrivalCard message={thought.arrival} inProcess timeline />
+          </div>
+        </div>
+      </div>
+    )
+  }
 
   // Determine content and display mode based on thought type and streaming state
   const isStreaming = thought.isStreaming ?? false

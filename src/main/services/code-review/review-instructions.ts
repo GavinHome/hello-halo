@@ -348,7 +348,7 @@ ${roster}
 3. When all three have reported, have them challenge each other: send each member the other two members' findings and ask which they dispute and why, with evidence. Repeat until the findings are agreed or a disagreement is stated plainly.
 4. Check every finding in the code yourself before it enters the report; drop what does not hold up, state remaining disagreements, and write evidence paths relative to your own working directory.
 5. Call \`team_complete\`, then reply with the report.
-Member replies arrive as new turns of yours: after dispatching, end your turn instead of waiting, and keep your todo list current across turns.
+Member reports and other messages arrive after your current tool call while you continue working. You do not need to poll the board or end your turn to receive them. Finish your own work before ending your turn, and keep your todo list current.
 If the team tools are missing or \`collab_start\` fails, review alone, and begin the report by saying the team review could not run and a single reviewer did it instead.`
 }
 

@@ -225,6 +225,8 @@ export interface HaloAPI extends BrowserHostBridge {
 
   // Event listeners
   onAgentMessage: (callback: (data: unknown) => void) => () => void
+  onAgentInputArrived: (callback: (data: unknown) => void) => () => void
+  onAgentInputStopped: (callback: (data: unknown) => void) => () => void
   onAgentToolCall: (callback: (data: unknown) => void) => () => void
   onAgentToolResult: (callback: (data: unknown) => void) => () => void
   onAgentError: (callback: (data: unknown) => void) => () => void
@@ -884,6 +886,8 @@ const api: HaloAPI = {
 
   // Event listeners
   onAgentMessage: (callback) => createEventListener('agent:message', callback),
+  onAgentInputArrived: (callback) => createEventListener('agent:input-arrived', callback),
+  onAgentInputStopped: (callback) => createEventListener('agent:input-stopped', callback),
   onAgentToolCall: (callback) => createEventListener('agent:tool-call', callback),
   onAgentToolResult: (callback) => createEventListener('agent:tool-result', callback),
   onAgentError: (callback) => createEventListener('agent:error', callback),

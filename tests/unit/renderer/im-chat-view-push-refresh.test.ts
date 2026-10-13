@@ -19,6 +19,8 @@ const env = vi.hoisted(() => ({
   api: {
     appImChatMessages: vi.fn(async () => ({ success: true, data: [{ id: 'session-msg-1', role: 'assistant', content: 'Hi', timestamp: '' }] })),
     onImSessionUpdated: vi.fn(),
+    onAgentInputArrived: vi.fn(() => () => {}),
+    onAgentInputStopped: vi.fn(() => () => {}),
     getSessionState: vi.fn(),
     appImChatStop: vi.fn(),
     appImChatClear: vi.fn(),
@@ -91,6 +93,7 @@ const chatState = {
 vi.mock('../../../src/renderer/api', () => ({ api: env.api }))
 vi.mock('../../../src/renderer/stores/chat.store', () => ({
   useChatStore: Object.assign((select: (state: typeof chatState) => unknown) => select(chatState), { getState: () => chatState }),
+  reconcileTranscript: (_cached: unknown[], fresh: unknown[]) => ({ messages: fresh, keptOlder: false }),
 }))
 vi.mock('../../../src/renderer/stores/team.store', () => ({ useTeamStore: { getState: () => ({}) } }))
 vi.mock('../../../src/renderer/stores/apps-page.store', () => ({ useAppsPageStore: { getState: () => ({}) } }))

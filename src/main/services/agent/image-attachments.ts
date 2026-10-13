@@ -149,3 +149,35 @@ export function prepareNonVisionImageFallback(params: {
     filePaths: entries.map(e => e.path),
   }
 }
+
+/** Desktop input deltas use file URLs; remote clients retain the original portable payload. */
+export function withInputImageFiles(
+  spaceId: string,
+  messages: import('../../../shared/types/transcript').TranscriptMessage[],
+): import('../../../shared/types/transcript').TranscriptMessage[] {
+  if (!messages.some(message => message.images?.some(image => image.data))) return messages
+  const space = getSpace(spaceId)
+  if (!space) {
+    console.warn(`[Agent] Live input images kept inline: space=${spaceId} is unavailable`)
+    return messages
+  }
+  const dir = space.isTemp ? join(space.path, 'attachments') : join(space.path, '.halo', 'attachments')
+  return messages.map(message => {
+    if (!message.images?.some(image => image.data)) return message
+    const images = message.images.map(image => {
+      if (!image.data) return image
+      try {
+        const filePath = join(dir, attachmentFileName(image))
+        if (!existsSync(filePath)) {
+          mkdirSync(dir, { recursive: true })
+          writeFileSync(filePath, Buffer.from(image.data, 'base64'))
+        }
+        return { ...image, data: '', url: `halo-file://${filePath.replace(/%/g, '%25').replace(/#/g, '%23').replace(/\?/g, '%3F')}` }
+      } catch (error) {
+        console.error(`[Agent] Live input image could not be materialized: space=${spaceId} image=${image.id}`, error)
+        return image
+      }
+    })
+    return { ...message, images }
+  })
+}
