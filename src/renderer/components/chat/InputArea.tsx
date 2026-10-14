@@ -46,6 +46,7 @@ import type { ImageAttachment } from '../../types'
 import type { FileQueryItem } from '../../../shared/types/artifact'
 import { normalizePathLike } from '../../../shared/file-path-match'
 import { useFileMentionQuery } from '../../hooks/useFileMentionQuery'
+import { useAutoResize } from '../../hooks/useAutoResize'
 import { getCurrentSource, resolveModelVision } from '../../types'
 import { useTranslation } from '../../i18n'
 import { SlashCommandMenu, filterSlashCommands } from './SlashCommandMenu'
@@ -246,6 +247,8 @@ let composerInstanceSeq = 0
 const MAX_IMAGE_SIZE = 20 * 1024 * 1024  // 20MB max per image (before compression)
 const MAX_IMAGES = 10  // Max images per message
 
+const COMPOSER_MAX_HEIGHT = 180
+
 function base64ToFile(data: string, name: string, mediaType: string): File {
   const binary = atob(data)
   const bytes = new Uint8Array(binary.length)
@@ -436,8 +439,6 @@ export const InputArea = memo(function InputArea({ onSend, onInject, onStop, isG
       if (!ta) return
       ta.focus()
       ta.setSelectionRange(ta.value.length, ta.value.length)
-      ta.style.height = 'auto'
-      ta.style.height = `${Math.min(ta.scrollHeight, 180)}px`
     })
   }, [pendingComposerInput, currentSpaceId])
 
@@ -793,14 +794,8 @@ export const InputArea = memo(function InputArea({ onSend, onInject, onStop, isG
     })
   }
 
-  // Auto-resize textarea
-  useEffect(() => {
-    const textarea = textareaRef.current
-    if (textarea) {
-      textarea.style.height = 'auto'
-      textarea.style.height = `${Math.min(textarea.scrollHeight, 180)}px`
-    }
-  }, [displayContent])
+  // The only writer of the box's height: every change of its text lands here.
+  useAutoResize(textareaRef, displayContent, COMPOSER_MAX_HEIGHT)
 
   // Focus on mount
   useEffect(() => {
@@ -1007,11 +1002,9 @@ export const InputArea = memo(function InputArea({ onSend, onInject, onStop, isG
     setContent(newContent)
     setSlashMenuOpen(false)
     setSlashSelectedIndex(0)
-    // Resize textarea to fit the new (short) content and restore focus
+    // Restore focus
     requestAnimationFrame(() => {
       if (textareaRef.current) {
-        textareaRef.current.style.height = 'auto'
-        textareaRef.current.style.height = `${Math.min(textareaRef.current.scrollHeight, 180)}px`
         textareaRef.current.focus()
         // Place cursor at the end
         const len = textareaRef.current.value.length
@@ -1081,7 +1074,6 @@ export const InputArea = memo(function InputArea({ onSend, onInject, onStop, isG
         if (draftKey) useChatStore.getState().clearComposerDraft(draftKey)
         handleMentionClose()
         handleSlashClose()
-        if (textareaRef.current) textareaRef.current.style.height = 'auto'
       }
       return
     }
@@ -1111,10 +1103,6 @@ export const InputArea = memo(function InputArea({ onSend, onInject, onStop, isG
         if (!keepImages) setImages([])
         handleMentionClose()
         handleSlashClose()
-        // Reset height
-        if (textareaRef.current) {
-          textareaRef.current.style.height = 'auto'
-        }
       }
     }
   }
@@ -1593,7 +1581,7 @@ export const InputArea = memo(function InputArea({ onSend, onInject, onStop, isG
                 focus:outline-none text-foreground placeholder:text-subtle-foreground
                 disabled:cursor-not-allowed min-h-[26px]
                 ${isOnboardingSendStep ? 'cursor-default' : ''}`}
-              style={{ maxHeight: '180px' }}
+              style={{ maxHeight: COMPOSER_MAX_HEIGHT }}
             />
           </div>
 
