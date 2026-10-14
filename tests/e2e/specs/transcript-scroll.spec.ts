@@ -16,7 +16,7 @@ import {
 } from '../fixtures/electron'
 import { seedLongConversation } from '../fixtures/seed-conversation'
 import { seedDigitalHumanChat } from '../fixtures/seed-digital-human-chat'
-import { navigateToChat } from '../fixtures/helpers'
+import { navigateToChat, openDigitalHumanConversation } from '../fixtures/helpers'
 
 const MESSAGE_COUNT = 300
 
@@ -305,7 +305,7 @@ test('transcript scrolling — digital-human conversation, paged', async () => {
     await navigateToChat(window)
     const cdp = await window.context().newCDPSession(window)
     await cdp.send('Emulation.setDeviceMetricsOverride', { width: 1280, height: 800, deviceScaleFactor: 1, mobile: false })
-    await window.getByText(seeded.turns[TURNS - 1].reply.slice(0, 24)).first().click()
+    await openDigitalHumanConversation(window, seeded.name, seeded.turns[TURNS - 1].reply.slice(0, 24))
 
     const scroller = window.locator('[data-testid="transcript-scroller"]')
     await scroller.waitFor({ state: 'visible', timeout: 15000 })
@@ -354,7 +354,7 @@ test('transcript scrolling — digital-human conversation, paged', async () => {
     // A search hit far back is loaded and centered, from a reloaded page that
     // has only the newest page again.
     await window.reload()
-    await window.getByText(seeded.turns[TURNS - 1].reply.slice(0, 24)).first().click()
+    await openDigitalHumanConversation(window, seeded.name, seeded.turns[TURNS - 1].reply.slice(0, 24))
     await scroller.waitFor({ state: 'visible', timeout: 15000 })
     await settle(window, 1200)
     expect(await mountedRows(scroller)).toBeLessThanOrEqual(50)
