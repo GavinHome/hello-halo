@@ -29,7 +29,6 @@ import { LiveSessionsHeader } from './LiveSessionsHeader'
 import { ComposerMenu, type ComposerMenuSection } from './composer-menu/ComposerMenu'
 import { useComposerToolsets } from './composer-menu/useComposerToolsets'
 import { sortToolsets, toolsetDescription, toolsetIcon, toolsetLabel } from './composer-menu/toolset-display'
-import type { ToolsetStatus } from '../../stores/toolsets.store'
 import { canAttachPath, type AttachedPath, type PickedLocalEntry } from '../../../shared/attached-paths'
 import { MAX_UPLOAD_FILE_SIZE } from '../../../shared/constants/artifact-upload'
 import type { ContentReference } from '../../../shared/types/content-reference'
@@ -1593,7 +1592,6 @@ export const InputArea = memo(function InputArea({ onSend, onInject, onStop, isG
             showAttachMenu={showAttachMenu}
             onAttachMenuToggle={handleAttachMenuToggle}
             plusTriggerRef={plusTriggerRef}
-            extraToolsets={toolsets.extraEnabled}
             canSend={canSend}
             onSend={handleSend}
             onStop={onStop}
@@ -1613,7 +1611,7 @@ export const InputArea = memo(function InputArea({ onSend, onInject, onStop, isG
 /**
  * Input Toolbar - Bottom action bar
  *
- * Layout: [recipient] [+] [extra capabilities] [thinking] [knowledge] ──── [send]
+ * Layout: [recipient] [+] [thinking] [knowledge] ──── [send]
  */
 interface InputToolbarProps {
   toolbarSlot?: React.ReactNode
@@ -1625,8 +1623,6 @@ interface InputToolbarProps {
   showAttachMenu: boolean
   onAttachMenuToggle: () => void
   plusTriggerRef: React.RefObject<HTMLButtonElement>
-  /** Capabilities on beyond the defaults — the only toolset state shown at rest. */
-  extraToolsets: ToolsetStatus[]
   canSend: boolean
   onSend: () => void
   onStop?: () => void
@@ -1646,7 +1642,6 @@ function InputToolbar({
   showAttachMenu,
   onAttachMenuToggle,
   plusTriggerRef,
-  extraToolsets,
   canSend,
   onSend,
   onStop,
@@ -1659,7 +1654,7 @@ function InputToolbar({
   return (
     <div className="flex flex-nowrap items-center justify-between gap-1 px-4 pb-2.5 mt-2">
       {/* Left section, ordered by how often a control is reached for:
-          the "+" menu and the per-turn toggles sit inboard, and knowledge —
+          the "+" menu (capabilities live only there) and the per-turn toggles sit inboard, and knowledge —
           a one-off binding, not a per-message decision — sits outermost.
           Scrolls horizontally on narrow widths so the fixed Send/Stop group
           is never pushed off. */}
@@ -1685,22 +1680,6 @@ function InputToolbar({
               }`}
           >
             <Plus size={18} className={`transition-transform duration-200 ease-halo ${showAttachMenu ? 'rotate-45' : ''}`} />
-          </button>
-        )}
-
-        {/* Quiet reminder of capabilities turned on beyond the defaults; opens the panel. */}
-        {!isGenerating && !isOnboarding && extraToolsets.length > 0 && (
-          <button
-            type="button"
-            onClick={onAttachMenuToggle}
-            title={extraToolsets.map(ts => toolsetLabel(t, ts)).join(', ')}
-            aria-label={t('Capabilities on: {{names}}', { names: extraToolsets.map(ts => toolsetLabel(t, ts)).join(', ') })}
-            className="h-8 shrink-0 flex items-center gap-1.5 px-2 rounded-full text-muted-foreground
-              hover:text-foreground hover:bg-secondary transition-colors duration-150"
-          >
-            {extraToolsets.map(ts => (
-              <span key={ts.id} className="inline-flex">{toolsetIcon(ts.id, 15)}</span>
-            ))}
           </button>
         )}
 
