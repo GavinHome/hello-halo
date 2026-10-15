@@ -18,9 +18,12 @@ import {
   TEAM_EVENTS,
   TEAM_DEFAULT_TURN_TIMEOUT_MS,
   TEAM_DEFAULT_MAX_CONCURRENT_TURNS,
+  legacyExternalOrigin,
 } from '../../../../shared/apps/team-types'
 import type {
+  MemberTurnFate,
   TeamEpoch,
+  TeamRequestOrigin,
   TeamTriggerContext,
   TeamRunTrigger,
   TeamEnvelope,
@@ -43,8 +46,7 @@ import type {
 } from './message-bus'
 import type { TeamPromptContext } from './team-prompt'
 import type { TeamFolders } from './team-folder'
-import type { NoteTurnEndedInput, MemberTurnFate } from './turn-report'
-import { peekTurnOrigin, forgetEpochTurnOrigins } from './external-origin'
+import type { NoteTurnEndedInput } from './turn-report'
 import type { AppChatTurnStart } from '../app-chat-live-turn'
 import type { TranscriptProvenance } from '../../../../shared/types/transcript'
 
@@ -241,8 +243,8 @@ export interface Orchestration {
     body: string
     onBusy: BusyDisposition
     coalescingKey?: string
-    /** The check was set by someone on another machine. */
-    external?: boolean
+    /** The request the check's instruction serves, when it came from outside. */
+    origin?: TeamRequestOrigin
   }): Promise<WakeDisposition>
 
   captureReport(correlationId: string, outcome: TurnCompletion): void
@@ -295,7 +297,9 @@ export interface Orchestration {
      * wrong one.
      */
     question?: string
-    /** The escalating turn ran with external origin (persisted with the escalation). */
+    /** The request the asking turn served, persisted with the question. */
+    origin?: TeamRequestOrigin
+    /** A question persisted before origins had kinds (see `legacyExternalOrigin`). */
     external?: boolean
   }): Promise<boolean>
 }
@@ -482,7 +486,7 @@ export function createOrchestration(deps: OrchestrationDeps): Orchestration {
       triggerKind: trigger.kind ?? 'human_message',
       requestSummary: envelope.body,
       requestFromAppId: envelope.fromAppId,
-      external: peekTurnOrigin(sessionKey, trigger),
+      ...(trigger.origin ? { origin: trigger.origin } : {}),
     })
   }
 
@@ -680,7 +684,7 @@ export function createOrchestration(deps: OrchestrationDeps): Orchestration {
         triggerKind: trigger.kind ?? 'human_message',
         requestSummary: envelope.body,
         requestFromAppId: envelope.fromAppId,
-        external: peekTurnOrigin(sessionKey, trigger),
+        ...(trigger.origin ? { origin: trigger.origin } : {}),
       })
       deliveries.forEach((delivery) => settleDecision(delivery.trigger.correlationId, { kind: 'error', message: 'Member has no space' }))
       bus.completeTurn({ sessionKey, trigger, outcome: { kind: 'error', message: 'Member has no space' } })
@@ -745,7 +749,7 @@ export function createOrchestration(deps: OrchestrationDeps): Orchestration {
               triggerKind: trigger.kind ?? 'human_message',
               requestSummary: envelope.body,
               requestFromAppId: envelope.fromAppId,
-              external: peekTurnOrigin(sessionKey, trigger),
+              ...(trigger.origin ? { origin: trigger.origin } : {}),
             })
             // Actually tear down the still-running turn instead of merely
             // abandoning the promise — otherwise the member's session stays
@@ -981,7 +985,7 @@ export function createOrchestration(deps: OrchestrationDeps): Orchestration {
     body: string
     onBusy: BusyDisposition
     coalescingKey?: string
-    external?: boolean
+    origin?: TeamRequestOrigin
   }): Promise<WakeDisposition> {
     return wakeSelf({ ...params, kind: 'periodic_check' })
   }
@@ -1001,11 +1005,12 @@ export function createOrchestration(deps: OrchestrationDeps): Orchestration {
     onBusy: BusyDisposition
     coalescingKey?: string
     /**
-     * The standing instruction behind this wake was left by someone on another
-     * machine. A runtime wake has no sender to read it from, so whoever set the
-     * instruction has to say so when arming it.
+     * The request the standing instruction behind this wake serves, when it came
+     * from outside. A runtime wake has no sender to read it from, so whoever set
+     * the instruction says so when arming it; every other runtime wake is the
+     * owner's own.
      */
-    external?: boolean
+    origin?: TeamRequestOrigin
   }): Promise<WakeDisposition> {
     const { teamId, epochId, appId, body, kind, onBusy } = params
     const correlationId = randomUUID()
@@ -1027,7 +1032,7 @@ export function createOrchestration(deps: OrchestrationDeps): Orchestration {
         fromAppId: null,
         wait: false,
         kind,
-        ...(params.external ? { external: true } : {}),
+        ...(params.origin ? { origin: params.origin } : {}),
       },
       onBusy,
       coalescingKey: params.coalescingKey,
@@ -1145,7 +1150,7 @@ export function createOrchestration(deps: OrchestrationDeps): Orchestration {
    * whatever path brings them here.
    */
   function renderMidTurnEnvelope(envelope: TeamEnvelope, trigger: TeamTriggerContext): string {
-    if (trigger.kind === 'human_message') return trigger.external ? inertCommandText(envelope.body) : envelope.body
+    if (trigger.kind === 'human_message') return trigger.origin ? inertCommandText(envelope.body) : envelope.body
     const fromName = trigger.fromAppId ? memberName(envelope.teamId, trigger.fromAppId) : null
     if (!fromName) return `[Arrived while you were working]\n\n${envelope.body}`
     const role = isLead(envelope.teamId, trigger.fromAppId!) ? 'lead' : 'teammate'
@@ -1246,6 +1251,7 @@ export function createOrchestration(deps: OrchestrationDeps): Orchestration {
     taskId?: string
     response: string
     question?: string
+    origin?: TeamRequestOrigin
     external?: boolean
   }): Promise<boolean> {
     const { teamId, epochId, appId, taskId, response, question } = params
@@ -1256,6 +1262,7 @@ export function createOrchestration(deps: OrchestrationDeps): Orchestration {
       return false
     }
 
+    const origin = params.origin ?? (params.external ? legacyExternalOrigin(epoch) : undefined)
     const isLeadSelf = team.leadAppId === appId
     // Attributed to the lead so the member reads it as coming from its team,
     // not from nowhere.
@@ -1295,11 +1302,10 @@ export function createOrchestration(deps: OrchestrationDeps): Orchestration {
       wait: false,
       taskId,
       kind: 'message',
-      // Restore the escalating turn's origin from the persisted record: the
-      // in-memory stickiness (team/external-origin.ts) does not survive a
-      // restart, and an unstamped 'message' wake would resume a stranger's
-      // work with the owner's own reach.
-      ...(params.external ? { external: true } : {}),
+      // The question's record is the only thing that still knows whose request
+      // the asking turn served: an unstamped wake would resume an outside
+      // request with the owner's own reach.
+      ...(origin ? { origin } : {}),
     }
     ;(trigger as TeamTriggerContext & { forwardDepth?: number }).forwardDepth = 1
 
@@ -1602,7 +1608,6 @@ export function createOrchestration(deps: OrchestrationDeps): Orchestration {
       }
       const epoch = store.getEpochById(epochId)
       if (epoch?.teamId === teamId && (epoch.endReason === 'cleared' || epoch.workItem?.status === 'completed')) {
-        forgetEpochTurnOrigins(teamId, epochId)
         escalationWaiters.delete(epochId)
         deps.onTaskClosed?.(teamId, epochId)
       }
@@ -1844,6 +1849,7 @@ export function createOrchestration(deps: OrchestrationDeps): Orchestration {
         const remote = isRemoteMember(m)
         const description = deps.getMemberDescription?.(m.appId)?.trim()
         return {
+          appId: m.appId,
           memberName: m.memberName,
           role: m.role,
           // Omitted rather than nulled when there is nothing to say, so the
@@ -1873,6 +1879,7 @@ export function createOrchestration(deps: OrchestrationDeps): Orchestration {
       selfIsDisposable: team.ephemeral === true && self.aiProvisioned,
       roster,
       teamFolder: deps.teamFolders?.forMember(teamId, epochId, selfAppId) ?? null,
+      chatKey: store.getEpochById(epochId)?.chatKey ?? null,
     }
   }
 

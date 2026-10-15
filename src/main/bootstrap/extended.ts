@@ -662,13 +662,16 @@ async function initPlatformAndApps(): Promise<void> {
               // Two corrections a wake needs on arrival, both because every
               // field on it was written by the sender: the member's real space
               // here, and the fact that this request came from another machine.
+              const team = teamStore.getTeamById(teamId)
               return await localSessionDeps.sendAppChatMessage(
                 withOwnerResolvedSpace(
                   withExternalOrigin(request, {
-                    teamName: teamStore.getTeamById(request.teamContext.teamId)?.name,
+                    teamName: team?.name,
                     fromMemberName: request.teamContext.fromAppId
-                      ? teamStore.getMember(request.teamContext.teamId, request.teamContext.fromAppId)?.memberName ?? null
+                      ? teamStore.getMember(teamId, request.teamContext.fromAppId)?.memberName ?? null
                       : null,
+                    leadAppId: team?.leadAppId ?? null,
+                    epoch: teamStore.getEpochById(request.teamContext.epochId),
                   }),
                   (appId) => localSessionDeps.getMemberSpaceId(appId)
                 )
@@ -745,6 +748,9 @@ async function initPlatformAndApps(): Promise<void> {
           console.warn(`[Bootstrap] office access lost office=${officeId} reason=${reason}`)
           emitOfficeStatus(officeId, reason === 'VERSION_INCOMPATIBLE' ? 'update-required' : 'access-lost', detail)
         },
+        // Admitted again after a refusal: the office is live, and what the user
+        // was told about the refusal (e.g. "waiting on X to update") is retired.
+        onOfficeAccessRestored: (officeId) => emitOfficeStatus(officeId, 'resumed'),
         // Owner-side transcript reader: serve a member's team-channel history to a
         // viewer over the office link. Reuses the same read as the IPC/HTTP chat
         // surfaces so all three agree; the federation layer never opens chat
@@ -1238,6 +1244,8 @@ async function initPlatformAndApps(): Promise<void> {
         mgr?.broadcastRosterFor(teamId)
       },
       onOfficeDissolved: (teamId) => getFederationManager()?.projectOfficeDissolved(teamId),
+      hasIssuedInvite: (teamId) => getFederationStore()?.hasCredentialForOffice(teamId) ?? false,
+      onOfficeViewed: (teamId) => getFederationManager()?.noteOfficeViewed(teamId),
       // Run start/stop → push the live run-state (team running status + active
       // epoch) to joiners immediately so a remote status board goes live the
       // instant the host presses Run (and rests when it stops). Start/stop are
@@ -1464,6 +1472,11 @@ export function initializeExtendedServices(): void {
   // this line use the credential they were created with, which is still current.
   setRequestCredentialResolver((sourceId, model) => getAISourceManager().resolveRequestCredentials(sourceId, model))
 
+  // Model lists follow the provider without anyone pressing refresh: startup,
+  // focus and wake ask for out-of-date catalogs, and a changed list reaches
+  // every window (IPC) and remote client (WS).
+  startModelCatalogFreshness()
+
   // Push credential decode failures to renderer (IPC) and remote clients (WS).
   // Registered before the migration task so failures surfaced during it reach a
   // connected UI; later clients pull via config:get-credential-failures.
@@ -1472,11 +1485,6 @@ export function initializeExtendedServices(): void {
     try {
       broadcastToAll('credential:decrypt-failed', { failures })
     } catch (err) {
-  // Model lists follow the provider without anyone pressing refresh: startup,
-  // focus and wake ask for out-of-date catalogs, and a changed list reaches
-  // every window (IPC) and remote client (WS).
-  startModelCatalogFreshness()
-
       console.warn('[Bootstrap] credential failure WS broadcast failed:', (err as Error).message)
     }
   })
@@ -1684,6 +1692,9 @@ export async function cleanupExtendedServices(): Promise<void> {
     // Announcements: stop polling the feed
     stopAnnouncementScheduler()
 
+    stopModelCatalogFreshness?.()
+    stopModelCatalogFreshness = null
+
     // Store: Shutdown registry service (before app manager)
     shutdownRegistryService()
 
@@ -1692,9 +1703,6 @@ export async function cleanupExtendedServices(): Promise<void> {
     digitalHumanConversations?.dispose()
     digitalHumanConversations = null
     disposeConversationInterop()
-    stopModelCatalogFreshness?.()
-    stopModelCatalogFreshness = null
-
     disposeSpaceMemoryConsolidation()
 
     // Team: Tear down the service + runtime accessor and the data layer before
