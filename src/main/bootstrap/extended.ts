@@ -50,7 +50,7 @@ import {
   registerConversationSource,
 } from '../services/conversation-interop'
 import { setConversationInteropFactory } from '../services/agent/toolsets/broker'
-import { getAISourceManager } from '../services/ai-sources'
+import { getAISourceManager, watchCatalogSignals } from '../services/ai-sources'
 import { setRequestCredentialResolver } from '../openai-compat-router'
 import { initSpaceMemoryConsolidation, disposeSpaceMemoryConsolidation } from '../services/memory-consolidation'
 import { markExtendedServicesReady } from './state'
@@ -140,6 +140,7 @@ let flushRelayCapture: (() => void) | null = null
 let onSystemResume: (() => void) | null = null
 let stopReleasingTeamMail: (() => void) | null = null
 let taskStateService: Awaited<ReturnType<typeof initTaskState>> | null = null
+let stopModelCatalogFreshness: (() => void) | null = null
 
 /**
  * Tell every window and remote client how an office stands (see
@@ -150,6 +151,20 @@ function emitOfficeStatus(teamId: string, kind: TeamOfficeStatusKind, versionMis
   const payload = versionMismatch ? { teamId, kind, versionMismatch } : { teamId, kind }
   broadcastToAll('team:office-status', payload)
   sendToRenderer('team:office-status', payload)
+}
+
+function startModelCatalogFreshness(): void {
+  const manager = getAISourceManager()
+  const changes = manager.onModelCatalogChanged(event => {
+    sendToRenderer('ai-sources:catalog-changed', event)
+    broadcastToAll('ai-sources:catalog-changed', { ...event })
+  })
+  const stopSignals = watchCatalogSignals(signal => void manager.refreshStaleCatalogs(signal))
+  stopModelCatalogFreshness = () => {
+    stopSignals()
+    changes.dispose()
+  }
+  void manager.refreshStaleCatalogs('startup')
 }
 
 /**
@@ -1457,6 +1472,11 @@ export function initializeExtendedServices(): void {
     try {
       broadcastToAll('credential:decrypt-failed', { failures })
     } catch (err) {
+  // Model lists follow the provider without anyone pressing refresh: startup,
+  // focus and wake ask for out-of-date catalogs, and a changed list reaches
+  // every window (IPC) and remote client (WS).
+  startModelCatalogFreshness()
+
       console.warn('[Bootstrap] credential failure WS broadcast failed:', (err as Error).message)
     }
   })
@@ -1672,6 +1692,9 @@ export async function cleanupExtendedServices(): Promise<void> {
     digitalHumanConversations?.dispose()
     digitalHumanConversations = null
     disposeConversationInterop()
+    stopModelCatalogFreshness?.()
+    stopModelCatalogFreshness = null
+
     disposeSpaceMemoryConsolidation()
 
     // Team: Tear down the service + runtime accessor and the data layer before

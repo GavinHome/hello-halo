@@ -61,6 +61,10 @@
   },
   {
     "method": "POST",
+    "path": "/api/ai-sources/refresh-stale-catalogs"
+  },
+  {
+    "method": "POST",
     "path": "/api/model-capabilities/resolve",
     "group": "settings"
   },
