@@ -1481,6 +1481,14 @@ export function createTeamService(deps: TeamServiceDeps): TeamService {
       if (!existing || existing.teamId !== teamId) {
         throw new Error(`Trigger not found for team ${teamId}: ${triggerId}`)
       }
+      // An update keeps the stored type, so the request must state it: what a
+      // caller is allowed to send is judged by the type it names.
+      if (input.sourceType !== existing.sourceType) {
+        throw new Error(
+          `Trigger ${triggerId} is a ${existing.sourceType} trigger and its type cannot be changed. ` +
+          'Remove it and add a new one instead.'
+        )
+      }
       store.updateTrigger(triggerId, { config: input.config, enabled })
     } else {
       const trigger: TeamTrigger = {
