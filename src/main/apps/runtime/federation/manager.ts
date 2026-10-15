@@ -55,7 +55,7 @@ import { createCtrlFeed, type CtrlFeed } from './ctrl-feed'
 import { createSessionFeed, historyCacheKey, isSessionFeedFrame, type SessionFeed } from './session-feed'
 import { isFeedSyncFrame, parseFeedIdKey, type FeedSyncFrame } from './log/types'
 import { getFeedStore, type AuthorityStore, type FeedStore } from '../../federation'
-import { SELF_NODE_ID, type TeamMemberRuntimeStatus, type TeamStatus, type TeamVersionMismatch } from '../../../../shared/apps/team-types'
+import { REMOTE_WAIT_ABANDONED_REASON, SELF_NODE_ID, type TeamMemberRuntimeStatus, type TeamStatus, type TeamVersionMismatch } from '../../../../shared/apps/team-types'
 import { parseTeamSessionKey } from '../../../../shared/apps/im-keys'
 import type {
   FederationMessage,
@@ -3488,7 +3488,7 @@ export function createFederationManager(deps: FederationManagerDeps): Federation
     }
     const pendingCompletions = [...turnCompleteWaiters.entries()]
     for (const [correlationId] of pendingCompletions) {
-      try { dispatchTurnComplete(correlationId, { kind: 'undelivered', reason: 'federation-stopped' }) } catch (error) {
+      try { dispatchTurnComplete(correlationId, { kind: 'undelivered', reason: REMOTE_WAIT_ABANDONED_REASON }) } catch (error) {
         console.error(`${LOG_TAG} completion cleanup failed corr=${correlationId}`, error)
       }
     }

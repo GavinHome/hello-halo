@@ -37,7 +37,7 @@ import { createOrchestration } from '../../../../../src/main/apps/runtime/team/o
 import type { OrchestrationSessionDeps } from '../../../../../src/main/apps/runtime/team/orchestration'
 import type { NoteTurnEndedInput } from '../../../../../src/main/apps/runtime/team/turn-report'
 import { buildTeamEntry } from '../../../../../src/main/apps/runtime/team/team-prompt'
-import { buildTeamSessionKey } from '../../../../../src/shared/apps/team-types'
+import { buildTeamSessionKey, REMOTE_WAIT_ABANDONED_REASON } from '../../../../../src/shared/apps/team-types'
 import type { TeamTriggerContext } from '../../../../../src/shared/apps/team-types'
 import { forgetTurnOrigin, peekTurnOrigin, resolveTurnOrigin } from '../../../../../src/main/apps/runtime/team/external-origin'
 import type { Team, TeamMember, TeamEpoch, TeamEdge } from '../../../../../src/main/apps/team/types'
@@ -1259,6 +1259,79 @@ describe('TeamOrchestration', () => {
       } finally {
         vi.useRealTimers()
       }
+    })
+  })
+
+  // ===========================================================================
+  // A member on another machine: its owner runs the turn, this side only waits.
+  // ===========================================================================
+
+  describe('a member on another machine', () => {
+    const REMOTE_APP = 'app-remote'
+
+    function buildRemote(noteTurnEnded: (input: NoteTurnEndedInput) => void) {
+      seedTeam(store, { collabMode: 'free' })
+      store.addMember({
+        teamId: TEAM_ID, appId: REMOTE_APP, memberName: 'remote-analyst', role: 'Analyst',
+        isLead: false, aiProvisioned: false, addedAt: Date.now(), ownerNodeId: 'node-b', origin: 'remote',
+      })
+      const epoch = makeEpoch(store)
+      const { deps } = makeSession()
+      const completions: Array<(outcome: TurnCompletion) => void> = []
+      deps.deliverRemoteMessage = vi.fn((request) => { completions.push(request.onCompletion); return true })
+      const acts: unknown[] = []
+      bus = createMessageBus({
+        store,
+        recordActivity: (input) => { acts.push(input) },
+        hooks: {
+          wakeTarget: (p) => orchestration.wakeTarget(p),
+          isBusy: (k) => orchestration.isBusy(k),
+          deliverRemote: (p) => orchestration.deliverRemote(p),
+        },
+      })
+      const orchestration = createOrchestration({ store, bus, session: deps, hasPendingEscalation: () => false, noteTurnEnded })
+      return { epoch, deps, completions, acts }
+    }
+
+    it('reports a message that never became a turn there to the lead, with the reason, and still records it', async () => {
+      const noteTurnEnded = vi.fn()
+      const { epoch, deps, completions, acts } = buildRemote(noteTurnEnded)
+
+      await bus.send({ teamId: TEAM_ID, epochId: epoch.id, fromAppId: RESEARCHER_APP, to: 'remote-analyst', message: 'Start the design', wait: false })
+      expect(deps.deliverRemoteMessage).toHaveBeenCalledTimes(1)
+      const correlationId = (deps.deliverRemoteMessage as ReturnType<typeof vi.fn>).mock.calls[0][0].teamContext.correlationId
+      completions[0]({ kind: 'undelivered', reason: 'owner-unreachable' })
+
+      expect(noteTurnEnded).toHaveBeenCalledTimes(1)
+      expect(noteTurnEnded).toHaveBeenCalledWith(expect.objectContaining({
+        appId: REMOTE_APP, teamId: TEAM_ID, epochId: epoch.id,
+        fate: { kind: 'never_ran', reason: 'owner-unreachable' },
+        correlationId, triggerKind: 'message', requestSummary: 'Start the design', requestFromAppId: RESEARCHER_APP,
+        external: false,
+      }))
+      expect(acts).toContainEqual(expect.objectContaining({ kind: 'reply', status: 'undelivered', actorAppId: REMOTE_APP }))
+    })
+
+    it('tells the lead nothing about a wait this machine dropped while shutting down', async () => {
+      const noteTurnEnded = vi.fn()
+      const { epoch, completions } = buildRemote(noteTurnEnded)
+
+      await bus.send({ teamId: TEAM_ID, epochId: epoch.id, fromAppId: RESEARCHER_APP, to: 'remote-analyst', message: 'Start the design', wait: false })
+      completions[0]({ kind: 'undelivered', reason: REMOTE_WAIT_ABANDONED_REASON })
+
+      expect(noteTurnEnded).not.toHaveBeenCalled()
+    })
+
+    it('leaves a turn that did run there to the owner, which describes its own endings', async () => {
+      const noteTurnEnded = vi.fn()
+      const { epoch, completions } = buildRemote(noteTurnEnded)
+
+      await bus.send({ teamId: TEAM_ID, epochId: epoch.id, fromAppId: RESEARCHER_APP, to: 'remote-analyst', message: 'one', wait: false })
+      await bus.send({ teamId: TEAM_ID, epochId: epoch.id, fromAppId: RESEARCHER_APP, to: 'remote-analyst', message: 'two', wait: false })
+      completions[0]({ kind: 'result', content: 'done' })
+      completions[1]({ kind: 'error', message: 'model refused' })
+
+      expect(noteTurnEnded).not.toHaveBeenCalled()
     })
   })
 

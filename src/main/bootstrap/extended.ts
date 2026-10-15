@@ -639,16 +639,8 @@ async function initPlatformAndApps(): Promise<void> {
             broadcastToAll(TEAM_EVENTS.updated, payload as unknown as Record<string, unknown>)
             sendToRenderer(TEAM_EVENTS.updated, payload)
           }
-          // A paused digital human is one whose owner said "stop working". A
-          // teammate on another machine may not overrule that, and must not be
-          // left waiting on it either: refuse as a non-delivery so the sender
-          // can reassign. Deliberately NOT the auto-resume a manual trigger
-          // does — that is the owner choosing, and this is not the owner.
-          const local = appManager.getApp(request.appId)
-          if (local?.status === 'paused') {
-            console.warn(`[Team] wake refused: app=${request.appId} is paused by its owner`)
-            return { finalMessage: null, undelivered: { reason: 'owner-paused' } }
-          }
+          // A paused digital human still takes teammates' messages: pausing stops
+          // only its own scheduled and event runs, as for a teammate on this machine.
           const run = async () => {
             notifyLocalBoard()
             try {

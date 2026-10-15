@@ -14,6 +14,7 @@ import { inertCommandText } from '../turn-skills'
 import {
   buildTeamSessionKey,
   isRemoteMember,
+  REMOTE_WAIT_ABANDONED_REASON,
   TEAM_EVENTS,
   TEAM_DEFAULT_TURN_TIMEOUT_MS,
   TEAM_DEFAULT_MAX_CONCURRENT_TURNS,
@@ -455,6 +456,36 @@ export function createOrchestration(deps: OrchestrationDeps): Orchestration {
     }
   }
 
+  /**
+   * A wake that became no turn, on this machine or the owner's: the side that
+   * was waiting on it is the only witness there will ever be. A wait this node
+   * dropped while shutting down is not one: the owner may still be running it,
+   * and a notice then would start a lead turn while the app quits.
+   */
+  function reportNeverRan(params: {
+    sessionKey: string
+    appId: string
+    teamId: string
+    epochId: string
+    envelope: TeamEnvelope
+    trigger: TeamTriggerContext
+    reason: string
+  }): void {
+    if (params.reason === REMOTE_WAIT_ABANDONED_REASON) return
+    const { sessionKey, envelope, trigger } = params
+    reportTurnEnded({
+      appId: params.appId,
+      teamId: params.teamId,
+      epochId: params.epochId,
+      fate: { kind: 'never_ran', reason: params.reason },
+      correlationId: trigger.correlationId,
+      triggerKind: trigger.kind ?? 'human_message',
+      requestSummary: envelope.body,
+      requestFromAppId: envelope.fromAppId,
+      external: peekTurnOrigin(sessionKey, trigger),
+    })
+  }
+
   function notifyMemberStatusChanged(teamId: string): void {
     // The viewer's own machine needs this too: the federation observer below
     // projects the roster to OTHER nodes and is a no-op for a team that is not
@@ -764,19 +795,7 @@ export function createOrchestration(deps: OrchestrationDeps): Orchestration {
             markEscalationToUser(teamId, epochId, appId)
           }
           if (outcome.kind === 'undelivered') {
-            // Nothing ran anywhere, on this machine or the owner's, so this is the
-            // only place the ending can be witnessed at all.
-            reportTurnEnded({
-              appId,
-              teamId,
-              epochId,
-              fate: { kind: 'never_ran', reason: outcome.reason },
-              correlationId: trigger.correlationId,
-              triggerKind: trigger.kind ?? 'human_message',
-              requestSummary: envelope.body,
-              requestFromAppId: envelope.fromAppId,
-              external: peekTurnOrigin(sessionKey, trigger),
-            })
+            reportNeverRan({ sessionKey, appId, teamId, epochId, envelope, trigger, reason: outcome.reason })
           }
           const pending = pendingSeals.get(epochId)
           sealing = !!pending && store.getTeamById(pending.teamId)?.leadAppId === appId
@@ -2005,7 +2024,15 @@ export function createOrchestration(deps: OrchestrationDeps): Orchestration {
         conversationId: sessionKey,
         teamContext: trigger,
         coalescingKey,
-        onCompletion,
+        onCompletion: (outcome) => {
+          if (outcome.kind === 'undelivered') {
+            reportNeverRan({
+              sessionKey, appId: envelope.toAppId, teamId: envelope.teamId, epochId: envelope.epochId,
+              envelope, trigger, reason: outcome.reason,
+            })
+          }
+          onCompletion(outcome)
+        },
       })
     },
     wakeForCheck,

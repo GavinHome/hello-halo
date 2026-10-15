@@ -1228,6 +1228,12 @@ export const TEAM_MCP_SERVER_NAME = 'halo-team'
 /** Sentinel owner-node id for a locally-owned team member (not federated). */
 export const SELF_NODE_ID = 'SELF'
 
+/**
+ * Undelivered reason for a remote turn this node stopped waiting on because it
+ * is shutting its federation down: the far side may still be running it.
+ */
+export const REMOTE_WAIT_ABANDONED_REASON = 'federation-stopped'
+
 // ── Space coordinator (ephemeral collaboration) ──
 
 /**

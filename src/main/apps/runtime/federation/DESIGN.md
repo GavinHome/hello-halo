@@ -388,12 +388,17 @@ Shared per-node state (all keyed by officeId): `hosted`, `joined`,
   arriving request as external and resolves the member's local workspace, then
   calls app-chat's common mailbox. Equal-authority work joins a running turn;
   other work waits as a merged following turn. Sender-side roster state is never
-  a lock or a permission source.
+  a lock or a permission source. A paused digital human is not refused: pausing
+  stops only its own scheduled and event runs, the same rule as on its own machine.
   Asynchronous messages bypass the sender's turn reservation and concurrency
   semaphore, so every message reaches the owner immediately. They retain internal
   per-correlation completion observers over the durable control feed: successful
   delivery clears the observer and busy overlay; admission errors and failures
-  reach the sender and become failure records. The sending AI need not wait for
+  reach the sender and become failure records, and a wake that never ran is
+  reported to the lead from the sending side, as for a local member (team DESIGN
+  "Output is not delivery"). Waits still open when this node stops its federation
+  are settled with `REMOTE_WAIT_ABANDONED_REASON`; their outcome is unknown, so
+  they are not reported to the lead. The sending AI need not wait for
   that receipt. Relaying through an authority preserves failures instead of
   converting them into an empty successful answer.
   Live delivery keeps protocol version 4. Coalescing keys and original transcript
