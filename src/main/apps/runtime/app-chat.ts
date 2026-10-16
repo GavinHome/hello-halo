@@ -55,7 +55,7 @@ import { getImPermissionContext, type ImPermissionContext } from './im-permissio
 import { currentGuestPolicy } from './im-sender-standing'
 import { createAIBrowserMcpServer } from '../../services/ai-browser'
 import { createTerminalMcpServer, getGlobalTerminalContext, isTerminalAvailable } from '../../services/ai-terminal'
-import { acquireChatBrowserContext, endChatBrowserTurn, destroyChatBrowserContext } from './app-chat-browser'
+import { acquireChatBrowserContext, bindChatBrowserSession, endChatBrowserTurn, destroyChatBrowserContext } from './app-chat-browser'
 import { buildMessageContent, formatCanvasContext } from '../../services/agent/message-utils'
 import { acquireV2Session, formatTurnAttachments, workingDirErrorDetail, hasPendingSessionInput, hasLiveTurn, markMcpServerSettings, type V2SessionLease } from '../../services/agent'
 import type { CanvasContext } from '../../services/agent/types'
@@ -1393,6 +1393,10 @@ async function runAppChatTurn(
       reportPreInitFailure
     )
     const v2Session = sessionLease.session
+    // The session's browser tools hold this chat's context from here on,
+    // whether the session was just built around it or is reused from an
+    // earlier turn (see app-chat-browser).
+    if (turnContext.browserHeld) bindChatBrowserSession(conversationId, sessionLease)
     stopObservingRetirement = sessionLease.onRetired(retireSession)
     turnContext.start.bindSession(sessionLease, retireSession)
     if (!sessionLease.isUsable) throw new Error('The acquired session is no longer available')
@@ -1534,8 +1538,9 @@ async function runAppChatTurn(
     stopObservingRetirement?.()
     turnContext.start.releaseSession()
     sessionLease?.release()
-    // Native chats keep their browser context (and its pages) for the next
-    // message, failed turn or not; every other session's ends with the turn.
+    // Native chats keep their pages for the next message, failed turn or not;
+    // every other session's pages close with the turn. The context itself
+    // stays with the engine session whose tools hold it (app-chat-browser).
     if (turnContext.browserHeld) {
       turnContext.browserHeld = false
       endChatBrowserTurn(conversationId)

@@ -1079,10 +1079,29 @@ JSONL storage is unchanged (append-only, written by `session-store`).
 in a map inside `app-chat.ts`, and who is chatting decides both who can watch
 its pages and how long they live:
 
-| Session | Live view | Context lifetime |
+| Session | Live view | Page lifetime |
 |---|---|---|
-| default (`app-chat:{appId}`) and local (`…:local:direct:{uuid}`) | **yes** — pages in the main window, announced under the chat's key | **resident** — survives the turn, so the next message continues on the same page and the user can open the live view between turns |
-| IM, HTTP, team | **no** — pages in the hidden host, nothing announced, like an automation run | **per-turn** — destroyed in `runAppChatTurn`'s `finally`; they can be minted without limit |
+| default (`app-chat:{appId}`) and local (`…:local:direct:{uuid}`) | **yes** — pages in the main window, announced under the chat's key | **resident** — survive the turn, so the next message continues on the same page and the user can open the live view between turns |
+| IM, HTTP, team | **no** — pages in the hidden host, nothing announced, like an automation run | **per-turn** — closed in `runAppChatTurn`'s `finally`; they can be minted without limit |
+
+**The context outlives its pages: it lives with the engine session.** A chat's
+V2 session (one engine process, reused between messages for up to 30 minutes)
+is built with an `ai-browser` tool server that closes over the `BrowserContext`
+of the turn that built it, and every later turn on that session reaches that
+same object — the `mcpServers` a reusing turn assembles are never applied.
+So `runAppChatTurn` binds the context to the session it acquired
+(`bindChatBrowserSession`, right after `acquireV2Session`), the turn's end
+only closes pages (`ctx.closePages()`, which keeps the context usable), and the
+context is disposed (`ctx.destroy()`, after which every call fails with
+"Browser context was released") only when that session is retired — any
+`cleanupSession` reason: idle timeout, rebuild, config change, process death —
+unless a turn is in flight (it re-binds or ends it) or a native chat still
+holds pages (left for the user, as after any session restart; the next session
+is built around the same context). A context no session took is reclaimed by
+the sweep. Before this, a per-turn context was destroyed with its turn: the
+second message within 30 minutes of an IM chat found the session's tools bound
+to a dead context and every browser call failed until the session idled out —
+which a chat answering every few minutes never let happen (IM patrol chat, 2026-10-16).
 
 Only a native chat's context is created with
 `createScopedBrowserContext({ liveView: { conversationId, spaceId } })`, which is
@@ -1098,32 +1117,36 @@ failing the step.
 
 **Resident is bounded**, because every page is a Chromium renderer and local
 sessions are unbounded (`MAX_RESIDENT_BROWSER_CONTEXTS`, `RESIDENT_BROWSER_IDLE_MS`):
-- a context idle for 30 minutes is destroyed; cookies live in the shared
+- pages idle for 30 minutes are closed; cookies live in the shared
   `persist:browser` session, so only tabs and scroll state are lost;
-- at most 6 contexts may hold pages; a new one evicts the least recently used
-  idle one;
+- at most 6 chats may hold pages; a new one closes the pages of the least
+  recently used idle one;
 - never mid-turn (asked of `isAppChatConversationGenerating`) nor while a turn is
   starting — acquired and not yet ended, trusted for `TURN_TRUST_MS` (5 minutes)
   so a slow engine start is covered, after which only the live-turn answer
-  counts, so a turn that died before reporting back cannot pin a context — and
+  counts, so a turn that died before reporting back cannot pin pages — and
   never while the user is watching one of its tabs (`ctx.hasRevealedView()`);
   over the cap rather than kill a live turn.
-- a per-turn context still present after `TURN_TRUST_MS` lost its cleanup and is
-  reclaimed by the same sweep.
+- a per-turn chat idle past `TURN_TRUST_MS` has its pages closed by the same
+  sweep (its turn never reported back); its context stays for its session.
+- every one of these closes pages only when a session holds the context
+  (`reap`); a context no session bound is disposed outright.
 
 **Teardown paths** (each one goes through `destroyChatBrowserContext`, which logs
 the reason and closes the pages; a native chat's page destruction announces
 `view-gone`, a per-turn chat's says nothing):
-session cleared/deleted (`clearSessionByConversationId`), team session closed,
-manual "Restart agent" (`restartAppChat` with `interruptActive`; automatic
-config-change restarts deliberately leave the pages), app uninstalled
-(`onAppUninstalled` in `service.ts`), runtime shutdown, the AI-browser permission
-revoked (next turn), and the sweep's `app-removed` check — deleting a space
-hard-deletes its apps without an uninstall event, so a context of an app that no
-longer exists is noticed on the next sweep (≤ 60 s) instead of being leaked.
+its session retired (`bindChatBrowserSession`, above), session cleared/deleted
+(`clearSessionByConversationId`), team session closed, manual "Restart agent"
+(`restartAppChat` with `interruptActive`; automatic config-change restarts
+deliberately leave a native chat's pages), app uninstalled (`onAppUninstalled`
+in `service.ts`), runtime shutdown, the AI-browser permission revoked (next
+turn), and the sweep's `app-removed` check — deleting a space hard-deletes its
+apps without an uninstall event, so a context of an app that no longer exists
+is noticed on the next sweep (≤ 60 s) instead of being leaked.
 
-Logging: one line per create/destroy (`reason`, view count) and a state line
-every 5 minutes while any context exists (`[AppChatBrowser] State: contexts=…`).
+Logging: one line per create/destroy and per page close (`reason`, view
+count) and a state line every 5 minutes while any context exists
+(`[AppChatBrowser] State: contexts=…`).
 
 ### 2.20 Digital-Human Chats as Cross-Conversation Sources
 
