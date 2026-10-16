@@ -410,15 +410,24 @@ describe('app chat browser contexts', () => {
       expect(ctx.destroyed).toBe(true)
     })
 
-    it('reclaims a per-turn context no session took once its turn has ended', () => {
+    it('disposes a per-turn context no session took as soon as its turn ends (turn refused while being set up)', () => {
       const ctx = acquireChatBrowserContext(IM_KEY, 'dh1', 'space-1') as unknown as FakeCtx
-      endChatBrowserTurn(IM_KEY)
-      expect(ctx.pagesClosed).toBe(1)
-      expect(ctx.destroyed).toBe(false)
 
-      sweepChatBrowserContexts(Date.now() + TURN_TRUST_MS)
+      endChatBrowserTurn(IM_KEY)
 
       expect(ctx.destroyed).toBe(true)
+      expect(hasChatBrowserContext(IM_KEY)).toBe(false)
+    })
+
+    it('disposes a per-turn context whose session was retired under its turn when that turn ends', () => {
+      const { ctx, session } = startTurn(IM_KEY)
+
+      session.retire()
+      expect(ctx.destroyed).toBe(false)
+      endChatBrowserTurn(IM_KEY)
+
+      expect(ctx.destroyed).toBe(true)
+      expect(hasChatBrowserContext(IM_KEY)).toBe(false)
     })
 
     it('only closes the pages of a per-turn context whose turn never reported back when a session holds it', () => {

@@ -1097,8 +1097,11 @@ context is disposed (`ctx.destroy()`, after which every call fails with
 `cleanupSession` reason: idle timeout, rebuild, config change, process death —
 unless a turn is in flight (it re-binds or ends it) or a native chat still
 holds pages (left for the user, as after any session restart; the next session
-is built around the same context). A context no session took is reclaimed by
-the sweep. Before this, a per-turn context was destroyed with its turn: the
+is built around the same context). A per-turn context no session took — the
+turn was refused while being set up, or its session was retired under it — is
+disposed when that turn ends, since nothing can reach it; one whose turn never
+reported back is reclaimed by the sweep. Before this, a per-turn context was
+destroyed with its turn: the
 second message within 30 minutes of an IM chat found the session's tools bound
 to a dead context and every browser call failed until the session idled out —
 which a chat answering every few minutes never let happen (IM patrol chat, 2026-10-16).
@@ -1129,8 +1132,9 @@ sessions are unbounded (`MAX_RESIDENT_BROWSER_CONTEXTS`, `RESIDENT_BROWSER_IDLE_
   over the cap rather than kill a live turn.
 - a per-turn chat idle past `TURN_TRUST_MS` has its pages closed by the same
   sweep (its turn never reported back); its context stays for its session.
-- every one of these closes pages only when a session holds the context
-  (`reap`); a context no session bound is disposed outright.
+- every one of these, like a turn's end, closes pages only when a session holds
+  the context (`closePagesOrDispose`); a context no session bound is disposed
+  outright.
 
 **Teardown paths** (each one goes through `destroyChatBrowserContext`, which logs
 the reason and closes the pages; a native chat's page destruction announces

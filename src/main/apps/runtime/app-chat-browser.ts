@@ -130,21 +130,24 @@ export function bindChatBrowserSession(conversationId: string, lease: V2SessionL
   })
 }
 
-/** A chat's turn is over: a per-turn chat's pages close now, a resident chat's start idling. */
+/**
+ * A chat's turn is over: a per-turn chat's pages close now, a resident chat's
+ * start idling. A per-turn context no session took — the turn was refused
+ * while being set up, or its session was retired under it — goes with the
+ * turn, as nothing can reach it any more.
+ */
 export function endChatBrowserTurn(conversationId: string): void {
   const entry = entries.get(conversationId)
   if (!entry) return
   entry.turns = Math.max(0, entry.turns - 1)
   entry.lastUsedAt = Date.now()
   // A later turn of the same chat may still be using them; the last one out closes them.
-  if (!entry.resident && entry.turns === 0) closePages(conversationId, entry, 'turn-ended')
+  if (!entry.resident && entry.turns === 0) closePagesOrDispose(conversationId, entry, 'turn-ended')
 }
 
 /**
  * Close a chat's pages, keeping the context: the session holding it serves the
- * next turn with the same object, and one no session has bound yet may still
- * be taken by the session its turn is building. The sweep disposes what no
- * session took.
+ * next turn with the same object.
  */
 function closePages(conversationId: string, entry: Entry, reason: string): void {
   const views = entry.ctx.ownedViewCount
@@ -158,7 +161,7 @@ function closePages(conversationId: string, entry: Entry, reason: string): void 
 }
 
 /** Close a chat's pages, or dispose the context when no session holds it. */
-function reap(conversationId: string, entry: Entry, reason: string): void {
+function closePagesOrDispose(conversationId: string, entry: Entry, reason: string): void {
   if (entry.session) closePages(conversationId, entry, reason)
   else destroyChatBrowserContext(conversationId, reason)
 }
@@ -258,17 +261,17 @@ export function sweepChatBrowserContexts(now = Date.now()): void {
     }
     // Revoking the permission must not leave the pages open until the next turn.
     if (app && !resolvePermission(app, 'ai-browser') && isReapable(conversationId, entry, now)) {
-      reap(conversationId, entry, 'ai-browser-disabled')
+      closePagesOrDispose(conversationId, entry, 'ai-browser-disabled')
       continue
     }
     const idleMs = now - entry.lastUsedAt
     if (entry.resident) {
-      if (idleMs >= RESIDENT_BROWSER_IDLE_MS && isReapable(conversationId, entry, now)) reap(conversationId, entry, 'idle')
+      if (idleMs >= RESIDENT_BROWSER_IDLE_MS && isReapable(conversationId, entry, now)) closePagesOrDispose(conversationId, entry, 'idle')
     } else if (idleMs >= TURN_TRUST_MS) {
       // Its turn ended long ago, or never reported back and is no longer
       // trusted. A session holding it keeps it, pages closed, until retired.
       entry.turns = 0
-      reap(conversationId, entry, 'orphaned')
+      closePagesOrDispose(conversationId, entry, 'orphaned')
     }
   }
 

@@ -178,7 +178,7 @@ vi.mock('../../../../src/main/services/analytics/analytics.service', () => ({
 }))
 vi.mock('../../../../src/main/services/ai-browser', () => ({
   createAIBrowserMcpServer: vi.fn(),
-  createScopedBrowserContext: vi.fn(() => ({ destroy: vi.fn(), ownedViewCount: 0, hasRevealedView: () => false })),
+  createScopedBrowserContext: vi.fn(() => ({ destroy: vi.fn(), closePages: vi.fn(), ownedViewCount: 0, hasRevealedView: () => false })),
   AI_BROWSER_SYSTEM_PROMPT: 'AI browser instructions',
 }))
 vi.mock('../../../../src/main/services/ai-terminal', () => ({
@@ -329,7 +329,7 @@ vi.mock('../../../../src/main/services/memory-consolidation', () => ({
 // ============================================
 
 import { sendAppChatMessage } from '../../../../src/main/apps/runtime/app-chat'
-import { hasChatBrowserContext } from '../../../../src/main/apps/runtime/app-chat-browser'
+import { hasChatBrowserContext, destroyAllChatBrowserContexts } from '../../../../src/main/apps/runtime/app-chat-browser'
 import { createScopedBrowserContext } from '../../../../src/main/services/ai-browser'
 import { acquireV2Session, updateConsumerDisplayModel } from '../../../../src/main/services/agent/session-manager'
 import { getApiCredentials } from '../../../../src/main/services/agent/helpers'
@@ -346,6 +346,10 @@ beforeEach(() => {
   getPromptInstructions.mockImplementation(generatePromptInstructions)
   send.mockClear()
   loadChatSessionId.mockReset()
+  // A chat's browser context lives with its engine session, and the mocked
+  // session above never retires; without this, a context from an earlier
+  // test would be found held by a live session.
+  destroyAllChatBrowserContexts('test-reset')
   getEngineCapabilities.mockReturnValue({ features: { permissionRules: true, hooks: true } })
   sessionRegistry.current = null
   vi.mocked(prepareMemoryForTurn).mockClear()
@@ -621,7 +625,8 @@ describe('a restricted borrowed turn keeps every tool-call watcher', () => {
 
     await expect(sendAppChatMessage(memberTurn({ origin: 'colleague' }))).rejects.toThrow(/cannot hold/)
 
-    // A team session's context lives for the turn: released, it is gone.
+    // No session took the context (the turn never reached one), so nothing
+    // can hold it: it goes with the turn.
     expect(createScopedBrowserContext).toHaveBeenCalledTimes(1)
     expect(hasChatBrowserContext(CONVERSATION)).toBe(false)
   })
