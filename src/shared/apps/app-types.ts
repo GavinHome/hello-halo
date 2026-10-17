@@ -48,6 +48,7 @@ export type RunOutcome = 'useful' | 'noop' | 'error' | 'skipped'
  * Stores a snapshot of the AppSpec at install time plus user configuration.
  */
 export interface InstalledApp {
+  dataPath?: string
   /** Unique installation ID (UUID v4) */
   id: string
 
@@ -72,17 +73,35 @@ export interface InstalledApp {
   /** User-provided configuration values (corresponds to spec.config_schema) */
   userConfig: Record<string, unknown>
 
-  /** User overrides for subscription frequencies and other tunable settings */
+  /** User overrides for tunable per-app settings */
   userOverrides: {
-    frequency?: Record<string, string>  // subscriptionId -> frequency string
     /** Notification level: 'all' | 'important' | 'none'. Defaults to 'important'. */
     notificationLevel?: 'all' | 'important' | 'none'
     /** Override AI source for this App. When set, uses this source instead of the global one. */
     modelSourceId?: string
     /** Override model within the selected AI source. Used together with modelSourceId. */
     modelId?: string
+    /**
+     * How hard this digital human thinks, picked on the composer's model card.
+     * Applies to every entry: its chats in Halo, IM and over HTTP, its team
+     * turns, and its scheduled, event and manual runs. Unset, each entry keeps
+     * the model's configured effort.
+     */
+    chatReasoningEffort?: import('../constants/reasoning-effort').ReasoningEffortLevel
     /** When true, the login notice bar is permanently dismissed for this app */
     loginNoticeDismissed?: boolean
+    /**
+     * Offer this digital human its space's memory topics, read-only, in every
+     * turn. Off by default.
+     */
+    spaceMemoryAccess?: boolean
+    /** This digital human's memory: on/off, auto-consolidation, cadence. */
+    memory?: import('../types/memory').MemorySettings
+    /**
+     * MCP servers only: the tools turned off on the server's card, by the name
+     * the card lists. No session is given them, whoever it runs for.
+     */
+    disabledTools?: string[]
   }
 
   /** Permission grants and denials */
@@ -122,6 +141,28 @@ export interface InstalledApp {
 /** User-controlled per-app upgrade strategy. */
 export type UpgradeStrategy = 'auto' | 'notify' | 'manual'
 
+/**
+ * What an author's upgrade left on the user's version. `kept` names top-level
+ * spec fields; `subscriptions` stands for the run schedule as a whole.
+ */
+export interface SpecUpgradeOutcome {
+  fromVersion: string
+  toVersion: string
+  /** Fields that keep the user's value and therefore differ from the author's new version. */
+  kept: string[]
+  /**
+   * False when there was no author's original to compare with, so every
+   * difference was presumed to be the user's rather than known to be.
+   */
+  editsKnown: boolean
+}
+
+/** The activity note of an upgrade that kept fields at the user's version. */
+export interface SpecUpgradeNote extends SpecUpgradeOutcome {
+  /** Kept fields the user has since switched to the author's version from this note. */
+  adopted?: string[]
+}
+
 /** Filter criteria for listing Apps */
 export interface AppListFilter {
   /** Filter by space: string = specific space, null = global only, undefined = all */
@@ -143,8 +184,49 @@ export type ActivityEntryType =
   | 'escalation'
   | 'output'
 
+export interface ExecutionEnvironment {
+  spaceId: string | null
+  spacePath: string
+  workDir: string
+  memoryDir: string
+  /** Connections resolved for this environment; a missing instance must not fall back by name. */
+  mcpBindings?: Record<string, string>
+}
+
+export interface ActivitySource {
+  /** `upgrade`: written when an author's new version was applied, outside any run. */
+  kind: 'automation' | 'team' | 'chat' | 'upgrade' | 'unknown'
+  appId: string
+  runId?: string
+  sessionKey?: string
+  teamId?: string
+  epochId?: string
+  taskId?: string
+  memberId?: string
+  teamName?: string
+  label?: string
+}
+
+export interface EscalationContinuation {
+  status: 'queued' | 'running' | 'failed' | 'completed' | 'cancelled'
+  attempts: number
+  updatedAt: number
+  error?: string
+}
+
 /** Content of an activity entry */
 export interface ActivityEntryContent {
+  // `dismissed` is the user declining one request while its work continues;
+  // `task_closed` is the work itself ending. The card states which happened,
+  // so sharing a reason would make it claim the wrong one.
+  resolution?: { reason: 'task_closed' | 'dismissed' | 'expired' | 'legacy_system_closed'; ts: number; legacyText?: string; attribution?: 'unverified' }
+  source?: ActivitySource
+  resumeAvailable?: boolean
+  stopped?: boolean
+  deadlineAt?: number
+  deadlineReviewRequired?: boolean
+  deadlineReview?: { originalDeadlineAt: number; confirmedAt?: number; deadlineAt?: number | null }
+  teamContext?: import('./team-types').TeamContext
   /** Human-readable summary (required, written by AI) */
   summary: string
   /** Run status indicator */
@@ -163,8 +245,72 @@ export interface ActivityEntryContent {
   question?: string
   /** Preset choices for escalation */
   choices?: string[]
+  /**
+   * The decisions asked, when an escalation asks for more than one. `summary`
+   * then frames why they are being asked and `choices` does not apply. A
+   * single-decision escalation leaves this empty and carries its question in
+   * `summary`.
+   */
+  questions?: EscalationQuestion[]
   /** File URL for output type */
   outputUrl?: string
+  /** Set on the note an author's upgrade leaves when it kept fields at the user's version. */
+  upgrade?: SpecUpgradeNote
+  /** Scheduled times that came due while this run kept the person busy, and so were skipped. */
+  skippedSchedules?: number
+  /** Set when the run did not start because connections it declares are unusable. */
+  missingConnections?: MissingConnection[]
+  /** Tokens the model processed for the run this entry closed, cache included. */
+  tokenUsage?: RunTokenUsage
+  /** Set on the skip a working-days-only schedule leaves when the holiday calendar does not cover the day. */
+  workdayCalendarGap?: boolean
+}
+
+/** Tokens the model processed for a run, summed over its turns. */
+export interface RunTokenUsage {
+  inputTokens: number
+  outputTokens: number
+  cacheReadTokens: number
+  cacheCreationTokens: number
+}
+
+/** Everything the model processed: what a usage quota usually counts. */
+export function totalRunTokens(usage: RunTokenUsage): number {
+  return usage.inputTokens + usage.outputTokens + usage.cacheReadTokens + usage.cacheCreationTokens
+}
+
+/** Two usages added together; undefined when neither exists. */
+export function addRunTokenUsage(a: RunTokenUsage | undefined, b: RunTokenUsage | undefined): RunTokenUsage | undefined {
+  if (!a) return b
+  if (!b) return a
+  return {
+    inputTokens: a.inputTokens + b.inputTokens,
+    outputTokens: a.outputTokens + b.outputTokens,
+    cacheReadTokens: a.cacheReadTokens + b.cacheReadTokens,
+    cacheCreationTokens: a.cacheCreationTokens + b.cacheCreationTokens,
+  }
+}
+
+/** A connection a digital human declares that a run could not use. */
+export interface MissingConnection {
+  /** The id its spec declares. */
+  id: string
+  /** The installed connection's name; the id when nothing is installed. */
+  name: string
+  state: 'not_installed' | 'disabled' | 'needs_login' | 'error'
+}
+
+/** One decision an escalation asks the user to make. */
+export interface EscalationQuestion {
+  question: string
+  /** Preset answers; the user may still type their own. */
+  choices?: string[]
+}
+
+/** The user's answer to a single question. */
+export interface EscalationAnswer {
+  choice?: string
+  text?: string
 }
 
 /** User response to an escalation */
@@ -172,7 +318,16 @@ export interface EscalationResponse {
   ts: number
   choice?: string
   text?: string
+  /** One answer per `content.questions`, in the same order. */
+  answers?: EscalationAnswer[]
 }
+
+/**
+ * What a client sends when answering an escalation. One declaration for every
+ * surface that carries it (renderer API, store, preload, HTTP body) — the same
+ * shape written inline four times is how a field ships broken on one of them.
+ */
+export type EscalationAnswerPayload = Omit<EscalationResponse, 'ts'>
 
 /** A single Activity Thread entry */
 export interface ActivityEntry {
@@ -184,20 +339,86 @@ export interface ActivityEntry {
   sessionKey?: string
   content: ActivityEntryContent
   userResponse?: EscalationResponse
+  continuation?: EscalationContinuation
 }
+
+/** What caused a run to execute */
+export type TriggerType = 'schedule' | 'event' | 'manual' | 'escalation_followup' | 'continue_followup'
+
+/** Status of a single automation run */
+export type RunStatus = 'running' | 'ok' | 'error' | 'skipped' | 'waiting_user'
+
+/** Persistent record of an automation run */
+export interface AutomationRun {
+  runId: string
+  appId: string
+  sessionKey: string
+  status: RunStatus
+  triggerType: TriggerType
+  triggerData?: Record<string, unknown>
+  startedAt: number
+  finishedAt?: number
+  durationMs?: number
+  tokensUsed?: number
+  errorMessage?: string
+  sessionId?: string
+  /** When the retention rule deleted its process transcript and engine session; it can no longer be continued. */
+  transcriptClearedAt?: number
+}
+
+/**
+ * An AutomationRun with its last activity entry's summary attached — for the
+ * run-history list. Falls back to `errorMessage` when `status === 'error'`.
+ */
+export interface AutomationRunWithSummary extends AutomationRun {
+  summary?: string
+}
+
+/** Aggregate run outcomes over a recent window, for the digital-human overview. */
+export interface RunStats {
+  total: number
+  ok: number
+  error: number
+  skipped: number
+  totalTokens: number
+  avgDurationMs: number
+}
+
+/** Options for querying run history */
+export interface RunQueryOptions {
+  limit?: number
+  offset?: number
+}
+
+/**
+ * Why a digital human has stopped and cannot start itself again.
+ *
+ * - auto_disabled: consecutive failures hit the threshold; the runtime stopped it
+ * - needs_login:   a sign-in it depends on expired
+ *
+ * Both are cleared by the same user action (resume).
+ */
+export type BlockedReason = 'auto_disabled' | 'needs_login'
 
 /** Real-time state of an automation App (for UI display) */
 export interface AutomationAppState {
+  automaticEnabled?: boolean
+  runningCount?: number
+  pendingDecisionCount?: number
+  pendingSoloDecisionCount?: number
+  continuationCount?: number
   /**
    * - running:      Actively executing a run right now
    * - queued:       Manually triggered; waiting for a global concurrency slot
    * - idle:         Active and scheduled, no run in progress
    * - paused:       User paused the app; subscriptions inactive
    * - waiting_user: AI escalated; awaiting user decision
+   * - needs_login:  AI Browser detected expired login session
    * - error:        Consecutive failures hit threshold; auto-disabled
    */
-  status: 'running' | 'queued' | 'idle' | 'paused' | 'waiting_user' | 'error'
+  status: 'running' | 'queued' | 'idle' | 'paused' | 'waiting_user' | 'needs_login' | 'error'
   nextRunAtMs?: number
+  /** When the execution in progress started; a continued run counts from its continuation. */
   runningAtMs?: number
   /** Run ID of the currently executing run (only set when status === 'running') */
   runningRunId?: string
@@ -209,14 +430,72 @@ export interface AutomationAppState {
   lastDurationMs?: number
   consecutiveErrors?: number
   pendingEscalationId?: string
+  /** Set while the person is stopped and only the user can restart it. */
+  blocked?: BlockedReason
+}
+
+/**
+ * Whether this digital human is waiting on its owner: it has questions to
+ * answer, or it has stopped and only the owner can restart it.
+ *
+ * Both are the same thing to the person looking at the screen: work that will
+ * not move until they act. Every surface claiming someone needs the owner must
+ * ask this one function — a surface with its own definition can list a person
+ * for a reason the page they open offers no way to resolve.
+ */
+export function needsAttention(state?: Pick<AutomationAppState, 'pendingDecisionCount' | 'blocked'>): boolean {
+  return (state?.pendingDecisionCount ?? 0) > 0 || !!state?.blocked
+}
+
+/** Per-app snapshot for the digital-human card wall's batched first paint. */
+export interface AppOverviewEntry {
+  appId: string
+  state: AutomationAppState
+  /** Most recent run_complete/output activity entry, if any. */
+  latestSummary?: { type: ActivityEntryType; summary: string; ts: number }
+  /** Most recent run statuses, oldest first, capped at 7. */
+  recentRunStatuses: RunStatus[]
+}
+
+export interface PendingDecisionQuery {
+  limit?: number
+  afterTs?: number
+  afterId?: string
+}
+
+/** A digital human that stopped and is waiting for its owner to restart it. */
+export interface BlockedPerson {
+  appId: string
+  name: string
+  reason: BlockedReason
+  /** What the runtime recorded when it stopped, when it recorded anything. */
+  message?: string
+}
+
+export interface PendingDecisionInbox {
+  entries: ActivityEntry[]
+  /** Pending questions plus stopped people — everything the owner must act on. */
+  total: number
+  names: Record<string, string>
+  blocked: BlockedPerson[]
+}
+
+export interface AppRunStartInfo {
+  outcome: 'started' | 'queued'
+  runId?: string
+  sessionKey?: string
+  startedAt?: number
 }
 
 /** Options for querying activity entries */
 export interface ActivityQueryOptions {
+  teamId?: string
+  epochId?: string
   limit?: number
   offset?: number
   type?: ActivityEntryType
   since?: number
+  beforeId?: string
 }
 
 // ============================================
@@ -291,4 +570,85 @@ export function resolvePermission(
   if (app.permissions.granted.includes(permission)) return true
   if (app.spec.permissions?.includes(permission)) return true
   return defaultValue
+}
+
+/**
+ * The switch for reading and messaging the other conversations of the app's
+ * space (`halo-conversations`) — one switch for both, like the other built-in
+ * capabilities. Off unless granted: unlike a space conversation, which the user
+ * drives in person, a digital human acts on its own, so reaching into other
+ * conversations is something the owner opts it into.
+ *
+ * The one reading of the default, shared by the runtime that mounts the tools
+ * and the settings switch that shows it.
+ */
+export const CONVERSATION_COLLAB_PERMISSION = 'conversation-collab'
+
+export function isConversationCollabEnabled(app: Pick<InstalledApp, 'permissions' | 'spec'>): boolean {
+  return resolvePermission(app, CONVERSATION_COLLAB_PERMISSION, false)
+}
+
+/**
+ * Whether the app was installed by the built-in loader (bundled with the
+ * application binary) rather than by the user. Built-in apps are re-synced
+ * from disk on every launch and are protected from permanent deletion
+ * (deleteApp rejects with BuiltinAppProtectedError) — UI delete actions must
+ * be gated on this check before the user clicks. The marker lives on
+ * spec.store.install_source so it survives SQLite and IPC round-trips.
+ */
+export function isBuiltinApp(app: Pick<InstalledApp, 'spec'>): boolean {
+  return app.spec.store?.install_source === 'builtin'
+}
+
+/**
+ * The decisions an escalation asks for, in display order.
+ *
+ * Three shapes reach this: the current multi-decision one, the single-decision
+ * one that carries its question in `summary`, and entries written before
+ * `question` was folded into `summary`. Normalising here is what keeps every
+ * reader — the card, the prompt the AI is resumed with, the task history — from
+ * branching on which shape it was handed.
+ */
+export function getEscalationQuestions(content: ActivityEntryContent): EscalationQuestion[] {
+  if (content.questions?.length) return content.questions
+  return [{
+    question: content.question || content.summary,
+    ...(content.choices?.length ? { choices: content.choices } : {}),
+  }]
+}
+
+/**
+ * The user's answers, one per entry of `getEscalationQuestions`.
+ *
+ * A single decision may arrive flat (`choice` / `text`) or as a one-element
+ * `answers`, whichever shape the question was asked in; both mean the same.
+ */
+export function getEscalationAnswers(response: Pick<EscalationResponse, 'choice' | 'text' | 'answers'>): EscalationAnswer[] {
+  if (response.answers?.length) return response.answers
+  return [{ choice: response.choice, text: response.text }]
+}
+
+/**
+ * The user's answer rendered as one readable block: what the AI is resumed
+ * with, what the team task history records, and what the answered card shows.
+ *
+ * Numbered against the questions when several were asked, because an answer
+ * read apart from its decision ("Yes; the second one") is not an answer.
+ */
+export function formatEscalationAnswer(
+  questions: EscalationQuestion[],
+  response: Pick<EscalationResponse, 'choice' | 'text' | 'answers'>
+): string {
+  const one = (answer: EscalationAnswer) => [answer.choice, answer.text].filter(Boolean).join(' — ')
+
+  const answers = response.answers
+  if (!answers?.length) return one(response)
+  if (questions.length <= 1) return one(answers[0] ?? {})
+
+  return questions
+    .map((q, index) => {
+      const answer = answers[index]
+      return `${index + 1}. ${q.question}\n   → ${(answer && one(answer)) || '(not answered)'}`
+    })
+    .join('\n')
 }

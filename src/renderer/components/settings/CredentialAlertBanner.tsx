@@ -42,7 +42,7 @@ function extractFailures(data: unknown): CredentialFailure[] {
 export function CredentialAlertBanner({ topOffset = 0 }: CredentialAlertBannerProps) {
   const { t } = useTranslation()
   const platform = usePlatform()
-  const setView = useAppStore((s) => s.setView)
+  const navigate = useAppStore((s) => s.navigate)
   const [failures, setFailures] = useState<CredentialFailure[]>([])
   const [dismissed, setDismissed] = useState(false)
 
@@ -92,7 +92,14 @@ export function CredentialAlertBanner({ topOffset = 0 }: CredentialAlertBannerPr
   return (
     <div
       className={`fixed inset-x-0 z-40 flex items-center justify-between gap-3 py-2 bg-halo-warning/95 border-b border-halo-warning safe-area-top drag-region ${overlayPadding}`}
-      style={{ top: topOffset, paddingTop: 'max(8px, var(--sat))' }}
+      style={{
+        top: topOffset,
+        paddingTop: 'max(8px, var(--sat))',
+        ...(isElectron() && platform.isLinux && !isCapacitor() ? {
+          paddingLeft: 'max(1rem, env(titlebar-area-x, 0px))',
+          paddingRight: 'max(1rem, calc(100vw - env(titlebar-area-x, 0px) - env(titlebar-area-width, calc(100vw - 9rem / var(--display-scale, 1)))))',
+        } : {}),
+      }}
       role="alert"
     >
       <div className="flex items-center gap-2 min-w-0 text-sm text-foreground">
@@ -108,7 +115,7 @@ export function CredentialAlertBanner({ topOffset = 0 }: CredentialAlertBannerPr
       {/* Interactive controls must opt out of the drag region to stay clickable. */}
       <div className="no-drag flex items-center gap-2 flex-shrink-0">
         <button
-          onClick={() => setView('settings')}
+          onClick={() => navigate('settings')}
           className="text-sm font-medium text-foreground hover:underline"
         >
           {t('Open Settings')}

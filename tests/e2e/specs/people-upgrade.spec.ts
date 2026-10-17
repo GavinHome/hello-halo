@@ -1,0 +1,70 @@
+import { test, expect } from '../fixtures/people'
+import { navigateToApps, setTheme } from '../fixtures/helpers'
+
+test.setTimeout(60000)
+
+test('directory search, bounded pages, return state and dedicated coordinator settings use real persisted data', async ({ window }) => {
+  await navigateToApps(window)
+  const search = window.getByRole('textbox', { name: 'Search digital humans' })
+  await expect(search).toBeVisible()
+  await expect(window.locator('article')).toHaveCount(24)
+  const coordinator = window.getByRole('button', { name: 'System coordinator', exact: true })
+  await expect(coordinator).toBeVisible()
+  await coordinator.click()
+  await window.getByRole('button', { name: 'Capabilities and settings', exact: true }).click()
+  await expect(window.locator('#settings-group-identity input[type="text"]').first()).toHaveValue('System coordinator')
+  await window.getByRole('button', { name: 'All digital humans', exact: true }).click()
+  await search.fill('Evidence team')
+  await expect(window.locator('article')).toHaveCount(2)
+  await expect(window.getByRole('button', { name: 'System coordinator', exact: true })).toBeVisible()
+  await window.getByRole('button', { name: 'Analyst 000', exact: true }).click()
+  await expect(window.getByRole('button', { name: 'Run now', exact: true })).toBeEnabled()
+  await window.getByRole('button', { name: 'All digital humans', exact: true }).click()
+  await expect(search).toHaveValue('Evidence team')
+  await search.fill('')
+  await window.getByRole('button', { name: 'Next', exact: true }).click()
+  await expect(window.locator('article')).toHaveCount(24)
+  await window.screenshot({ path: 'tests/e2e/results/people-directory-list.png' })
+})
+
+test('inbox includes dedicated coordinators, pages requests, and retains unsent decision drafts', async ({ window }) => {
+  await navigateToApps(window)
+  await window.getByRole('button', { name: /^Handle all/ }).click()
+  await expect(window.locator('article')).toHaveCount(30)
+  await window.getByRole('button', { name: 'Load more requests', exact: true }).click()
+  await expect(window.locator('article')).toHaveCount(34)
+  await expect(window.getByRole('button', { name: 'System coordinator', exact: true })).toBeVisible()
+  const first = window.locator('article').first()
+  const draft = first.getByRole('textbox')
+  await draft.fill('Preserve this decision draft')
+  await first.getByRole('button', { name: 'Analyst 000', exact: true }).click()
+  await expect(window.getByRole('textbox').filter({ hasText: 'Preserve this decision draft' })).toHaveCount(1)
+  await window.getByRole('button', { name: 'Return to requests', exact: true }).click()
+  await expect(window.locator('article').first().getByRole('textbox')).toHaveValue('Preserve this decision draft')
+})
+
+test.describe('large directory and responsive detail', () => {
+  test.use({ peopleCount: 200 })
+  test('200 people and 34 requests remain bounded across themes and 320/375px', async ({ window }) => {
+    const errors: string[] = []
+    window.on('pageerror', error => errors.push(error.message))
+    await navigateToApps(window)
+    for (const width of [1440, 375, 320]) {
+      await window.setViewportSize({ width, height: width < 640 ? 812 : 1000 })
+      for (const theme of ['light', 'dark'] as const) {
+        await setTheme(window, theme)
+        await expect(window.locator('article')).toHaveCount(24)
+        const size = await window.evaluate(() => ({ content: document.documentElement.scrollWidth, viewport: document.documentElement.clientWidth }))
+        expect(size.content).toBeLessThanOrEqual(size.viewport + 1)
+        await window.screenshot({ path: `tests/e2e/results/people-directory-${width}-${theme}.png` })
+      }
+    }
+    await window.getByRole('textbox', { name: 'Search digital humans' }).fill('Analyst 000')
+    await window.getByRole('button', { name: 'Analyst 000', exact: true }).click()
+    await expect(window.getByRole('button', { name: 'Run now', exact: true })).toBeEnabled()
+    const size = await window.evaluate(() => ({ content: document.documentElement.scrollWidth, viewport: document.documentElement.clientWidth }))
+    expect(size.content).toBeLessThanOrEqual(size.viewport + 1)
+    await window.screenshot({ path: 'tests/e2e/results/people-detail-320-dark.png' })
+    expect(errors).toEqual([])
+  })
+})

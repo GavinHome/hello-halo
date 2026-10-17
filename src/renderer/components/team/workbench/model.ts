@@ -1,0 +1,301 @@
+import { compareTaskTimes, taskTime } from './time'
+import { inputsByReply } from '../../chat/transcript'
+import type { Message, Thought } from '../../../types'
+import type { ActivityEntry } from '../../../../shared/apps/app-types'
+import type { BlackboardFinding, BlackboardTask, RosterMember, TeamActivity, TeamConversation } from '../../../../shared/apps/team-types'
+
+export type TaskGroup = 'attention' | 'involved' | 'mine' | 'other' | 'reception' | 'automatic'
+export const taskGroups: TaskGroup[] = ['attention', 'mine', 'involved', 'other', 'reception', 'automatic']
+
+export function taskGroup(task: TeamConversation): TaskGroup {
+  if (task.waitingForMe) return 'attention'
+  if (task.kind === 'im') return 'reception'
+  if (task.kind === 'run') return 'automatic'
+  if (task.createdByMe) return 'mine'
+  if (task.involvedMe) return 'involved'
+  return 'other'
+}
+
+export function visibleTasks(tasks: TeamConversation[]): TeamConversation[] {
+  return tasks.filter(task => task.kind !== 'member').sort((a, b) => compareTaskTimes(a.lastActivityAt, b.lastActivityAt, true) || a.epochId.localeCompare(b.epochId))
+}
+
+/**
+ * Sender and intended recipient of a message that did not arrive. A failed
+ * fate (`reply`) is filed under the member the message never reached.
+ */
+export function undeliveredParties(activity: TeamActivity): { senderAppId: string | null; recipientAppId: string | null } | null {
+  if (activity.status !== 'undelivered') return null
+  return activity.kind === 'reply'
+    ? { senderAppId: activity.targetAppId, recipientAppId: activity.actorAppId }
+    : { senderAppId: activity.actorAppId, recipientAppId: activity.targetAppId }
+}
+
+export function activityLevel(activity: TeamActivity): 'attention' | 'result' | 'process' | 'message' {
+  if (['undelivered', 'timeout', 'error', 'escalation'].includes(activity.status ?? '')) return 'attention'
+  if (activity.kind === 'message' || activity.kind === 'reply') return 'process'
+  if (activity.kind === 'decision' || activity.kind === 'finding' || activity.kind === 'run_end' || activity.status === 'done') return 'result'
+  return 'process'
+}
+
+export interface TaskMemberReport {
+  appId: string
+  message: Message
+}
+
+/**
+ * Members with a trace in this task: a record naming them, work assigned to or
+ * filed by them, a report of theirs already read, a decision of theirs, or work
+ * running for it now. No trace proves nothing, so it only lowers how loudly an
+ * unreadable member is mentioned (see `reportGaps`).
+ */
+export function taskParticipants(input: {
+  epochId: string
+  activities: readonly TeamActivity[]
+  tasks: readonly BlackboardTask[]
+  findings: readonly BlackboardFinding[]
+  roster: readonly RosterMember[]
+  reports: readonly TaskMemberReport[]
+  memberAppIds: readonly string[]
+}): Set<string> {
+  const ids = new Set(input.memberAppIds)
+  for (const act of input.activities) {
+    ids.add(act.actorAppId)
+    if (act.targetAppId) ids.add(act.targetAppId)
+  }
+  for (const task of input.tasks) {
+    ids.add(task.createdByAppId)
+    if (task.assigneeAppId) ids.add(task.assigneeAppId)
+  }
+  for (const finding of input.findings) ids.add(finding.authorAppId)
+  for (const report of input.reports) ids.add(report.appId)
+  for (const member of input.roster) if (member.busy?.some(row => row.epochId === input.epochId)) ids.add(member.appId)
+  return ids
+}
+
+export interface ReportGaps {
+  /** Members of this task whose owner's computer is offline, grouped by owner. */
+  offline: Array<{ owner: string | null; members: string[] }>
+  /** Members whose reports could not be read although their computer is reachable. */
+  failed: string[]
+  /** Owners of members with no trace in this task whose computers are offline. */
+  elsewhere: Array<string | null>
+}
+
+/**
+ * Whose reports cannot be shown, and how loudly to say so. A member that took
+ * part, or that failed while reachable, is a warning; an offline member with no
+ * trace in this task is only named, never left to read as having said nothing.
+ */
+export function reportGaps(unavailable: readonly string[], roster: readonly RosterMember[], participants: ReadonlySet<string>): ReportGaps {
+  const missing = new Set(unavailable)
+  const offline = new Map<string | null, string[]>()
+  const failed: string[] = []
+  const elsewhere = new Set<string | null>()
+  for (const member of roster) {
+    if (!missing.has(member.appId)) continue
+    const owner = member.owner?.trim() || null
+    if (member.sameMachine !== false || member.presence !== 'offline') failed.push(member.memberName)
+    else if (participants.has(member.appId)) offline.set(owner, [...(offline.get(owner) ?? []), member.memberName])
+    else elsewhere.add(owner)
+  }
+  return { offline: [...offline].map(([owner, members]) => ({ owner, members })), failed, elsewhere: [...elsewhere] }
+}
+
+export interface ExecutionTurn {
+  id: string
+  /** The input the execution started from. */
+  input?: Message
+  /** Every input it read: delivered together at its start, or received while it ran. */
+  inputs: Message[]
+  outputs: Message[]
+}
+
+export function executionTurns(messages: Message[]): ExecutionTurn[] {
+  const turns: ExecutionTurn[] = []
+  for (const message of messages) {
+    const current = turns[turns.length - 1]
+    if (message.role === 'user' || (message.role === 'system' && message.source === 'team-message')) {
+      const joins = !!current?.input && (current.outputs.length === 0 || message.metadata?.inputMode === 'live')
+      if (joins) current.inputs.push(message)
+      else turns.push({ id: message.id, input: message, inputs: [message], outputs: [] })
+    } else if (message.role === 'assistant') {
+      if (current) current.outputs.push(message)
+      else turns.push({ id: message.id, inputs: [], outputs: [message] })
+    }
+  }
+  return turns.reverse()
+}
+
+export interface TaskActivityRow {
+  id: string
+  at: number | null
+  message?: Message
+  appId?: string
+  activities?: TeamActivity[]
+  notifications?: TaskMemberReport[]
+}
+
+export function taskActivityRows(reports: TaskMemberReport[], activities: TeamActivity[]): TaskActivityRow[] {
+  const rows: TaskActivityRow[] = reports.map(({ appId, message }) => ({
+    id: `message:${appId}:${message.id}`, at: taskTime(message.timestamp), appId,
+    ...(isSystemNotification(message) ? { notifications: [{ appId, message }] } : { message }),
+  }))
+  rows.push(...activities.map(activity => ({ id: activity.id, at: taskTime(activity.createdAt), activities: [activity] })))
+  rows.sort((a, b) => compareTaskTimes(a.at, b.at) || a.id.localeCompare(b.id))
+  const grouped: TaskActivityRow[] = []
+  for (const row of rows) {
+    const previous = grouped[grouped.length - 1]
+    const act = row.activities?.[0]
+    const last = previous?.activities?.[previous.activities.length - 1]
+    const notification = row.notifications?.[0]
+    const lastNotification = previous?.notifications?.[previous.notifications.length - 1]
+    const lastNotificationAt = taskTime(lastNotification?.message.timestamp)
+    if (notification && lastNotification && previous.notifications!.length < 20 && notification.appId === lastNotification.appId && row.at !== null && lastNotificationAt !== null && row.at - lastNotificationAt < 300000) previous.notifications!.push(notification)
+    else if (act && last && previous.activities!.length < 20 && act.kind === last.kind && activityLevel(act) === 'process' && activityLevel(last) === 'process' && row.at !== null && taskTime(last.createdAt) !== null && row.at - taskTime(last.createdAt)! < 300000) previous.activities!.push(act)
+    else grouped.push(row)
+  }
+  return grouped.map(row => ({
+    ...row,
+    at: row.notifications?.length ? taskTime(row.notifications[row.notifications.length - 1].message.timestamp)
+      : row.activities?.length ? taskTime(row.activities[row.activities.length - 1].createdAt) : row.at,
+  })).sort((a, b) => compareTaskTimes(a.at, b.at, true) || a.id.localeCompare(b.id))
+}
+
+export function isTeamBackgroundTurn(messages: Message[]): boolean {
+  return !messages.some(isHumanInput)
+}
+
+// The owner adding to work already running belongs to that work; it does not start a conversation.
+function isHumanInput(message: Message): boolean {
+  return message.role === 'user' && message.source !== 'injection'
+    && (!message.metadata?.teamTriggerKind || message.metadata.teamTriggerKind === 'human_message')
+}
+
+function isSystemNotification(message: Message): boolean {
+  return (message.role === 'user' || (message.role === 'system' && message.source === 'team-message'))
+    && ['member_stopped', 'periodic_check', 'run_start'].includes(message.metadata?.teamTriggerKind ?? '')
+}
+
+export function conversationMessages(messages: Message[]): Message[] {
+  let humanConversation = false
+  return messages.filter(message => {
+    if (isHumanInput(message)) {
+      humanConversation = true
+      return true
+    }
+    // A teammate can resume the work without changing who the conversation serves.
+    return humanConversation && message.role === 'assistant'
+  })
+}
+
+export function taskReportMessages(messages: Message[]): Message[] {
+  const conversation = new Set(conversationMessages(messages))
+  return messages.filter(message => (message.content.trim() || message.error) &&
+    (isSystemNotification(message) || (message.role === 'assistant' && !conversation.has(message))))
+}
+
+export type ConversationRow =
+  | { id: string; message: Message; activities?: never; decision?: never; sharedDecision?: never; additions?: never }
+  | { id: string; activities: TeamActivity[]; message?: never; decision?: never; sharedDecision?: never; additions?: never }
+  | { id: string; decision: ActivityEntry; message?: never; activities?: never; sharedDecision?: never; additions?: never }
+  | { id: string; sharedDecision: SharedTaskDecision; message?: never; activities?: never; decision?: never; additions?: never }
+  | { id: string; additions: Message[]; message?: never; activities?: never; decision?: never; sharedDecision?: never }
+
+export interface SharedTaskDecision {
+  refId: string
+  appId: string
+  question: string
+  requestedAt: number
+  answer?: string
+  answeredAt?: number
+}
+
+export const COLLABORATION_PREVIEW_LIMIT = 3
+
+export function decisionMessageId(decision: ActivityEntry, messages: Message[]): string | undefined {
+  return conversationMessages(messages).find(message => message.role === 'assistant' &&
+    decisionHasReceipt(decision, message.thoughts ?? []))?.id
+}
+
+export function decisionHasReceipt(decision: ActivityEntry, thoughts: Thought[]): boolean {
+  return thoughts.some(thought =>
+    (thought.toolResult?.output ?? thought.toolOutput ?? (thought.type === 'tool_result' ? thought.content : '')).includes(decision.id))
+}
+
+export function sharedTaskDecisions(activities: TeamActivity[], epochId: string | null, appId?: string, localDecisionIds: Set<string> = new Set()): SharedTaskDecision[] {
+  if (!epochId || !appId) return []
+  const paired = new Map<string, { request?: TeamActivity; answer?: TeamActivity }>()
+  for (const activity of activities) {
+    if (activity.epochId !== epochId || activity.kind !== 'decision' || activity.actorAppId !== appId || !activity.refId || localDecisionIds.has(activity.refId)) continue
+    const pair = paired.get(activity.refId) ?? {}
+    if (activity.status === 'escalation') pair.request = activity
+    else if (activity.status === 'ok') pair.answer = activity
+    paired.set(activity.refId, pair)
+  }
+  return [...paired.entries()].flatMap(([refId, pair]) => {
+    const source = pair.request ?? pair.answer
+    if (!source) return []
+    return [{
+      refId,
+      appId,
+      question: pair.request?.body?.trim() || source.subject.trim(),
+      requestedAt: pair.request?.createdAt ?? source.createdAt,
+      ...(pair.answer?.body?.trim() ? { answer: pair.answer.body.trim(), answeredAt: pair.answer.createdAt } : {}),
+    }]
+  })
+}
+
+/**
+ * The owner's additions no shown reply carries — their reply is work this view
+ * does not show, or there is none — drawn on their own where they were sent, as
+ * they were while that work ran.
+ */
+function looseAdditions(messages: Message[], conversation: readonly Message[]): Message[] {
+  const carriers = inputsByReply(messages)
+  const carried = new Set<Message>()
+  for (const message of conversation) for (const addition of carriers.get(message.id)?.injections ?? []) carried.add(addition)
+  return messages.filter(message => message.source === 'injection' && !carried.has(message))
+}
+
+export function taskConversationRows(messages: Message[], activities: TeamActivity[], epochId: string | null, appId?: string, decisions: ActivityEntry[] = []): ConversationRow[] {
+  const sharedDecisions = sharedTaskDecisions(activities, epochId, appId, new Set(decisions.map(decision => decision.id)))
+  const conversation = conversationMessages(messages)
+  const entries: Array<{
+    id: string
+    at: number | null
+    message?: Message
+    addition?: Message
+    decision?: ActivityEntry
+    sharedDecision?: SharedTaskDecision
+    activity?: TeamActivity
+  }> = [
+    ...conversation.map(message => ({ id: `message:${message.id}`, at: taskTime(message.timestamp), message, activity: undefined, decision: undefined })),
+    ...looseAdditions(messages, conversation).map(addition => ({ id: `addition:${addition.id}`, at: taskTime(addition.timestamp), addition })),
+    ...decisions.map(decision => ({ id: `decision:${decision.id}`, at: taskTime(decision.ts), decision, message: undefined, activity: undefined })),
+    ...sharedDecisions.map(sharedDecision => ({ id: `shared-decision:${sharedDecision.refId}`, at: taskTime(sharedDecision.requestedAt), sharedDecision })),
+    ...[...new Map(activities.map(activity => [activity.id, activity])).values()]
+      .filter(activity => appId && epochId && activity.epochId === epochId &&
+        (activity.kind === 'message' || activity.kind === 'reply') && activity.targetAppId &&
+        activity.actorAppId !== activity.targetAppId &&
+        (activity.actorAppId === appId || activity.targetAppId === appId) &&
+        (activity.subject.trim() || activity.body?.trim()))
+      .map(activity => ({ id: `activity:${activity.id}`, at: taskTime(activity.createdAt), activity, message: undefined, decision: undefined })),
+  ].sort((a, b) => compareTaskTimes(a.at, b.at) || a.id.localeCompare(b.id))
+  const rows: ConversationRow[] = []
+  for (const entry of entries) {
+    if (entry.decision) rows.push({ id: entry.id, decision: entry.decision })
+    else if ('sharedDecision' in entry && entry.sharedDecision) rows.push({ id: entry.id, sharedDecision: entry.sharedDecision })
+    else if (entry.message) rows.push({ id: entry.id, message: entry.message })
+    else if (entry.addition) {
+      const previous = rows[rows.length - 1]
+      if (previous?.additions) previous.additions.push(entry.addition)
+      else rows.push({ id: entry.id, additions: [entry.addition] })
+    } else if (entry.activity) {
+      const previous = rows[rows.length - 1]
+      if (previous?.activities && activityLevel(entry.activity) !== 'attention' && activityLevel(previous.activities[previous.activities.length - 1]) !== 'attention') previous.activities.push(entry.activity)
+      else rows.push({ id: entry.id, activities: [entry.activity] })
+    }
+  }
+  return rows
+}

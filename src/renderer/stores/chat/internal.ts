@@ -8,21 +8,49 @@
  */
 import { create } from 'zustand'
 import { api } from '../../api'
-import type { Conversation, ConversationMeta, Message, ToolCall, Artifact, Thought, AgentEventBase, ImageAttachment, CompactInfo, CanvasContext, AgentErrorType, PendingQuestion, Question, TaskStatus, PulseItem, TaskProgress } from '../../types'
+import type { Conversation, ConversationMeta, Message, ToolCall, Artifact, Thought, AgentEventBase, ImageAttachment, CompactInfo, ApiRetryNotice, CanvasContext, AgentErrorType, WorkDirIssue, PendingQuestion, Question, TaskStatus, PulseItem, PulseReadInfo, TaskProgress } from '../../types'
 import type { SessionInitInfo } from '../../types/slash-command'
 import { PULSE_READ_GRACE_PERIOD_MS } from '../../types'
+import type { ReasoningEffortLevel } from '../../../shared/constants/reasoning-effort'
 import { canvasLifecycle } from '../../services/canvas-lifecycle'
 import type { StoreApi } from 'zustand'
+import type { GoalInput } from '../../../shared/types/goal'
+import type { ApiRetryEvent } from '../../../shared/types/api-retry'
+import type { ContentReference } from '../../../shared/types/content-reference'
+import type { AgentInputArrivedEvent, AgentInputStoppedEvent } from '../../../shared/types/agent-input'
+import type { LiveInput } from '../../types/live-input'
 
-// LRU cache size limit
+// Conversation cache bounds (backend/cache.ts): entries, and estimated heap
+// (one conversation can hold megabytes of inline images or v1 thoughts).
 export const CONVERSATION_CACHE_SIZE = 10
+export const CONVERSATION_CACHE_BYTES = 32 * 1024 * 1024
+// Thoughts read on demand, across all cached conversations.
+export const LOADED_THOUGHTS_BYTES = 16 * 1024 * 1024
 
 // Store-level timer for pulseReadAt cleanup (independent of UI components)
 
 // Per-space state (conversations metadata belong to a space)
+export interface SendMessageOptions {
+  /** Set as the conversation goal before this message runs. */
+  goal?: GoalInput
+  /** Places the user pointed at, in the order they added them; the text may then be empty. */
+  references?: ContentReference[]
+}
+
 export interface SpaceState {
   conversations: ConversationMeta[]  // Lightweight metadata, no messages
   currentConversationId: string | null
+  /**
+   * The digital-human conversation currently active in this space's input,
+   * if any. Independent of `currentConversationId` — selecting a digital
+   * human does not change it,
+   * so the last regular conversation is preserved and is exactly where
+   * `clearAppChatSelection` lands when the user switches back to Halo.
+   * Optional (not just null) so every pre-existing SpaceState object
+   * literal across this store doesn't need to be touched; absent reads the
+   * same as null.
+   */
+  selectedAppChat?: { appId: string; conversationId: string } | null
 }
 
 // Per-session runtime state (isolated per conversation, persists across space switches)
@@ -35,17 +63,30 @@ export interface SessionState {
   pendingToolApproval: ToolCall | null
   error: string | null
   errorType: AgentErrorType | null  // Special error type for custom UI handling
+  // The folder a turn could not start in; set with 'working_dir_unavailable'
+  workDirIssue?: WorkDirIssue | null
+  // The user has opened this error; it stays on screen but no longer needs
+  // them. Set instead of clearing where the error lives only in this session.
+  errorSeen?: boolean
   // Compact notification
   compactInfo: CompactInfo | null
+  // Model request the engine is waiting to resend; mirrors main, never persisted
+  apiRetry: ApiRetryNotice | null
   // Text block version - increments on each new text block (for StreamingBubble reset)
   textBlockVersion: number
   // Pending question from AskUserQuestion tool
   pendingQuestion: PendingQuestion | null
   // Messages queued for mid-turn injection (shown below StreamingBubble during generation)
   queuedMessages: string[]
+  /** Accepted input placement within this turn; canonical records remain in the transcript. */
+  liveInputs?: LiveInput[]
   // Monotonically increasing turn counter — used to detect stale handleAgentComplete callbacks.
   // Incremented by sendMessage() and handleAgentTurnStart(); checked by handleAgentComplete().
   turnId: number
+  // Wall-clock start of the current turn, set by sendMessage()/handleAgentTurnStart().
+  // Task panel elapsed-time display reads this instead of approximating from
+  // conversation metadata (which only updates once the turn completes).
+  turnStartedAt?: number
 }
 
 // Create empty session state
@@ -60,12 +101,14 @@ export function createEmptySessionState(): SessionState {
     error: null,
     errorType: null,
     compactInfo: null,
+    apiRetry: null,
     textBlockVersion: 0,
     pendingQuestion: null,
     queuedMessages: [],
     turnId: 0,
   }
 }
+
 
 // Create empty space state
 export function createEmptySpaceState(): SpaceState {
@@ -95,18 +138,41 @@ export interface ChatState {
   unseenCompletions: Map<string, { spaceId: string; title: string }>
 
   // Pulse: tracks read timestamps for grace period display (60s before removal)
-  // Map<conversationId, { readAt: number; originalStatus: 'completed-unseen' | 'error'; spaceId: string; title: string }>
-  pulseReadAt: Map<string, { readAt: number; originalStatus: 'completed-unseen' | 'error'; spaceId: string; title: string }>
+  pulseReadAt: Map<string, PulseReadInfo>
 
   // Current space pointer
   currentSpaceId: string | null
 
+  // Reported by the mounted chat view, not inferred from the remembered selection.
+  visibleConversationId: string | null
+  setVisibleConversation: (conversationId: string | null) => void
+
   // Pulse: pending cross-space navigation target (set by navigateToConversation, consumed by SpacePage init)
   pendingPulseNavigation: string | null
 
+  // Digital-human equivalent of pendingPulseNavigation (set by navigateToAppChat,
+  // consumed by SpacePage init) — R8's detail-page "Chat" button and the
+  // resource rail's hover action both cross spaces via this flag.
+  pendingAppChatNavigation: { appId: string; conversationId: string } | null
+
   // Text to pre-fill into a space's composer on arrival (e.g. a skill's slash
   // command from the store's "Use" action). Consumed once by InputArea.
-  pendingComposerInput: { spaceId: string; text: string } | null
+  //
+  // `slashPreview`, when set, is shown in the slash-command menu instead of
+  // whatever the *session's* live command list happens to contain. That list
+  // (SessionInitInfo.skills) only exists once a conversation session has
+  // actually started, and only lists whatever skills the SDK loaded for that
+  // particular session — neither of which the composer-fill sources (a skill
+  // row click, the store's "Use" button) depend on: they already know the
+  // skill is real from their own data (disk-discovery / the app spec), so
+  // there's nothing to validate against the session for. Without this, a
+  // skill filled into a brand-new empty conversation (no session yet) would
+  // never show the confirmation menu at all.
+  pendingComposerInput: {
+    spaceId: string
+    text: string
+    slashPreview?: { command: string; label: string; description?: string }
+  } | null
 
   // Artifacts (per space)
   artifacts: Artifact[]
@@ -115,22 +181,48 @@ export interface ChatState {
   isLoading: boolean
   isLoadingConversation: boolean  // Loading full conversation
 
+  // Conversations that could not be read into the cache, with the reason;
+  // cleared when a read succeeds.
+  conversationLoadErrors: Map<string, string>
+
+  // In-memory (non-persisted) composer draft per conversationId — switching
+  // the input's digital-human selector stashes/restores each link's unsent
+  // text. Keyed by conversationId so it works uniformly for space and
+  // app-chat conversations; intentionally not persisted (session-scoped only).
+  composerDrafts: Map<string, string>
+  getComposerDraft: (conversationId: string) => string
+  setComposerDraft: (conversationId: string, text: string) => void
+  clearComposerDraft: (conversationId: string) => void
+
+  // Digital-human selection for the main conversation board's input.
+  // See SpaceState.selectedAppChat for the field this manages.
+  selectAppChatConversation: (spaceId: string, appId: string, conversationId: string) => void
+  /**
+   * Switch back to the normal (Halo) link. Lands on the space's last active
+   * regular conversation (`currentConversationId`, untouched by selection —
+   * see SpaceState.selectedAppChat); creates a fresh one if there wasn't one.
+   */
+  clearAppChatSelection: (spaceId: string) => Promise<void>
+
   // Computed getters
   getCurrentSpaceState: () => SpaceState
   getSpaceState: (spaceId: string) => SpaceState
   getCurrentConversation: () => Conversation | null
   getCurrentConversationMeta: () => ConversationMeta | null
-  getCurrentSession: () => SessionState
   getSession: (conversationId: string) => SessionState
   getConversations: () => ConversationMeta[]
   getCurrentConversationId: () => string | null
   getCachedConversation: (conversationId: string) => Conversation | null
+  /** The conversation on screen: the selected digital human's, else the regular one. */
+  getActiveConversationId: () => string | null
+  getActiveConversation: () => Conversation | null
 
   // Space actions
   setCurrentSpace: (spaceId: string) => void
 
   // Conversation actions
-  loadConversations: (spaceId: string) => Promise<void>
+  /** Resolves whether the list was read. */
+  loadConversations: (spaceId: string) => Promise<boolean>
   preloadAllSpaceConversations: (spaceIds: string[]) => void
   createConversation: (spaceId: string) => Promise<Conversation | null>
   selectConversation: (conversationId: string) => void
@@ -138,13 +230,47 @@ export interface ChatState {
   renameConversation: (spaceId: string, conversationId: string, newTitle: string) => Promise<boolean>
   toggleStarConversation: (spaceId: string, conversationId: string, starred: boolean) => Promise<boolean>
   setConversationModel: (spaceId: string, conversationId: string, modelSourceId: string, modelId: string) => Promise<boolean>
+  setConversationReasoningEffort: (spaceId: string, conversationId: string, level: ReasoningEffortLevel) => Promise<boolean>
   attachKnowledgeBase: (spaceId: string, conversationId: string, kbId: string) => Promise<void>
   detachKnowledgeBase: (spaceId: string, conversationId: string, kbId: string) => Promise<void>
 
   // Messaging
-  sendMessage: (content: string, images?: ImageAttachment[], thinkingEnabled?: boolean) => Promise<void>
+  /**
+   * Resolves false when main refused the message before recording it; the
+   * optimistic bubble is then withdrawn so the caller can restore the draft.
+   */
+  sendMessage: (content: string, images?: ImageAttachment[], thinkingEnabled?: boolean, options?: SendMessageOptions) => Promise<boolean>
   stopGeneration: (conversationId?: string) => Promise<void>
-  injectMessage: (conversationId: string, message: string) => Promise<void>
+  /**
+   * Add to the running turn; references may carry the message alone. Resolves
+   * false when nothing went out, so the caller can restore the draft.
+   */
+  injectMessage: (conversationId: string, message: string, references?: ContentReference[]) => Promise<boolean>
+  /** Drop a message from the "queued for the running turn" list. */
+  dequeueMessage: (conversationId: string, message: string) => void
+  /** Empty a conversation's history in place (digital-human default sessions). */
+  clearConversation: (conversationId: string) => Promise<boolean>
+  /** Delete a local digital-human session and everything held for it. */
+  deleteAppChatSession: (appId: string, spaceId: string, conversationId: string) => Promise<boolean>
+  /**
+   * Read a conversation in (if it is not cached) and pick up a running turn,
+   * without changing what is selected. `warm: false` also leaves its engine
+   * session alone, for a view that only reports on the conversation.
+   */
+  openConversation: (conversationId: string, options?: { warm?: boolean }) => Promise<void>
+  /** Read the next older page of a paged conversation into the cache. */
+  loadEarlierMessages: (conversationId: string) => Promise<void>
+  /** Make sure one message (a search result) is among the loaded ones. */
+  ensureMessageLoaded: (conversationId: string, messageId: string) => Promise<void>
+  /** Re-read a conversation after events may have been missed (reconnect). */
+  refreshConversation: (conversationId: string) => Promise<void>
+  /**
+   * Pick up a turn already running when a view that keeps its own transcript
+   * (IM, team member) opens it: the steps so far, an unanswered question, a
+   * retry the engine is waiting on. Reads only while this window holds the
+   * conversation as running.
+   */
+  recoverRunningTurn: (conversationId: string) => Promise<void>
 
   // Tool approval
   approveTool: (conversationId: string) => Promise<void>
@@ -154,10 +280,12 @@ export interface ChatState {
   continueAfterInterrupt: (conversationId: string) => void
 
   // Event handlers (called from App component) - with session IDs
+  handleAgentInputArrived: (data: AgentInputArrivedEvent) => void
+  handleAgentInputStopped: (data: AgentInputStoppedEvent) => void
   handleAgentMessage: (data: AgentEventBase & { content: string; isComplete: boolean }) => void
   handleAgentToolCall: (data: AgentEventBase & ToolCall) => void
   handleAgentToolResult: (data: AgentEventBase & { toolId: string; result: string; isError: boolean }) => void
-  handleAgentError: (data: AgentEventBase & { error: string; errorType?: AgentErrorType }) => void
+  handleAgentError: (data: AgentEventBase & { error: string; errorType?: AgentErrorType; workDirIssue?: WorkDirIssue }) => void
   handleAgentComplete: (data: AgentEventBase) => void
   handleAgentThought: (data: AgentEventBase & { thought: Thought }) => void
   handleAgentThoughtDelta: (data: AgentEventBase & {
@@ -173,6 +301,7 @@ export interface ChatState {
     taskProgress?: TaskProgress
   }) => void
   handleAgentCompact: (data: AgentEventBase & { trigger: 'manual' | 'auto'; preTokens: number }) => void
+  handleAgentApiRetry: (data: ApiRetryEvent) => void
   handleAgentSessionInfo: (data: AgentEventBase & SessionInitInfo) => void
   handleAgentTurnStart: (data: AgentEventBase & { autonomous?: boolean }) => void
 
@@ -183,8 +312,24 @@ export interface ChatState {
   // Thoughts lazy loading
   loadMessageThoughts: (spaceId: string, conversationId: string, messageId: string) => Promise<Thought[]>
 
-  // Pulse cleanup
+  // Pulse cleanup + grace-period item actions (Keep / Remove — see PulseList)
   cleanupPulseReadAt: () => void
+  keepPulseItem: (conversationId: string) => void
+  removePulseItem: (conversationId: string) => void
+  // The conversation on screen finished while the window was in the background;
+  // the user is back on it, so it is read the way opening it would read it.
+  readActiveCompletion: () => void
+
+  // Cold-start hydration from the main-process task-state table (survives
+  // restart — see platform/task-state). Merge-only: never overwrites an
+  // entry the renderer has already written locally since launch.
+  loadPersistedTaskState: () => Promise<void>
+
+  // Full resync in response to a `task:state_changed` push (another client
+  // kept/removed/read an item, or the server's expiry sweep ran). Unlike
+  // loadPersistedTaskState this replaces the maps outright, since the whole
+  // point here is to reflect a change this client didn't make itself.
+  syncPersistedTaskState: () => Promise<void>
 
   // Derived pulse state (cached, recalculated only when pulse-relevant fields change)
   _pulseItems: PulseItem[]
@@ -198,6 +343,10 @@ export interface ChatState {
   // Cleanup
   reset: () => void
   resetSpace: (spaceId: string) => void
+  /** Drop every trace of one conversation (cache, live state, draft, selection). */
+  forgetConversation: (conversationId: string) => void
+  /** Critical memory pressure: keep only what is on screen or running (backend/cache.ts). */
+  shedBackgroundDetail: () => void
 }
 
 // Default empty states
@@ -207,7 +356,7 @@ export const EMPTY_SPACE_STATE: SpaceState = createEmptySpaceState()
 // ---- re-exports for slices ----
 export { api, canvasLifecycle, PULSE_READ_GRACE_PERIOD_MS }
 export type { SessionInitInfo }
-export type { Conversation, ConversationMeta, Message, ToolCall, Artifact, Thought, AgentEventBase, ImageAttachment, CompactInfo, CanvasContext, AgentErrorType, PendingQuestion, Question, TaskStatus, PulseItem, TaskProgress }
+export type { Conversation, ConversationMeta, Message, ToolCall, Artifact, Thought, AgentEventBase, ImageAttachment, CompactInfo, ApiRetryNotice, CanvasContext, AgentErrorType, PendingQuestion, Question, TaskStatus, PulseItem, PulseReadInfo, TaskProgress }
 
 // ---- slice creator types: each slice receives the store's set/get and
 // returns its subset of ChatState; get() sees the full store for cross-slice calls.

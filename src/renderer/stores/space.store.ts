@@ -2,10 +2,16 @@
  * Space Store - Workspace state management
  */
 
+import { useCallback } from 'react'
 import { create } from 'zustand'
 import { api } from '../api'
+import { canvasLifecycle } from '../services/canvas-lifecycle'
 import { useChatStore } from './chat.store'
+import { useConversationListPrefs } from './conversation-list-prefs.store'
 import type { Space, CreateSpaceInput, SpacePreferences } from '../types'
+
+/** A summary is a filesystem scan per workspace; the selector dropdown asks
+ * for one every time it opens, so repeat opens reuse the last result. */
 
 interface SpaceState {
   // Spaces data
@@ -21,14 +27,32 @@ interface SpaceState {
   loadSpaces: () => Promise<void>
   loadHaloSpace: () => Promise<void>
   setCurrentSpace: (space: Space | null) => void
+  /**
+   * Pick the space a caller with no space context should land on: the real
+   * space with the most recent activity, or halo-temp if none exist yet.
+   * Loads spaces/haloSpace first if needed. Used at startup and whenever
+   * `currentSpace` is cleared out from under a caller (e.g. deleting the
+   * active space) — kept here because the selection rule depends on space
+   * domain knowledge (halo-temp is excluded from the activity comparison
+   * since it re-stamps `updatedAt` to "now" every session; `listSpaces()`
+   * sorts by user-defined `sortOrder` once any space has one, so the first
+   * array entry is not reliably "most recently used").
+   */
+  selectDefaultSpace: () => Promise<Space | null>
   createSpace: (input: CreateSpaceInput) => Promise<Space | null>
-  updateSpace: (spaceId: string, updates: { name?: string; icon?: string }) => Promise<Space | null>
-  deleteSpace: (spaceId: string) => Promise<boolean>
+  updateSpace: (spaceId: string, updates: { name?: string; icon?: string; color?: string }) => Promise<Space | null>
+  /** Point the space at another folder; resolves to the reason it could not, or null. */
+  setSpaceWorkingDir: (spaceId: string, workingDir: string) => Promise<string | null>
+  /** 'busy' while a reply, run or background task is going in the space. */
+  deleteSpace: (spaceId: string) => Promise<'deleted' | 'busy' | 'failed'>
+  /** Remove an unreachable space's registry entry — does not touch disk. */
+  forgetSpace: (spaceId: string) => Promise<boolean>
   openSpaceFolder: (spaceId: string) => Promise<void>
   refreshCurrentSpace: () => Promise<void>
 
   // Preferences actions
-  updateSpacePreferences: (spaceId: string, preferences: Partial<SpacePreferences>) => Promise<void>
+  /** Resolves to whether the preferences were saved. */
+  updateSpacePreferences: (spaceId: string, preferences: Partial<SpacePreferences>) => Promise<boolean>
   getSpacePreferences: (spaceId: string) => SpacePreferences | undefined
 
   // Reorder actions
@@ -84,6 +108,19 @@ export const useSpaceStore = create<SpaceState>((set, get) => ({
   // Set current space
   setCurrentSpace: (space) => {
     set({ currentSpace: space })
+  },
+
+  selectDefaultSpace: async () => {
+    await get().loadSpaces()
+    const { spaces, haloSpace } = get()
+
+    if (spaces.length === 0) return haloSpace
+
+    return spaces.reduce((latest, s) => {
+      const sTime = new Date(s.lastActiveAt || s.updatedAt).getTime()
+      const latestTime = new Date(latest.lastActiveAt || latest.updatedAt).getTime()
+      return sTime > latestTime ? s : latest
+    })
   },
 
   // Create new space
@@ -146,33 +183,80 @@ export const useSpaceStore = create<SpaceState>((set, get) => ({
     }
   },
 
+  setSpaceWorkingDir: async (spaceId, workingDir) => {
+    try {
+      const response = await api.setSpaceWorkingDir(spaceId, workingDir)
+      if (!response.success || !response.data) return response.error || 'Failed to update space'
+      const updatedSpace = response.data as Space
+      set((state) => ({
+        spaces: state.spaces.map((s) => s.id === spaceId ? updatedSpace : s),
+        currentSpace: state.currentSpace?.id === spaceId ? updatedSpace : state.currentSpace,
+      }))
+      return null
+    } catch (error) {
+      console.error('Failed to change the working directory:', error)
+      return (error as Error).message || 'Failed to update space'
+    }
+  },
+
   // Delete space
   deleteSpace: async (spaceId) => {
     try {
       const response = await api.deleteSpace(spaceId)
 
       if (response.success) {
+        // Before the fallback below is entered, so the deleted space's tabs are not parked.
+        void canvasLifecycle.forgetSpace(spaceId)
+
         // Remove from spaces list
         set((state) => ({
           spaces: state.spaces.filter((s) => s.id !== spaceId)
         }))
 
-        // Clear current space if it was deleted
+        // If the deleted space was active, fall back to another space
+        // immediately rather than leaving `currentSpace` null — with no
+        // HomePage to escape to, that would strand the user on a
+        // permanent "no space selected" screen instead of just this tab.
         const currentSpace = get().currentSpace
         if (currentSpace?.id === spaceId) {
           set({ currentSpace: null })
+          const fallback = await get().selectDefaultSpace()
+          if (fallback) set({ currentSpace: fallback })
         }
 
         // Clean up chat store state for the deleted space
         // (removes orphan pinned conversations, cached metadata, etc.)
         useChatStore.getState().resetSpace(spaceId)
+        useConversationListPrefs.getState().forgetSpace(spaceId)
 
+        return 'deleted'
+      }
+
+      return response.code === 'SPACE_BUSY' ? 'busy' : 'failed'
+    } catch (error) {
+      console.error('Failed to delete space:', error)
+      return 'failed'
+    }
+  },
+
+  // Remove an unreachable space's registry entry (does not touch disk)
+  forgetSpace: async (spaceId) => {
+    try {
+      const response = await api.forgetSpace(spaceId)
+
+      if (response.success) {
+        void canvasLifecycle.forgetSpace(spaceId)
+        set((state) => ({
+          spaces: state.spaces.filter((s) => s.id !== spaceId)
+        }))
+        useChatStore.getState().resetSpace(spaceId)
+        useConversationListPrefs.getState().forgetSpace(spaceId)
         return true
       }
 
       return false
     } catch (error) {
-      console.error('Failed to delete space:', error)
+      console.error('Failed to forget space:', error)
       return false
     }
   },
@@ -218,29 +302,33 @@ export const useSpaceStore = create<SpaceState>((set, get) => ({
   updateSpacePreferences: async (spaceId, preferences) => {
     try {
       const response = await api.updateSpacePreferences(spaceId, preferences)
-
-      if (response.success && response.data) {
-        const updatedSpace = response.data as Space
-
-        // Update in current space if it matches
-        const currentSpace = get().currentSpace
-        if (currentSpace?.id === spaceId) {
-          set({ currentSpace: updatedSpace })
-        }
-
-        // Update in spaces list or halo space
-        if (updatedSpace.isTemp) {
-          set({ haloSpace: updatedSpace })
-        } else {
-          set((state) => ({
-            spaces: state.spaces.map((s) =>
-              s.id === spaceId ? updatedSpace : s
-            )
-          }))
-        }
+      if (!response.success || !response.data) {
+        console.error('Failed to update space preferences:', response.error)
+        return false
       }
+
+      const updatedSpace = response.data as Space
+
+      // Update in current space if it matches
+      const currentSpace = get().currentSpace
+      if (currentSpace?.id === spaceId) {
+        set({ currentSpace: updatedSpace })
+      }
+
+      // Update in spaces list or halo space
+      if (updatedSpace.isTemp) {
+        set({ haloSpace: updatedSpace })
+      } else {
+        set((state) => ({
+          spaces: state.spaces.map((s) =>
+            s.id === spaceId ? updatedSpace : s
+          )
+        }))
+      }
+      return true
     } catch (error) {
       console.error('Failed to update space preferences:', error)
+      return false
     }
   },
 
@@ -292,5 +380,16 @@ export const useSpaceStore = create<SpaceState>((set, get) => ({
       console.error('[SpaceStore] reorderSpaces error:', error)
       set({ spaces: prevSpaces, error: 'Failed to reorder spaces' })
     }
-  }
+  },
 }))
+
+/** Display name for a space id; falls back to the id while spaces are still loading. */
+export function useSpaceNameResolver(): (spaceId: string) => string {
+  const haloSpace = useSpaceStore(state => state.haloSpace)
+  const spaces = useSpaceStore(state => state.spaces)
+  return useCallback((spaceId: string) => {
+    const space = haloSpace?.id === spaceId ? haloSpace : spaces.find(s => s.id === spaceId)
+    if (!space) return spaceId
+    return space.isTemp ? 'Halo' : space.name
+  }, [haloSpace, spaces])
+}

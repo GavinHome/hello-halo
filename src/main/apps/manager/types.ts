@@ -6,6 +6,8 @@
  */
 
 import type { AppSpec, AppType } from '../spec'
+import { isBuiltinApp } from '../../../shared/apps/app-types'
+import type { SpecUpgradeOutcome } from '../../../shared/apps/app-types'
 
 // ============================================
 // App Status
@@ -50,6 +52,9 @@ export interface InstalledApp {
   /** Space this App is installed in (null = global, available in all spaces) */
   spaceId: string | null
 
+  /** Stable identity storage root, retained when the default space changes. */
+  dataPath?: string
+
   /** Full AppSpec (initially set at install time, updatable via updateSpec) */
   spec: AppSpec
 
@@ -66,15 +71,25 @@ export interface InstalledApp {
   /** User-provided configuration values (corresponds to spec.config_schema) */
   userConfig: Record<string, unknown>
 
-  /** User overrides for subscription frequencies and other tunable settings */
+  /** User overrides for tunable per-app settings */
   userOverrides: {
-    frequency?: Record<string, string>  // subscriptionId -> frequency string
     /** Notification level: 'all' | 'important' | 'none'. Defaults to 'important'. */
     notificationLevel?: 'all' | 'important' | 'none'
     /** Override AI source for this App. When set, uses this source instead of the global one. */
     modelSourceId?: string
     /** Override model within the selected AI source. Used together with modelSourceId. */
     modelId?: string
+    /** How hard it thinks, on every entry; see the shared InstalledApp for the contract. */
+    chatReasoningEffort?: import('../../../shared/constants/reasoning-effort').ReasoningEffortLevel
+    /**
+     * Offer this digital human its space's memory topics, read-only, in every
+     * turn. Off by default.
+     */
+    spaceMemoryAccess?: boolean
+    /** This digital human's memory: on/off, auto-consolidation, cadence. */
+    memory?: import('../../../shared/types/memory').MemorySettings
+    /** MCP servers only: tools turned off on the card; see the shared InstalledApp. */
+    disabledTools?: string[]
   }
 
   /** Permission grants and denials */
@@ -148,10 +163,20 @@ export type StatusChangeHandler = (appId: string, oldStatus: AppStatus, newStatu
 export type AppInstalledHandler = (app: InstalledApp) => void
 
 /**
+ * Why an app went away: the user uninstalled it, an AI acting for the user did,
+ * the app cleaned up after itself (built-in retirement, rolled-back install,
+ * disposable team members), or its whole space was deleted.
+ */
+export type AppUninstallReason = 'user' | 'ai' | 'system' | 'space-deleted'
+
+/**
  * Callback fired after a successful uninstall. Receives the app record captured
  * just before the status transition so subscribers still see the full spec.
  */
-export type AppUninstalledHandler = (app: InstalledApp) => void
+export type AppUninstalledHandler = (app: InstalledApp, reason: AppUninstallReason) => void
+
+/** Callback fired after an author's new version was applied with `upgradeSpec`. */
+export type SpecUpgradedHandler = (appId: string, outcome: SpecUpgradeOutcome) => void
 
 /** Unsubscribe function returned by event registration */
 export type Unsubscribe = () => void
@@ -160,6 +185,8 @@ export type Unsubscribe = () => void
 export interface UninstallOptions {
   /** If true, delete the App's work directory. Default: false (preserve data). */
   purge?: boolean
+  /** Who asked, for the uninstall notification. Default: 'user'. */
+  reason?: Exclude<AppUninstallReason, 'space-deleted'>
 }
 
 /**
@@ -195,12 +222,10 @@ export interface DeleteAppOptions {
  *   - are protected from permanent deletion (deleteApp is rejected)
  *   - honor user pause / soft-uninstall persistently across boots
  *
- * The marker lives on `spec.store.install_source === 'builtin'` so it survives
- * round-trips through SQLite (spec_json column) and IPC.
+ * Re-exported from shared/apps/app-types so renderer and main share one
+ * implementation of the `install_source === 'builtin'` check.
  */
-export function isBuiltinApp(app: InstalledApp): boolean {
-  return app.spec.store?.install_source === 'builtin'
-}
+export { isBuiltinApp }
 
 /**
  * App Manager Service -- lifecycle management for installed Apps.
@@ -218,10 +243,11 @@ export interface AppManagerService {
    * at `{space.path}/.halo/apps/{appId}/` (for space-scoped apps) or
    * `{haloDir}/apps/{appId}/` (for global apps).
    *
-   * @param spaceId - Target space ID, or null for global install
+   * @param spaceId - Target space ID, or null for a global install (MCP servers and skills only)
    * @param spec - Validated AppSpec
    * @param userConfig - User-provided config values (optional)
    * @returns The generated App ID (UUID)
+   * @throws AutomationSpaceRequiredError if a digital human is installed with a null spaceId
    * @throws AppAlreadyInstalledError if same specId+spaceId combination exists
    */
   install(spaceId: string | null, spec: AppSpec, userConfig?: Record<string, unknown>): Promise<string>
@@ -373,6 +399,52 @@ export interface AppManagerService {
   updateSpec(appId: string, specPatch: Record<string, unknown>): void
 
   /**
+   * Apply an author's new version — a store or bundled upgrade — without
+   * overwriting the user's edits. For a digital human, a field the user changed
+   * since the author's original keeps the user's value, every other field takes
+   * the new version, and the new version becomes the recorded original. Other
+   * App types are replaced as `updateSpec` would.
+   *
+   * The single entry for every upgrade path; user and AI edits keep using
+   * `updateSpec`, which never touches the original.
+   *
+   * @throws AppNotFoundError if the App does not exist
+   * @throws AppSpecValidationError if the author's spec is invalid
+   */
+  upgradeSpec(appId: string, authorSpec: AppSpec): SpecUpgradeOutcome
+
+  /** What `upgradeSpec` would keep for this author's spec, without applying it. */
+  previewUpgradeSpec(appId: string, authorSpec: AppSpec): SpecUpgradeOutcome
+
+  /**
+   * Switch fields of a digital human to the author's original, after which
+   * upgrades update them again. Release fields and fields already equal to the
+   * original are left alone.
+   *
+   * @returns the fields that changed
+   * @throws AppNotFoundError if the App does not exist
+   * @throws Error if no author's original is recorded
+   * @throws AppSpecValidationError if the result is invalid (a field depending on another one kept)
+   */
+  adoptAuthorVersion(appId: string, fields: readonly string[]): string[]
+
+  /**
+   * Record the author's original for a digital human installed before
+   * originals were kept. Only the spec of the installed version qualifies, and
+   * an original already recorded is never replaced.
+   *
+   * @returns whether it was recorded
+   * @throws AppNotFoundError if the App does not exist
+   */
+  recordAuthorSpec(appId: string, authorSpec: AppSpec): boolean
+
+  /** The author's original that upgrades compare against, or null when none is recorded. */
+  getAuthorSpec(appId: string): AppSpec | null
+
+  /** Store-installed digital humans that have no author's original recorded yet. */
+  listStoreInstallsWithoutAuthorSpec(): string[]
+
+  /**
    * Move an App to a different space (or to/from global scope).
    *
    * For skill apps: atomically removes the skill files from the current
@@ -391,6 +463,7 @@ export interface AppManagerService {
    * @param newSpaceId - Target space ID, or null to move to global scope
    * @throws AppNotFoundError if the App does not exist
    * @throws SpaceNotFoundError if newSpaceId is non-null and space does not exist
+   * @throws AutomationSpaceRequiredError if a digital human is moved to global scope
    * @throws AppAlreadyInstalledError if target scope already has the same specId
    */
   moveToSpace(appId: string, newSpaceId: string | null): Promise<void>
@@ -435,6 +508,16 @@ export interface AppManagerService {
    * List installed Apps with optional filtering.
    * Supports filtering by spaceId, status, and App type.
    */
+  getStudioSummary(language?: string, excludeIds?: string[]): import('../../../shared/apps/people-directory').StudioSummary
+  listPeopleDirectory(filter: import('../../../shared/apps/people-directory').PersonDirectoryFilter): { items: import('../../../shared/apps/people-directory').PersonDirectoryRecord[]; total: number; offset: number; limit: number }
+
+  /**
+   * Ids of digital humans currently in one of the given statuses, without
+   * loading their records. For callers that need set membership before they
+   * paginate, such as the directory's "needs you" filter.
+   */
+  listPersonIdsByStatus(statuses: readonly AppStatus[]): string[]
+
   listApps(filter?: AppListFilter): InstalledApp[]
 
   /**
@@ -463,7 +546,7 @@ export interface AppManagerService {
 
   /**
    * Get the work directory path for an App.
-   * Ensures the directory exists (auto-creates if missing).
+   * Creates initial storage; an unavailable persisted data path blocks instead of recreating memory.
    *
    * @returns Absolute path to `{space.path}/.halo/apps/{appId}/`
    * @throws AppNotFoundError if the App does not exist
@@ -501,4 +584,10 @@ export interface AppManagerService {
    * Returns an unsubscribe function.
    */
   onAppUninstalled(handler: AppUninstalledHandler): Unsubscribe
+
+  /**
+   * Register a callback fired after every `upgradeSpec`, whichever path
+   * upgraded the App. Returns an unsubscribe function.
+   */
+  onAppSpecUpgraded(handler: SpecUpgradedHandler): Unsubscribe
 }

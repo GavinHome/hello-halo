@@ -7,6 +7,9 @@ import { api } from '../api'
 import { isCapacitor } from '../api/transport'
 import type { HaloConfig, AppView, McpServerStatus } from '../types'
 import { hasAnyAISource } from '../types'
+import { useSpaceStore } from './space.store'
+import { useAppsStore } from './apps.store'
+import { useChatStore } from './chat.store'
 
 // Git Bash installation progress
 interface GitBashInstallProgress {
@@ -17,9 +20,12 @@ interface GitBashInstallProgress {
 }
 
 interface AppState {
-  // View state
+  // View state — `view` is the current persistent destination; `returnTo` is
+  // the destination a "back" affordance should resolve to, not a history
+  // stack. Callers that need back behavior read `returnTo` and pick their
+  // own fallback (e.g. `navigate(returnTo || 'space')`).
   view: AppView
-  previousView: AppView | null  // Track previous view for back navigation
+  returnTo: AppView | null
   isLoading: boolean
   error: string | null
 
@@ -36,11 +42,31 @@ interface AppState {
   gitBashCheckPending: boolean  // True when git-bash check was deferred due to IPC not ready
 
   // Actions
-  setView: (view: AppView) => void
-  goBack: () => void  // Navigate back to previous view
+  // The single write entry point for UI-driven navigation (rail, header,
+  // deep links). Bootstrap/init flows setting the landing view are a
+  // separate concern and are not required to route through these.
+  navigate: (view: AppView) => void
+  // For "back" affordances: resolves to returnTo (or the caller's fallback)
+  // and, unlike navigate(), consumes returnTo so a later back doesn't loop
+  // back to where "back" itself was pressed from.
+  navigateBack: (fallback: AppView) => void
+  // Land in the main app experience: resolves which space to open via
+  // space.store's own selection rule (space.store.ts:selectDefaultSpace —
+  // kept there since it depends on space-domain knowledge this store has
+  // no business knowing) and only then switches to the space view, so
+  // there is never a frame where the view is 'space' but no space is set.
+  // Cross-store call, an intentional new dependency edge (app.store ->
+  // space.store, peers not layers): every "setup/onboarding just finished"
+  // call site needs the same sequencing, so it lives here once rather than
+  // being re-inlined at each of them.
+  enterApp: () => Promise<void>
   setLoading: (loading: boolean) => void
   setError: (error: string | null) => void
   setConfig: (config: HaloConfig) => void
+  /** Re-read config from main after a write that bypassed setConfig. */
+  refreshConfig: () => Promise<void>
+  /** Re-read only the AI sources, after main reported a changed model list. */
+  reloadAiSources: () => Promise<void>
   updateConfig: (updates: Partial<HaloConfig>) => void
   setMcpStatus: (status: McpServerStatus[], timestamp: number) => void
 
@@ -49,15 +75,20 @@ interface AppState {
   startGitBashInstall: () => Promise<void>
   refreshGitBashStatus: () => Promise<void>
   completeDeferredGitBashCheck: () => Promise<void>
+  /** The Git Bash setup page finished: go on with initialization from where it stopped. */
+  completeGitBashSetup: (installed: boolean) => Promise<void>
 
   // Initialization
   initialize: () => Promise<void>
 }
 
+let aiSourcesReload: Promise<void> | null = null
+let aiSourcesReloadAgain = false
+
 export const useAppStore = create<AppState>((set, get) => ({
   // Initial state
   view: 'splash',
-  previousView: null,
+  returnTo: null,
   isLoading: true,
   error: null,
   config: null,
@@ -68,25 +99,84 @@ export const useAppStore = create<AppState>((set, get) => ({
   gitBashCheckPending: false,
 
   // Actions
-  setView: (view) => {
+  navigate: (view) => {
     const currentView = get().view
-    // Save current view as previous (except for transient screens)
+    // Navigating to where you already are leaves nothing behind. Recording it
+    // anyway made the return target the current screen, so back did nothing --
+    // reachable from every always-enabled nav entry (rail, narrow sheet,
+    // overflow menu), which do not disable the destination you are on.
+    if (currentView === view) return
+    // Record the view being left as the return target, except for transient
+    // screens that are never a meaningful place to come back to.
     if (currentView !== 'splash' && currentView !== 'setup' && currentView !== 'serverConnect' && currentView !== 'serverList') {
-      set({ previousView: currentView, view })
+      set({ returnTo: currentView, view })
     } else {
       set({ view })
     }
   },
 
-  goBack: () => {
-    const previousView = get().previousView
-    // Go back to previous view, or default to home
-    set({ view: previousView || 'home', previousView: null })
+  navigateBack: (fallback) => {
+    set({ view: get().returnTo || fallback, returnTo: null })
+  },
+
+  enterApp: async () => {
+    const spaceStore = useSpaceStore.getState()
+    const target = await spaceStore.selectDefaultSpace()
+    if (target) {
+      spaceStore.setCurrentSpace(target)
+      spaceStore.refreshCurrentSpace()  // fire-and-forget: fills in preferences once loaded
+    }
+    set({ view: 'space' })
+
+    // Fire-and-forget: without this, running/waiting automation apps only
+    // appear in the task panel after the user visits the Apps page, since
+    // that page is what previously triggered loadApps/loadAppState.
+    useAppsStore.getState().loadAutomationTaskState().catch(err => {
+      console.error('[Store] loadAutomationTaskState error:', err)
+    })
+
+    // Fire-and-forget: restores completed-but-unseen conversations and
+    // in-progress grace periods that were persisted before the last restart.
+    useChatStore.getState().loadPersistedTaskState().catch(err => {
+      console.error('[Store] loadPersistedTaskState error:', err)
+    })
   },
 
   setLoading: (isLoading) => set({ isLoading }),
   setError: (error) => set({ error }),
   setConfig: (config) => set({ config }),
+
+  // Config is loaded once at startup, so a write made in main (e.g. binding a
+  // bot from a digital human's settings page) leaves every other config-backed
+  // view stale until restart. Surfaces that write through main call this.
+  refreshConfig: async () => {
+    const response = await api.getConfig({ snapshot: true })
+    if (response.success && response.data) set({ config: response.data as HaloConfig })
+  },
+
+  // Several sources can change in one refresh; reads that arrive while one is
+  // running collapse into a single follow-up read.
+  reloadAiSources: () => {
+    if (aiSourcesReload) {
+      aiSourcesReloadAgain = true
+      return aiSourcesReload
+    }
+    aiSourcesReload = (async () => {
+      do {
+        aiSourcesReloadAgain = false
+        try {
+          const response = await api.getConfig()
+          const aiSources = response.success ? (response.data as HaloConfig | undefined)?.aiSources : undefined
+          const current = get().config
+          if (aiSources && current) set({ config: { ...current, aiSources } })
+          else if (!response.success) console.warn('[Store] AI sources reload failed:', response.error)
+        } catch (error) {
+          console.warn('[Store] AI sources reload failed:', error)
+        }
+      } while (aiSourcesReloadAgain)
+    })().finally(() => { aiSourcesReload = null })
+    return aiSourcesReload
+  },
 
   updateConfig: (updates) => {
     const currentConfig = get().config
@@ -203,6 +293,31 @@ export const useAppStore = create<AppState>((set, get) => ({
     }
   },
 
+  // Initialization stops at the Git Bash page before loading the settings, so
+  // they are loaded here — as the settings snapshot, like initialize does, or
+  // saves made later in the session would not be checked against failed reads.
+  completeGitBashSetup: async (installed) => {
+    console.log('[App] Git Bash setup completed, installed:', installed)
+    if (!installed) {
+      await api.setConfig({ gitBash: { skipped: true, installed: false, path: null } })
+    }
+
+    const response = await api.getConfig({ snapshot: true })
+    if (!response.success || !response.data) {
+      get().navigate('setup')
+      return
+    }
+    const config = response.data as HaloConfig
+    set({ config })
+    // Show setup if first launch or no AI source configured
+    // (modelConfigSkipped honors an explicit deferral from the first-run wizard)
+    if (config.isFirstLaunch || (!hasAnyAISource(config.aiSources) && !config.modelConfigSkipped)) {
+      get().navigate('setup')
+    } else {
+      await get().enterApp()
+    }
+  },
+
   // Initialize app
   initialize: async () => {
     console.log('[Store] initialize() called')
@@ -249,7 +364,7 @@ export const useAppStore = create<AppState>((set, get) => ({
       // Load config from main process
       // config:get handler is registered in Essential services, so this always works.
       console.log('[Store] Loading config...')
-      const response = await api.getConfig()
+      const response = await api.getConfig({ snapshot: true })
       console.log('[Store] Config response:', response.success ? 'success' : 'failed')
 
       if (response.success && response.data) {
@@ -264,24 +379,8 @@ export const useAppStore = create<AppState>((set, get) => ({
           console.log('[Store] First launch or no AI source, showing setup')
           set({ view: 'setup' })
         } else {
-          // Go to home
-          console.log('[Store] Config loaded, showing home')
-          set({ view: 'home' })
-
-          // Silently refresh remote model lists in background (fire-and-forget).
-          // Ensures users see the latest available models without manual refresh,
-          // e.g. after provider adds new models or app is reinstalled.
-          api.refreshAISourcesConfig().then(result => {
-            if (result.success && result.data) {
-              const current = get().config
-              if (current) {
-                set({ config: { ...current, aiSources: (result.data as any).aiSources } })
-                console.log('[Store] Startup model refresh complete')
-              }
-            }
-          }).catch(() => {
-            // Network unavailable — acceptable, user can refresh manually
-          })
+          console.log('[Store] Config loaded, entering app')
+          await get().enterApp()
         }
       } else {
         console.error('[Store] Failed to load config:', response.error)

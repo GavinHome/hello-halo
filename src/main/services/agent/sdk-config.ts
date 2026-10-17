@@ -18,11 +18,15 @@ import {
   DELEGATED_ROUTING_HEADER
 } from '../../openai-compat-router'
 import type { ApiCredentials, ResolvedModelCapabilities } from './types'
-import { inferOpenAIWireApi, credentialsToBackendConfig, getHeadlessElectronPath } from './helpers'
+import type { ReasoningEffortLevel } from '../../../shared/constants/reasoning-effort'
+import { inferOpenAIWireApi, credentialsToBackendConfig, getHeadlessElectronPath, getDisabledMcpTools } from './helpers'
+import { mcpToolName } from './mcp/tool-name'
 import { resolveModelId } from '../../../shared/types/ai-sources'
-import { buildSystemPrompt, DEFAULT_ALLOWED_TOOLS } from './system-prompt'
+import { readUserAgentSettings, INTERNAL_TASK_SETTINGS, type UserAgentSettings } from './user-agent-settings'
+import { buildSystemPrompt, DEFAULT_ALLOWED_TOOLS, hostSystemPromptText, toEngineSystemPrompt } from './system-prompt'
 import { createCanUseTool } from './permission-handler'
 import { DEFAULT_DISABLED_TOOLS, TEAM_TOOLS } from '../../../shared/constants/disabled-tools'
+import { DEFAULT_MAX_TURNS } from '../../../shared/constants/agent-limits'
 import {
   MAX_OUTPUT_TOKENS_HARD_MIN,
   MAX_OUTPUT_TOKENS_HARD_CAP,
@@ -30,6 +34,14 @@ import {
   CONTEXT_WINDOW_HARD_MIN,
   CONTEXT_WINDOW_HARD_CAP,
 } from '../../../shared/constants/model-runtime-limits'
+import { getActiveEngine, getEngineCapabilities } from './resolved-sdk'
+import { getDeviceIdentity } from '../../foundation/device-identity'
+import { applyOfficeRuntimeEnv } from '../office-runtime'
+import { applyProxyEnv } from '../proxy-policy'
+import { buildRequestIdentity } from './request-identity-factory'
+import { WorkingDirectoryUnavailableError } from './working-dir'
+import { createMemoryWriteHooks, type MemoryWriteGuardConfig } from '../../platform/memory'
+import { buildModelPricingTable } from '../../../shared/constants/model-pricing'
 
 // ============================================
 // Configuration
@@ -55,6 +67,10 @@ const PROXY_ANTHROPIC = true
  * This is the output of credential resolution process.
  */
 export interface ResolvedSdkCredentials {
+  sourceId?: string
+  credentialsGeneration?: number | string
+  /** Captured source credentials for adapters; never re-resolve global selection. */
+  apiCredentials?: Readonly<ApiCredentials>
   /** Base URL for Anthropic API (may be OpenAI compat router) */
   anthropicBaseUrl: string
   /** API key for Anthropic API (may be encoded backend config) */
@@ -82,16 +98,11 @@ export interface ResolvedSdkCredentials {
  * Parameters for building SDK environment variables
  */
 export interface SdkEnvParams {
+  sourceId?: string
   anthropicApiKey: string
   anthropicBaseUrl: string
   /** See ResolvedSdkCredentials.delegatedRoutingHeader. */
   delegatedRoutingHeader?: string
-  /** Claude CLI config directory mode */
-  configDirMode?: 'halo' | 'cc' | 'custom'
-  /** Custom config dir path (when configDirMode === 'custom') */
-  customConfigDir?: string
-  /** Enable Agent Teams (multi-agent collaboration) */
-  enableTeams?: boolean
   /**
    * Resolved per-model capability numbers (preset + user override merged).
    * When present, drives CLAUDE_CODE_MAX_OUTPUT_TOKENS and
@@ -132,6 +143,10 @@ function clampInt(value: number, min: number, max: number): number {
  * id encoded into the API key stays clean so non-Anthropic upstreams never
  * see the synthetic suffix. Threshold is strict `>` to avoid opening
  * unaudited CC `[1m]` branches for models that don't need them.
+ *
+ * The effective window is the only input: Model Config shows no separate
+ * opt-in, so gating on anything else would leave a window the user can read
+ * on screen silently capped at the intrinsic default.
  */
 export function applyCC1mContextUnlock(
   sdkModel: string,
@@ -139,7 +154,7 @@ export function applyCC1mContextUnlock(
 ): string {
   if (!sdkModel) return sdkModel
   if (/\[1m\]$/i.test(sdkModel)) return sdkModel
-  if (!capabilities || capabilities.extendedContext !== true) return sdkModel
+  if (!capabilities) return sdkModel
   if (!Number.isFinite(capabilities.contextWindow)) return sdkModel
   if (capabilities.contextWindow <= CC_INTRINSIC_DEFAULT_CONTEXT) return sdkModel
   return `${sdkModel}[1m]`
@@ -196,9 +211,11 @@ export function resolveSdkRuntimeLimits(
 }
 
 /**
- * Parameters for building base SDK options
+ * What describes the session itself. The user's global AI settings are not
+ * here: the entry points below read them (see user-agent-settings.ts), so a
+ * caller cannot forget one.
  */
-export interface BaseSdkOptionsParams {
+export interface SessionSdkOptionsParams {
   /** Resolved SDK credentials */
   credentials: ResolvedSdkCredentials
   /** Working directory for the agent */
@@ -213,10 +230,6 @@ export interface BaseSdkOptionsParams {
   stderrHandler?: (data: string) => void
   /** Optional MCP servers configuration */
   mcpServers?: Record<string, any> | null
-  /** Maximum tool call turns per message (from config) */
-  maxTurns?: number
-  /** System prompt profile ('official' | 'halo') */
-  promptProfile?: 'official' | 'halo'
   /**
    * Whether this session gets Halo's self-API credentials.
    *
@@ -227,16 +240,6 @@ export interface BaseSdkOptionsParams {
    * instruction can reach.
    */
   selfApiAccess?: boolean
-  /** Claude CLI config directory mode */
-  configDirMode?: 'halo' | 'cc' | 'custom'
-  /** Custom config dir path (when configDirMode === 'custom') */
-  customConfigDir?: string
-  /** Enable Agent Teams (multi-agent collaboration) */
-  enableTeams?: boolean
-  /** Tools disabled by user (Extended Capabilities toggles) */
-  disabledTools?: string[]
-  /** Whether Digital Humans MCP tools are enabled */
-  digitalHumansEnabled?: boolean
   /**
    * Enabled-toolset guides section for toolset-broker sessions (main chat).
    * Chat callers pass buildToolsetSection(spaceId, conversationId) — possibly ''.
@@ -244,6 +247,49 @@ export interface BaseSdkOptionsParams {
    * override systemPrompt entirely after this builder returns.
    */
   toolsetIndex?: string
+  /**
+   * Memory instructions appended to the Halo system prompt (space chat). Callers
+   * that replace the system prompt afterwards (apps/runtime) carry their own.
+   */
+  memoryInstructions?: string
+  /**
+   * Memories this session writes or may only read. Enforced on the agent's file
+   * tools through engine hooks where the engine runs them; see
+   * platform/memory guard.ts.
+   */
+  memoryGuard?: MemoryWriteGuardConfig
+}
+
+/** A session the user is, in effect, running: chat, automation, a team member's turn. */
+export type UserSessionSdkOptionsParams = SessionSdkOptionsParams
+
+/** A background task nobody asked for by name. It carries no session-shaped extras. */
+export type InternalTaskSdkOptionsParams = Pick<
+  SessionSdkOptionsParams,
+  'credentials' | 'workDir' | 'electronPath' | 'spaceId' | 'conversationId' | 'stderrHandler' | 'mcpServers'
+>
+
+// ============================================
+// Hooks
+// ============================================
+
+let guardDegradationLogged = false
+
+type SdkHookMatchers = Record<string, unknown[]>
+
+/**
+ * Add engine hooks to options that may already carry some, event by event.
+ *
+ * `hooks` is one option shared by every concern that watches tool calls (the
+ * memory guard set here, a caller's audit), so assigning it would silently
+ * drop whatever an earlier concern installed. Every writer goes through this.
+ */
+export function addSdkHooks(sdkOptions: Record<string, any>, hooks: SdkHookMatchers): void {
+  const merged: SdkHookMatchers = { ...(sdkOptions.hooks ?? {}) }
+  for (const [event, matchers] of Object.entries(hooks)) {
+    merged[event] = [...(merged[event] ?? []), ...matchers]
+  }
+  sdkOptions.hooks = merged
 }
 
 // ============================================
@@ -255,20 +301,16 @@ export interface BaseSdkOptionsParams {
  * When userDisabledTools is undefined (not yet configured), applies defaults.
  * Deduplicates to avoid passing the same tool name twice.
  */
-function buildDisallowedTools(
-  userDisabledTools?: string[],
-  enableTeams?: boolean
-): string[] {
+function buildDisallowedTools(userDisabledTools?: string[]): string[] {
   const set = new Set<string>()
 
   // User-configured disabled tools, or defaults for unconfigured users
   const effectiveDisabled = userDisabledTools ?? [...DEFAULT_DISABLED_TOOLS]
   for (const tool of effectiveDisabled) set.add(tool)
 
-  // When Agent Teams is off, also disable team-related tools
-  if (!enableTeams) {
-    for (const tool of TEAM_TOOLS) set.add(tool)
-  }
+  // Native CC Teams are intentionally unavailable. Halo's Team MCP is the
+  // only supported collaboration surface and is mounted by the broker.
+  for (const tool of TEAM_TOOLS) set.add(tool)
 
   return Array.from(set)
 }
@@ -286,23 +328,27 @@ function buildDisallowedTools(
  *
  * Important: The model is encoded into the apiKey (ANTHROPIC_API_KEY env var)
  * at session creation time. Model changes require session rebuild — they cannot
- * be switched dynamically via setModel(). See config.service.ts getAiSourcesSignature().
+ * be switched dynamically via setModel(). See config.service.ts getAiSourcesChange().
  *
  * @param credentials - Raw API credentials from getApiCredentials()
+ * @param pickedReasoningEffort - Level picked for this session, which a router
+ *        upstream is told directly (see `setPickedEffort` in reasoning-effort.ts).
+ *        Must be the same pick later handed to `applyReasoningEffort`.
  * @returns Resolved credentials ready for SDK
  */
 export async function resolveCredentialsForSdk(
-  credentials: ApiCredentials
+  credentials: ApiCredentials,
+  pickedReasoningEffort?: ReasoningEffortLevel
 ): Promise<ResolvedSdkCredentials> {
   console.debug(`[SDK Config] resolveCredentialsForSdk: provider=${credentials.provider}, model=${credentials.model}, baseUrl=${credentials.baseUrl}`)
 
   if (credentials.delegatedAuth) {
-    return resolveDelegatedAuth(credentials)
+    return resolveDelegatedAuth(credentials, pickedReasoningEffort)
   }
 
   // Experimental: route Anthropic through local router for interceptor coverage
   if (PROXY_ANTHROPIC && credentials.provider === 'anthropic') {
-    return resolveAnthropicPassthrough(credentials)
+    return resolveAnthropicPassthrough(credentials, pickedReasoningEffort)
   }
 
   // ── Original logic (identical to pre-optimization code) ──
@@ -322,9 +368,9 @@ export async function resolveCredentialsForSdk(
       || (credentials.provider === 'oauth' ? 'chat_completions' : inferOpenAIWireApi(credentials.baseUrl))
 
     // Encode with real wire id BEFORE sdkModel decoration so [1m] never leaks upstream.
-    anthropicApiKey = encodeBackendConfig(credentialsToBackendConfig(credentials, { apiType }))
+    anthropicApiKey = encodeBackendConfig(credentialsToBackendConfig(credentials, { apiType, pickedReasoningEffort }))
 
-    console.log(`[SDK Config] ${credentials.provider} provider: routing via ${anthropicBaseUrl}, apiType=${apiType}, sdkModel=${sdkModel}`)
+    console.log(`[SDK Config] ${credentials.provider} provider: routing via ${anthropicBaseUrl}, apiType=${apiType}, sdkModel=${sdkModel}${pickedReasoningEffort ? `, effort=${pickedReasoningEffort}` : ''}`)
   }
 
   const decoratedSdkModel = applyCC1mContextUnlock(sdkModel, credentials.capabilities)
@@ -339,6 +385,9 @@ export async function resolveCredentialsForSdk(
     sdkModel,
     displayModel,
     capabilities: credentials.capabilities,
+    sourceId: credentials.sourceId,
+    credentialsGeneration: credentials.credentialsGeneration,
+    apiCredentials: credentials,
   }
 }
 
@@ -366,14 +415,24 @@ export function computeCredentialsFingerprint(sdkOptions: Record<string, any>): 
     .replace(new RegExp(`^${DELEGATED_ROUTING_HEADER}:\\s*`), '')
 
   const backend = decodeBackendConfig(rawKey)
+  // A source's credential rotates under it; the router supplies the current
+  // one per request, so only the account identity decides reuse.
+  const sourced = !!backend?.sourceId
   const keyIdentity = backend
     ? [
+        backend.sourceId ?? '',
         backend.url,
-        backend.key,
+        sourced ? '' : backend.key,
         backend.model ?? '',
         backend.apiType ?? '',
         backend.adapterId ?? '',
         backend.profileArn ?? '',
+        JSON.stringify(stableAccountHeaders(backend.headers, sourced)),
+        JSON.stringify(backend.codexModelCapabilities ? [
+          backend.codexModelCapabilities.reasoningSummary,
+          backend.codexModelCapabilities.responsesLite,
+          backend.codexModelCapabilities.reasoningLevels ?? null,
+        ] : null),
         // Vision capability is frozen in the session's encoded key, while the
         // image fallback re-resolves it per turn. Without it here, flipping the
         // Vision setting mid-conversation makes the two disagree: the turn
@@ -383,11 +442,97 @@ export function computeCredentialsFingerprint(sdkOptions: Record<string, any>): 
     : rawKey  // Direct Anthropic: plain key, stable as-is
 
   const material = [
+    String(env.HALO_AI_SOURCE_ID ?? ''),
     String(sdkOptions.model ?? ''),
     String(env.ANTHROPIC_BASE_URL ?? ''),
     keyIdentity,
+    // Claude's `--effort` and Codex's thread effort are fixed at spawn, so a
+    // changed thinking level must rebuild the session like a changed model.
+    String(sdkOptions.reasoningEffort ?? ''),
+    // So is the picked level baked into the router key. It can change while
+    // the level above does not: picking the value Model Config already has.
+    String(sdkOptions.pickedReasoningEffort ?? ''),
   ].join('|')
   return createHash('sha256').update(material).digest('hex').slice(0, 16)
+}
+
+const CREDENTIAL_HEADERS = new Set(['authorization', 'x-api-key', 'api-key', 'copilot-session-token'])
+const ACCOUNT_IDENTITY_HEADERS = new Set([
+  ...CREDENTIAL_HEADERS,
+  'chatgpt-account-id', 'openai-organization', 'openai-project',
+  'anthropic-organization-id', 'x-organization-id', 'x-org-id',
+  'x-account-id', 'x-user-id',
+])
+
+function stableAccountHeaders(headers: Record<string, string> | undefined, omitCredentials: boolean): [string, string][] {
+  return Object.entries(headers ?? {})
+    .map(([name, value]): [string, string] => [name.toLowerCase(), value])
+    .filter(([name]) => ACCOUNT_IDENTITY_HEADERS.has(name) && !(omitCredentials && CREDENTIAL_HEADERS.has(name)))
+    .sort(([a], [b]) => a.localeCompare(b))
+}
+
+/** Adapter credentials come only from these options, including standalone API-validation sessions. */
+export function getSdkApiCredentials(sdkOptions: Record<string, any>): Readonly<ApiCredentials> {
+  let credentials = sdkOptions.apiCredentials as Readonly<ApiCredentials> | undefined
+  if (!credentials) {
+    const env = sdkOptions.env ?? {}
+    const rawKey = String(env.ANTHROPIC_API_KEY ?? env.ANTHROPIC_CUSTOM_HEADERS ?? '')
+      .replace(new RegExp(`^${DELEGATED_ROUTING_HEADER}:\\s*`), '')
+    const backend = decodeBackendConfig(rawKey)
+    if (backend) {
+      credentials = {
+        sourceId: backend.sourceId,
+        credentialsGeneration: sdkOptions.credentialsGeneration,
+        baseUrl: backend.url,
+        apiKey: backend.key,
+        model: backend.model || sdkOptions.model || '',
+        provider: 'openai',
+        customHeaders: backend.headers,
+        apiType: backend.apiType,
+        forceStream: backend.forceStream,
+        filterContent: backend.filterContent,
+        adapterId: backend.adapterId,
+        profileArn: backend.profileArn,
+        codexModelCapabilities: backend.codexModelCapabilities,
+        visionOverride: backend.visionOverride,
+        delegatedAuth: backend.delegatedAuth,
+      }
+    } else if (rawKey && env.ANTHROPIC_BASE_URL && !env.ANTHROPIC_CUSTOM_HEADERS && !env.HALO_AI_SOURCE_ID) {
+      credentials = {
+        baseUrl: String(env.ANTHROPIC_BASE_URL), apiKey: rawKey,
+        model: sdkOptions.model || '', provider: 'anthropic',
+      }
+    }
+  }
+  if (!credentials?.baseUrl || !credentials.apiKey || credentials.delegatedAuth) {
+    console.warn(`[SDK Config] Engine credential resolution refused: source=${credentials?.sourceId || getSdkSourceId(sdkOptions) || '(standalone)'} no usable captured credential`)
+    throw new Error('The selected session has no usable captured API credentials.')
+  }
+  return credentials
+}
+
+/** Source marker first; older SDK options can still identify their encoded backend. */
+export function getSdkSourceId(sdkOptions: Record<string, any>): string | undefined {
+  const env = sdkOptions.env ?? {}
+  if (typeof env.HALO_AI_SOURCE_ID === 'string' && env.HALO_AI_SOURCE_ID) {
+    return env.HALO_AI_SOURCE_ID
+  }
+  const rawKey = String(env.ANTHROPIC_API_KEY ?? env.ANTHROPIC_CUSTOM_HEADERS ?? '')
+    .replace(new RegExp(`^${DELEGATED_ROUTING_HEADER}:\\s*`), '')
+  return decodeBackendConfig(rawKey)?.sourceId
+}
+
+/** Digests of the settings in-process MCP servers were built from, by server object. */
+const mcpServerSettings = new WeakMap<object, string>()
+
+/**
+ * Record the settings an in-process MCP server was built from and keeps for
+ * its session's life, so a session built with other settings is rebuilt on the
+ * next send (computeSessionInputsFingerprint). Only a digest is kept.
+ */
+export function markMcpServerSettings<T extends object>(server: T, settings: unknown): T {
+  mcpServerSettings.set(server, createHash('sha256').update(JSON.stringify(settings) ?? '').digest('hex').slice(0, 16))
+  return server
 }
 
 /**
@@ -401,9 +546,10 @@ export function computeCredentialsFingerprint(sdkOptions: Record<string, any>): 
  *
  * The MCP set is fingerprinted by server NAME only: the in-process SDK server
  * objects are rebuilt on every call, so their identity is meaningless; only which
- * servers are present matters. Callers that build MCP servers lazily (main chat)
- * must not use this — they have no eager mcpServers here and drive toolset changes
- * through their own rebuild path.
+ * servers are present matters — plus, for a server that keeps the settings it was
+ * built from (markMcpServerSettings), a digest of those settings. Callers that
+ * build MCP servers lazily (main chat) must not use this — they have no eager
+ * mcpServers here and drive toolset changes through their own rebuild path.
  *
  * The guest permission envelope (permissionMode, the disallowedTools blacklist,
  * and the dangerously-skip-permissions extra arg) is part of the fingerprint so
@@ -412,23 +558,40 @@ export function computeCredentialsFingerprint(sdkOptions: Record<string, any>): 
  * permission fields force a rebuild with the guest's restricted wiring.
  *
  * INVARIANT: every fingerprinted input must be stable across consecutive sends.
- * The system prompt currently varies only by calendar day (one rebuild per day
- * is acceptable); injecting anything higher-frequency into it — precise
+ * The system prompt varies at most by calendar day (Claude Code templates carry
+ * the date; the halo engine's append does not, the engine injects it per
+ * turn), and one rebuild per day is acceptable; injecting anything higher-frequency into it — precise
  * timestamps, live memory content, per-message state — would degrade this into
  * a session rebuild on EVERY message. Keep such content out of the prompt, or
  * exclude it here.
  */
 export function computeSessionInputsFingerprint(sdkOptions: Record<string, any>): string {
-  const mcpKeys = Object.keys(sdkOptions.mcpServers ?? {}).sort().join(',')
-  const prompt = typeof sdkOptions.systemPrompt === 'string' ? sdkOptions.systemPrompt : ''
+  // List fields are JSON-encoded, not joined: a rule like `Bash(echo a,b)`
+  // contains the would-be separator, and any bare join lets two different rule
+  // sets collapse into one material (['a,b'] vs ['a','b']) — a collision that
+  // reads as "inputs unchanged" and reuses a session built on other rules.
+  const servers: Record<string, unknown> = sdkOptions.mcpServers ?? {}
+  const mcpKeys = JSON.stringify(Object.keys(servers).sort().map(name => {
+    const server = servers[name]
+    const settings = typeof server === 'object' && server !== null ? mcpServerSettings.get(server) : undefined
+    return settings ? `${name}@${settings}` : name
+  }))
+  const prompt = hostSystemPromptText(sdkOptions.systemPrompt)
   const permissionMode = String(sdkOptions.permissionMode ?? '')
   const disallowed = Array.isArray(sdkOptions.disallowedTools)
-    ? [...sdkOptions.disallowedTools].sort().join(',')
+    ? JSON.stringify([...sdkOptions.disallowedTools].sort())
+    : ''
+  // The auto-allow rules decide which calls the engine settles by itself and
+  // which reach the permission gate — including the command patterns a borrowed
+  // turn runs under. Left out, a narrowed policy would keep the previous turn's
+  // rules for as long as the session was reused.
+  const allowed = Array.isArray(sdkOptions.allowedTools)
+    ? JSON.stringify([...sdkOptions.allowedTools].sort())
     : ''
   const skipPermissions = sdkOptions.extraArgs
     ? String(sdkOptions.extraArgs['dangerously-skip-permissions'] ?? '')
     : ''
-  const material = [mcpKeys, prompt, permissionMode, disallowed, skipPermissions].join('\u0000')
+  const material = [mcpKeys, prompt, permissionMode, disallowed, allowed, skipPermissions].join('\u0000')
   return createHash('sha256').update(material).digest('hex').slice(0, 16)
 }
 
@@ -442,12 +605,13 @@ export function computeSessionInputsFingerprint(sdkOptions: Record<string, any>)
  * in a dedicated header instead of the occupied auth channel.
  */
 async function resolveDelegatedAuth(
-  credentials: ApiCredentials
+  credentials: ApiCredentials,
+  pickedReasoningEffort?: ReasoningEffortLevel
 ): Promise<ResolvedSdkCredentials> {
   const router = await ensureOpenAICompatRouter({ debug: false })
 
   const routingConfig = encodeBackendConfig(
-    credentialsToBackendConfig(credentials, { apiType: 'anthropic_passthrough' })
+    credentialsToBackendConfig(credentials, { apiType: 'anthropic_passthrough', pickedReasoningEffort })
   )
 
   let sdkModel = resolveModelId(credentials.model)
@@ -465,6 +629,9 @@ async function resolveDelegatedAuth(
     sdkModel,
     displayModel: credentials.displayModel || credentials.model,
     capabilities: credentials.capabilities,
+    sourceId: credentials.sourceId,
+    credentialsGeneration: credentials.credentialsGeneration,
+    apiCredentials: credentials,
     delegatedRoutingHeader: `${DELEGATED_ROUTING_HEADER}: ${routingConfig}`,
   }
 }
@@ -474,14 +641,15 @@ async function resolveDelegatedAuth(
  * Isolated from the main path — only called when PROXY_ANTHROPIC = true.
  */
 async function resolveAnthropicPassthrough(
-  credentials: ApiCredentials
+  credentials: ApiCredentials,
+  pickedReasoningEffort?: ReasoningEffortLevel
 ): Promise<ResolvedSdkCredentials> {
   const router = await ensureOpenAICompatRouter({ debug: false })
   const configUrl = credentials.baseUrl.replace(/\/+$/, '') + '/v1/messages'
 
   // Encode with real wire id; router strips any [1m] suffix before forwarding.
   const anthropicApiKey = encodeBackendConfig(
-    credentialsToBackendConfig(credentials, { url: configUrl, apiType: 'anthropic_passthrough' })
+    credentialsToBackendConfig(credentials, { url: configUrl, apiType: 'anthropic_passthrough', pickedReasoningEffort })
   )
 
   let sdkModel = resolveModelId(credentials.model)
@@ -499,6 +667,9 @@ async function resolveAnthropicPassthrough(
     sdkModel,
     displayModel: credentials.displayModel || credentials.model,
     capabilities: credentials.capabilities,
+    sourceId: credentials.sourceId,
+    credentialsGeneration: credentials.credentialsGeneration,
+    apiCredentials: credentials,
   }
 }
 
@@ -578,6 +749,14 @@ function ensureSandboxSettings(configDir: string): void {
 const AI_SDK_ENV_PREFIXES = ['ANTHROPIC_', 'OPENAI_', 'CLAUDE_']
 
 /**
+ * Halo's own subprocess-facing vars. They describe the self-API capability, so
+ * they may only ever come from the explicit `selfApi` injection below — an
+ * ambient one (a shell that exports HALO_API_URL) would tell sessions without
+ * the toolset that they have it, breaking the all-three-or-none contract.
+ */
+const SELF_API_ENV_KEYS = ['HALO_API_URL', 'HALO_API_TOKEN', 'HALO_SPACE_ID']
+
+/**
  * Copy of process.env with all AI SDK variables removed.
  */
 export function getCleanUserEnv(): Record<string, string | undefined> {
@@ -587,6 +766,8 @@ export function getCleanUserEnv(): Record<string, string | undefined> {
       delete env[key]
     }
   }
+  for (const key of SELF_API_ENV_KEYS) delete env[key]
+  delete env.HALO_AI_SOURCE_ID
   return env
 }
 
@@ -611,6 +792,7 @@ export function buildSdkEnv(params: SdkEnvParams): Record<string, string | numbe
       ? { ANTHROPIC_CUSTOM_HEADERS: params.delegatedRoutingHeader }
       : { ANTHROPIC_API_KEY: params.anthropicApiKey }),
     ANTHROPIC_BASE_URL: params.anthropicBaseUrl,
+    ...(params.sourceId ? { HALO_AI_SOURCE_ID: params.sourceId } : {}),
 
     // Halo's own HTTP API, for the agent to operate Halo itself (see halo_api_ref).
     // All three or none: HALO_SPACE_ID is only ever read by the manual's own curl
@@ -625,16 +807,13 @@ export function buildSdkEnv(params: SdkEnvParams): Record<string, string | numbe
         }
       : {}),
 
-    // Claude config dir: resolved from configDirMode (halo default / cc default / custom)
+    // Claude config dir: follows the user's configDirMode (halo default / cc default / custom).
+    // Every subprocess needs it — it holds the CLI credential slot — so it is not per-entry.
     CLAUDE_CONFIG_DIR: (() => {
-      const configDir = resolveClaudeConfigDir(params.configDirMode, params.customConfigDir)
+      const configDir = resolveClaudeConfigDir()
       ensureSandboxSettings(configDir)
       return configDir
     })(),
-
-    // Localhost bypasses proxy (for OpenAI compat router)
-    NO_PROXY: 'localhost,127.0.0.1',
-    no_proxy: 'localhost,127.0.0.1',
 
     // Disable non-essential traffic
     CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: '1',
@@ -653,9 +832,8 @@ export function buildSdkEnv(params: SdkEnvParams): Record<string, string | numbe
     // Performance: skip file snapshot I/O (Halo doesn't expose /rewind)
     CLAUDE_CODE_DISABLE_FILE_CHECKPOINTING: '1',
 
-    // Enable Agent Teams (multi-agent collaboration with named teammates)
-    // Only set when explicitly enabled via Settings > Advanced
-    ...(params.enableTeams ? { CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS: '1' } : {}),
+    // Native CC Agent Teams stay disabled. Halo teams are exposed through the
+    // broker's `halo-team` MCP server instead of the opaque CC protocol.
 
     // Per-model runtime limits resolved from preset + user override.
     // - CLAUDE_CODE_MAX_OUTPUT_TOKENS: caps the `max_tokens` request parameter
@@ -697,34 +875,14 @@ export function buildSdkEnv(params: SdkEnvParams): Record<string, string | numbe
     // DEBUG_CLAUDE_AGENT_SDK: '1',
   }
 
-  // Propagate Halo app-level proxy (Settings > General > Network Proxy) to the
-  // CC subprocess. Without this, the SDK's built-in WebFetch tool (and any other
-  // network calls in the subprocess) bypass the proxy configured in Halo.
-  // Only inject when the user has an explicit Halo proxy AND the OS environment
-  // doesn't already provide the corresponding variable — OS-level vars take priority.
-  // See: https://github.com/openkursar/hello-halo/issues/69
-  const appProxy = getConfig().network?.proxy?.trim()
-  if (appProxy) {
-    const proxyKeys = ['HTTP_PROXY', 'HTTPS_PROXY', 'http_proxy', 'https_proxy'] as const
-    for (const key of proxyKeys) {
-      if (!env[key]) {
-        env[key] = appProxy
-      }
-    }
-    console.log(`[SDK Config] Injected app proxy into subprocess env: ${appProxy}`)
-  }
+  // The Settings proxy and the hosts that bypass it, as every route gets them
+  // (the CLI's WebFetch and the MCP servers it connects included). The loopback
+  // router is always among the bypassed hosts.
+  applyProxyEnv(env, getConfig().network)
 
-  // Normalize proxy env vars: add http:// if protocol is missing.
-  // Some Windows users (esp. with Clash/V2Ray) set HTTPS_PROXY=127.0.0.1:7890
-  // without protocol prefix. The Claude Code CLI's Anthropic SDK does
-  // new URL(process.env.HTTPS_PROXY) which throws ERR_INVALID_URL.
-  // NO_PROXY check happens AFTER URL parsing, so it can't prevent the crash.
-  for (const key of ['HTTP_PROXY', 'HTTPS_PROXY', 'http_proxy', 'https_proxy', 'ALL_PROXY', 'all_proxy']) {
-    const val = env[key]
-    if (typeof val === 'string' && val && !/^[a-zA-Z][a-zA-Z0-9+.-]*:\/\//.test(val)) {
-      env[key] = `http://${val}`
-    }
-  }
+  // Bundled Office runtime: make the halo-node shim resolvable on PATH. No-op
+  // (one log line) when the runtime bundle is absent.
+  applyOfficeRuntimeEnv(env)
 
   return env as Record<string, string | number>
 }
@@ -740,9 +898,12 @@ const CLI_RELATIVE = 'node_modules/@anthropic-ai/claude-code/cli.js'
  *
  * Three runtime environments need to be handled:
  *
- * 1. **Packaged** (`app.isPackaged === true`): electron-builder bundles node_modules
- *    alongside app.asar. `app.getAppPath()` returns the asar root, so the CLI is
- *    always at `<appPath>/node_modules/...`. This path is guaranteed to exist.
+ * 1. **Packaged** (`app.isPackaged === true`): the real file `asarUnpack` puts in
+ *    `app.asar.unpacked`, not its path inside the archive. The CLI runs programs
+ *    found next to its own file (ripgrep behind Grep, Glob and its agent/command
+ *    discovery), and no OS can execute a file inside an archive; Electron's
+ *    redirect for that does not reach the CLI's ES module imports since
+ *    Electron 43 (Node 24), so those calls failed with `spawn ENOTDIR`.
  *
  * 2. **Dev** (`npm run dev`): Vite runs the main process from the project root.
  *    `app.getAppPath()` returns the project root, so the CLI is at
@@ -758,8 +919,9 @@ const CLI_RELATIVE = 'node_modules/@anthropic-ai/claude-code/cli.js'
  */
 export function resolveClaudeCodeCliPath(): string {
   if (app.isPackaged) {
-    // Packaged: node_modules is bundled inside the asar alongside the app
-    return path.join(app.getAppPath(), CLI_RELATIVE)
+    const appPath = app.getAppPath()
+    const diskRoot = appPath.endsWith('.asar') ? `${appPath}.unpacked` : appPath
+    return path.join(diskRoot, CLI_RELATIVE)
   }
 
   // Unpackaged (dev or E2E build): search candidate locations
@@ -809,15 +971,12 @@ function shellQuote(value: string): string {
 
 // On spawn ENOENT the SDK always blames cliPath ("executable not found"), even
 // when the real culprit is a missing cwd — the classic Node cause (#170). Log the
-// triplet and surface a bad cwd with its true cause. Don't existsSync cliPath: it
-// lives in app.asar (served from app.asar.unpacked), so existsSync false-negatives.
-function validateSpawnInputs(electronPath: string, cliPath: string, workDir: string): void {
+// triplet and surface a bad cwd with its true cause.
+function validateSpawnInputs(electronPath: string, cliPath: string, workDir: string, spaceId: string): void {
   console.log(`[SDK Config] spawn inputs: command="${electronPath}", cli="${cliPath}", cwd="${workDir}"`)
   if (!existsSync(workDir)) {
-    throw new Error(
-      `[SDK Config] Working directory does not exist: "${workDir}". ` +
-      `Claude Code cannot be spawned with a missing cwd; verify the space's working directory.`
-    )
+    console.warn(`[SDK Config] Working directory does not exist: "${workDir}" (space ${spaceId}); the engine cannot be spawned there`)
+    throw new WorkingDirectoryUnavailableError(workDir, spaceId)
   }
 }
 
@@ -825,16 +984,43 @@ function validateSpawnInputs(electronPath: string, cliPath: string, workDir: str
 // SDK Options Builder
 // ============================================
 
+/** Models already reported as unpriced; the builders run on every send. */
+const unpricedModelsLogged = new Set<string>()
+
 /**
- * Build base SDK options.
+ * SDK options for a session the user is running: space chat, digital-human
+ * chat, an automation run, a team member's turn.
  *
- * This constructs the common SDK options used by both sendMessage and ensureSessionWarm.
+ * The user's global AI settings (`maxTurns`, `disabledTools`, `promptProfile`,
+ * `digitalHumansEnabled`) are read here, never passed in — see
+ * user-agent-settings.ts. Callers add their own MCP servers, hooks and prompt
+ * on the returned options.
+ *
  * Does NOT include dynamic configurations like AI Browser or Thinking mode.
- *
- * @param params - SDK options parameters
- * @returns Base SDK options object
  */
-export async function buildBaseSdkOptions(params: BaseSdkOptionsParams): Promise<Record<string, any>> {
+export async function buildUserSessionSdkOptions(
+  params: UserSessionSdkOptionsParams
+): Promise<Record<string, any>> {
+  return assembleSdkOptions(params, readUserAgentSettings())
+}
+
+/**
+ * SDK options for a background task the user did not ask for by name (memory
+ * consolidation, team member proposals). It gets the built-in defaults, not
+ * the user's tool restrictions, turn cap or prompt style: those describe how
+ * the user wants THEIR sessions to behave, and the caller of an internal task
+ * sets whatever it needs on top.
+ */
+export async function buildInternalTaskSdkOptions(
+  params: InternalTaskSdkOptionsParams
+): Promise<Record<string, any>> {
+  return assembleSdkOptions(params, INTERNAL_TASK_SETTINGS)
+}
+
+async function assembleSdkOptions(
+  params: SessionSdkOptionsParams,
+  settings: UserAgentSettings
+): Promise<Record<string, any>> {
   const {
     credentials,
     workDir,
@@ -845,8 +1031,8 @@ export async function buildBaseSdkOptions(params: BaseSdkOptionsParams): Promise
     mcpServers
   } = params
 
-  console.log(`[SDK Config] buildBaseSdkOptions: workDir="${workDir}", spaceId="${spaceId}", configDirMode="${params.configDirMode ?? 'halo'}"`)
-  console.debug(`[SDK Config] buildBaseSdkOptions details: model=${credentials.sdkModel}, displayModel=${credentials.displayModel}, maxTurns=${params.maxTurns}, promptProfile=${params.promptProfile}, enableTeams=${params.enableTeams}, disabledTools=[${(params.disabledTools || []).join(', ')}]`)
+  console.log(`[SDK Config] assembleSdkOptions: workDir="${workDir}", spaceId="${spaceId}"`)
+  console.debug(`[SDK Config] assembleSdkOptions details: model=${credentials.sdkModel}, displayModel=${credentials.displayModel}, maxTurns=${settings.maxTurns}, promptProfile=${settings.promptProfile}, disabledTools=[${(settings.disabledTools || []).join(', ')}]`)
 
   // Best-effort: a session still works without Halo's self-API if the loopback
   // listener fails to start (e.g. no port available), just without that capability.
@@ -868,20 +1054,20 @@ export async function buildBaseSdkOptions(params: BaseSdkOptionsParams): Promise
     anthropicApiKey: credentials.anthropicApiKey,
     anthropicBaseUrl: credentials.anthropicBaseUrl,
     delegatedRoutingHeader: credentials.delegatedRoutingHeader,
-    configDirMode: params.configDirMode,
-    customConfigDir: params.customConfigDir,
-    enableTeams: params.enableTeams,
     capabilities: credentials.capabilities,
+    sourceId: credentials.sourceId,
     selfApi,
     spaceId,
   })
 
   const cliPath = resolveClaudeCodeCliPath()
-  validateSpawnInputs(electronPath, cliPath, workDir)
+  validateSpawnInputs(electronPath, cliPath, workDir, spaceId)
 
   // Build base options
   const sdkOptions: Record<string, any> = {
     model: credentials.sdkModel,
+    credentialsGeneration: credentials.credentialsGeneration,
+    apiCredentials: credentials.apiCredentials,
     cwd: workDir,
     env,
     pathToClaudeCodeExecutable: cliPath,
@@ -891,21 +1077,23 @@ export async function buildBaseSdkOptions(params: BaseSdkOptionsParams): Promise
     stderr: stderrHandler || ((data: string) => {
       console.error(`[Agent][${conversationId}] CLI stderr:`, data)
     }),
-    // Use Halo's custom system prompt instead of SDK's 'claude_code' preset.
-    // The capability index advertises optional toolsets (agent/toolsets) the AI
-    // can ask the user to enable; full tool schemas enter context only once the
+    // Halo's custom system prompt, or on the halo engine Halo's context appended
+    // to the engine's own default (see system-prompt.ts). The capability index
+    // advertises optional toolsets (agent/toolsets) the AI can ask the user to
+    // enable; full tool schemas enter context only once the
     // toolset is enabled and the session is rebuilt. AI Browser is one such
     // on-demand toolset here, so no aiBrowserEnabled branch. The Knowledge
     // section is appended at actual session creation (getOrCreateV2Session's
     // resolveKnowledgeBases) so a reused session never pays the index reads.
-    systemPrompt: buildSystemPrompt({
+    systemPrompt: toEngineSystemPrompt(buildSystemPrompt({
       workDir,
       modelInfo: credentials.displayModel,
-      promptProfile: params.promptProfile,
-      digitalHumansEnabled: params.digitalHumansEnabled,
+      // Stated, never left open: an open value makes the prompt builder read config again.
+      promptProfile: settings.promptProfile ?? 'halo',
+      digitalHumansEnabled: settings.digitalHumansEnabled,
       toolsetIndex: params.toolsetIndex
-    }),
-    maxTurns: params.maxTurns ?? 50,
+    }) + (params.memoryInstructions ? `\n\n${params.memoryInstructions}` : '')),
+    maxTurns: settings.maxTurns ?? DEFAULT_MAX_TURNS,
     allowedTools: [...DEFAULT_ALLOWED_TOOLS],
     // Enable Skills loading from $CLAUDE_CONFIG_DIR/skills/ and <workspace>/.claude/skills/
     settingSources: ['user', 'project'],
@@ -923,16 +1111,73 @@ export async function buildBaseSdkOptions(params: BaseSdkOptionsParams): Promise
     // This avoids CLI creating a temp file and chokidar watching the entire tmpdir.
   }
 
+  if (params.memoryGuard) {
+    if (getEngineCapabilities()?.features.hooks) {
+      addSdkHooks(sdkOptions, createMemoryWriteHooks(params.memoryGuard))
+    } else if (!guardDegradationLogged) {
+      // Degraded, not refused: memory still works, only without the lock and
+      // the read-only boundary; the prompt asks the agent to edit carefully.
+      guardDegradationLogged = true
+      console.warn(`[SDK Config] Engine ${getActiveEngine()} runs no hooks — memory write guard unavailable for its sessions`)
+    }
+  }
+
   // Build disallowed tools list from user config + implicit rules
-  const disallowedTools = buildDisallowedTools(params.disabledTools, params.enableTeams)
+  const disallowedTools = buildDisallowedTools(settings.disabledTools)
   if (disallowedTools.length > 0) {
     sdkOptions.disallowedTools = disallowedTools
     console.log(`[SDK Config] Disallowed tools (${disallowedTools.length}): ${disallowedTools.join(', ')}`)
   }
 
+  // Tools turned off on MCP server cards are left out of every session,
+  // whichever caller builds it. Claude Code and the halo engine drop them by
+  // name; engines that filter per server read `disabledMcpTools`.
+  const disabledMcpTools = spaceId ? getDisabledMcpTools(spaceId) : null
+  if (disabledMcpTools) {
+    const names = Object.entries(disabledMcpTools).flatMap(([server, tools]) => tools.map(tool => mcpToolName(server, tool)))
+    sdkOptions.disallowedTools = [...(sdkOptions.disallowedTools ?? []), ...names]
+    sdkOptions.disabledMcpTools = disabledMcpTools
+    console.log(`[SDK Config] MCP tools turned off: ${names.length} on ${Object.keys(disabledMcpTools).length} server(s)`)
+  }
+
   // Add MCP servers if provided
   if (mcpServers && Object.keys(mcpServers).length > 0) {
     sdkOptions.mcpServers = mcpServers
+  }
+
+  // Request identity — host-injected headers, system prefix and metadata
+  // (halo engine only).
+  if (getActiveEngine() === 'halo') {
+    try {
+      sdkOptions.requestIdentity = buildRequestIdentity({
+        deviceId: getDeviceIdentity().deviceId,
+        // Halo's conversation id is a uuid, which is what this field requires.
+        sessionId: conversationId,
+      })
+    } catch (err) {
+      // Dropped, not fatal: the request still goes out, just without the
+      // identity headers.
+      console.warn(
+        `[Agent][${conversationId}] requestIdentity dropped — this session's requests carry no host identity headers:`,
+        (err as Error).message,
+      )
+    }
+
+    // The halo engine knows nothing about models on its own: every limit and
+    // thinking style comes from Halo's resolved capabilities. Undeclared
+    // values fall back to the engine's generic defaults.
+    const limits = resolveSdkRuntimeLimits(credentials.capabilities)
+    if (limits.maxOutputTokens !== undefined) sdkOptions.maxOutputTokens = limits.maxOutputTokens
+    if (limits.autoCompactWindow !== undefined) sdkOptions.contextWindow = limits.autoCompactWindow
+    if (credentials.capabilities?.adaptiveThinking) sdkOptions.adaptiveThinking = true
+
+    // The engine ships no prices and costs an unlisted model at zero.
+    const modelPricing = buildModelPricingTable([credentials.sdkModel])
+    sdkOptions.modelPricing = modelPricing
+    if (!modelPricing[credentials.sdkModel] && !unpricedModelsLogged.has(credentials.sdkModel)) {
+      unpricedModelsLogged.add(credentials.sdkModel)
+      console.log(`[SDK Config] No list price for model "${credentials.sdkModel}" — its cost is reported as $0`)
+    }
   }
 
   return sdkOptions

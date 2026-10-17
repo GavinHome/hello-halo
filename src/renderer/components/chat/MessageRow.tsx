@@ -4,17 +4,27 @@
  * Pure presentational component — no store coupling. Handles both inline
  * thoughts (Thought[]) and separated/lazy thoughts (v2 format with ThoughtsSummary).
  *
- * Shared across: MessageList (main chat), AppChatView, ImChatView, SessionDetailView.
+ * Shared across: MessageList (space and digital-human chat), ImChatView, SessionDetailView.
  */
 
-import { memo } from 'react'
+import { memo, useMemo, type ReactNode } from 'react'
 import { MessageItem } from './MessageItem'
 import { CollapsedThoughtProcess, LazyCollapsedThoughtProcess } from './CollapsedThoughtProcess'
-import { TeamSnapshotPanel } from './TeamPanel'
 import { InjectionAnnotation } from './InjectionAnnotation'
+import {
+  CrossConversationMessage,
+  CrossConversationNotice,
+  isCrossConversationMessage,
+  isCrossConversationNotice,
+} from './cross-conversation'
+import { TeamMemberMessage, isTeamMessage } from './team-collab'
+import { ArrivalCard } from './ArrivalCard'
+import { mergeArrivalThoughts, toArrivalThought } from './transcript'
+import { PushedMessageLabel, isPushedMessage } from './PushedMessageLabel'
 import type { Message, Thought } from '../../types'
 
 export interface MessageRowProps {
+  afterThoughts?: ReactNode
   /** The message to render */
   message: Message
 
@@ -33,44 +43,114 @@ export interface MessageRowProps {
   onLoadThoughts?: (messageId: string) => Promise<Thought[]>
 
   /** Hide the "View live feed" button in BrowserTaskCard.
-   *  Set true in automation app contexts where Canvas/BrowserView is unavailable. */
-  hideBrowserViewButton?: boolean
+   *  Set true where there is no live browser view to show for the conversation. */
+  hideBrowserLiveView?: boolean
+
+  /** Hide the "Open" button in TerminalTaskCard.
+   *  Set true where there is no canvas to open a terminal in. */
+  hideTerminalOpen?: boolean
+
+  /** Enable only when this transcript can open its replies in the space canvas. */
+  allowViewChanges?: boolean
 
   /** Mid-turn injection messages associated with this assistant message.
    *  Rendered as a permanent annotation at the bottom of the assistant bubble. */
   injectionMessages?: Message[]
 
-  /** Additional className for the outer wrapper (e.g., width constraints from Virtuoso) */
+  /** Records received while this reply was written (see transcript/arrivals): drawn in
+   *  its process, or after it as their own cards when it has none. */
+  arrivals?: Message[]
+
+  /** Additional className for the outer wrapper (e.g., width constraints from the list) */
   className?: string
+
+  /**
+   * Reply-sender name, resolved by the caller (MessageList) from
+   * conversationId — the digital human's name for app-chat, "Halo" otherwise.
+   * Only meaningful for assistant messages; pass undefined for user messages.
+   */
+  senderName?: string
 }
 
 export const MessageRow = memo(function MessageRow({
   message,
+  afterThoughts,
   previousCost,
   defaultThoughtsExpanded = false,
   defaultThoughtsMaximized = false,
   onLoadThoughts,
-  hideBrowserViewButton = false,
+  hideBrowserLiveView = false,
+  hideTerminalOpen = false,
+  allowViewChanges = false,
   injectionMessages,
+  arrivals,
   className = '',
+  senderName,
 }: MessageRowProps) {
   const hasInlineThoughts = Array.isArray(message.thoughts) && message.thoughts.length > 0
+  const processThoughts = useMemo(() => hasInlineThoughts && arrivals?.length
+    ? mergeArrivalThoughts(message.thoughts as Thought[], arrivals.map(toArrivalThought))
+    : message.thoughts as Thought[], [hasInlineThoughts, message.thoughts, arrivals])
+
+  // System-sourced rows are routed before the bubble branches below: MessageItem
+  // only distinguishes user from assistant, so anything reaching it would be
+  // dressed as one of the two. This is the only place that decision is made.
+  if (isCrossConversationMessage(message)) {
+    return (
+      <div className={`pb-4 ${className}`}>
+        <CrossConversationMessage message={message} />
+      </div>
+    )
+  }
+
+  if (isCrossConversationNotice(message)) {
+    return (
+      <div className={className}>
+        <CrossConversationNotice message={message} />
+      </div>
+    )
+  }
+
+  if (isTeamMessage(message)) {
+    return (
+      <div className={`pb-4 ${className}`}>
+        <TeamMemberMessage message={message} />
+      </div>
+    )
+  }
+
   const hasSeparatedThoughts = message.thoughts === null && !!message.thoughtsSummary
+
+  // Reply-sender label — plain text, always the topmost element of
+  // the reply (above thoughts, above the bubble), assistant messages only.
+  const senderLabel = message.role === 'assistant' && senderName ? (
+    <div className="mb-1 text-xs font-medium text-muted-foreground">{senderName}</div>
+  ) : null
+
+  // A reply without a process of its own shows what it received as cards after it.
+  const trailingArrivals = arrivals?.length && !hasInlineThoughts && !hasSeparatedThoughts ? (
+    <div className="mt-3 space-y-2">
+      {arrivals.map(arrival => <ArrivalCard key={arrival.clientKey ?? arrival.id} message={arrival} />)}
+    </div>
+  ) : null
 
   // Assistant messages with thoughts: show collapsed thoughts above message bubble
   if (message.role === 'assistant' && (hasInlineThoughts || hasSeparatedThoughts)) {
     return (
-      <div className={`flex justify-start pb-4 ${className}`}>
+      <div className={`flex justify-start pb-5 ${className}`}>
         <div className="w-[85%]">
+          {senderLabel}
           {hasInlineThoughts ? (
             <CollapsedThoughtProcess
-              thoughts={message.thoughts as Thought[]}
+              thoughts={processThoughts}
+              messageId={message.id}
               defaultExpanded={defaultThoughtsExpanded}
               defaultMaximized={defaultThoughtsMaximized}
             />
           ) : (
             <LazyCollapsedThoughtProcess
               thoughtsSummary={message.thoughtsSummary!}
+              arrivals={arrivals}
               onLoadThoughts={
                 onLoadThoughts
                   ? () => onLoadThoughts(message.id)
@@ -79,12 +159,7 @@ export const MessageRow = memo(function MessageRow({
             />
           )}
 
-          {/* Agent Team snapshot — shows completed team collaboration for this turn.
-              Derived from thoughts — automatically persisted and available in history. */}
-          {hasInlineThoughts && (
-            <TeamSnapshotPanel thoughts={message.thoughts as Thought[]} />
-          )}
-
+          {afterThoughts && <div className="my-3 space-y-3">{afterThoughts}</div>}
           {/* Only render bubble if there is text content.
               Assistant events with only tool_use/thinking blocks have empty content —
               rendering MessageItem for those would produce empty visible bubbles. */}
@@ -94,7 +169,9 @@ export const MessageRow = memo(function MessageRow({
               previousCost={previousCost}
               hideThoughts
               isInContainer
-              hideBrowserViewButton={hideBrowserViewButton}
+              hideBrowserLiveView={hideBrowserLiveView}
+              hideTerminalOpen={hideTerminalOpen}
+              allowViewChanges={allowViewChanges}
             />
           )}
 
@@ -112,29 +189,38 @@ export const MessageRow = memo(function MessageRow({
   const hasInjections = injectionMessages && injectionMessages.length > 0
   if (message.role === 'assistant' && hasInjections) {
     return (
-      <div className={`pb-4 ${className}`}>
+      <div className={`pb-5 ${className}`}>
         <div className="flex justify-start">
           <div className="w-[85%]">
+            {senderLabel}
             <MessageItem
               message={message}
               previousCost={previousCost}
-              hideBrowserViewButton={hideBrowserViewButton}
+              hideBrowserLiveView={hideBrowserLiveView}
+              hideTerminalOpen={hideTerminalOpen}
+              allowViewChanges={allowViewChanges}
               isInContainer
             />
             <InjectionAnnotation messages={injectionMessages} />
           </div>
         </div>
+        {trailingArrivals}
       </div>
     )
   }
 
   return (
-    <div className={`pb-4 ${className}`}>
+    <div className={`pb-5 ${className}`}>
+      {senderLabel}
+      {isPushedMessage(message) && <PushedMessageLabel via={message.metadata?.pushVia} by={message.metadata?.pushedByName} />}
       <MessageItem
         message={message}
         previousCost={previousCost}
-        hideBrowserViewButton={hideBrowserViewButton}
+        hideBrowserLiveView={hideBrowserLiveView}
+        hideTerminalOpen={hideTerminalOpen}
+        allowViewChanges={allowViewChanges}
       />
+      {trailingArrivals}
     </div>
   )
 })

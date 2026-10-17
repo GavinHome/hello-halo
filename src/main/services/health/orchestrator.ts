@@ -17,7 +17,8 @@ import type {
 } from './types'
 import {
   markInstanceStart,
-  markCleanExit
+  markCleanExit,
+  cleanupOrphans
 } from './process-guardian'
 import {
   startFallbackPolling,
@@ -40,6 +41,7 @@ import {
   resetDialogSuppression
 } from './recovery-manager'
 import { sendToRenderer } from '../../foundation/window.service'
+import { startResourceSampling, stopResourceSampling } from './resource-sampler'
 
 // ============================================
 // State
@@ -109,15 +111,25 @@ export async function initializeHealthSystem(): Promise<void> {
     // - Config errors -> agent startup fails -> emitAgentError -> critical event
     // - Port conflicts -> remote access fails -> user sees error
     // - Disk full -> file write fails -> user sees error
-    // - Orphan processes -> cleanupOrphans() already handles this
     //
     // Event-driven checks (runtime) are still active for actual error recovery.
+
+    // Processes left by the previous run are reaped here, once per launch —
+    // runtime reconciliation only ever looks at the current instance. Not
+    // awaited: init must not block on a process scan.
+    cleanupOrphans().catch(error => {
+      console.error('[Health][Orchestrator] Orphan cleanup failed:', error)
+    })
 
     // Register health event handler for automatic recovery
     onHealthEvent(handleHealthEvent)
 
     // Start fallback polling (runtime checks only)
     startFallbackPolling(handleStatusChange)
+
+    // Resource sampling: the single source of memory numbers and memory pressure
+    // (level changes reach clients through ipc/health.ts)
+    startResourceSampling()
 
     systemState.isPollingActive = true
 
@@ -339,7 +351,7 @@ export function onProcessExit(processId: string, code: number | null): void {
 /**
  * Handle renderer crash (called from main process)
  */
-export function onRendererCrash(details: { reason: string }): void {
+export function onRendererCrash(details: { reason: string; exitCode?: number }): void {
   emitRendererCrash(details.reason)
 }
 
@@ -363,6 +375,7 @@ export function shutdownHealthSystem(): void {
   try {
     // Stop polling
     stopFallbackPolling()
+    stopResourceSampling()
 
     // Mark clean exit
     markCleanExit()

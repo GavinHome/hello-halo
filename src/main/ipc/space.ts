@@ -2,22 +2,21 @@
  * Space IPC Handlers
  */
 
-import { dialog } from 'electron'
+import { showOpenDialog } from '../foundation/file-dialog'
 import {
   getHaloSpace,
   listSpaces,
   createSpace,
-  deleteSpace,
   getSpaceWithPreferences,
   openSpaceFolder,
   updateSpace,
-  updateSpacePreferences,
-  getSpacePreferences,
   reorderSpaces
 } from '../services/space.service'
+import * as spaceController from '../controllers/space.controller'
 import { getSpacesDir } from '../foundation/config.service'
 import { spaceRpc } from '../../shared/rpc/contracts/space.contract'
 import { registerRawRpcHandlers } from './rpc'
+import type { MemorySettings } from '../../shared/types/memory'
 
 // Import types for preferences
 interface SpaceLayoutPreferences {
@@ -27,6 +26,7 @@ interface SpaceLayoutPreferences {
 
 interface SpacePreferences {
   layout?: SpaceLayoutPreferences
+  memory?: MemorySettings
 }
 
 export function registerSpaceHandlers(): void {
@@ -58,9 +58,9 @@ export function registerSpaceHandlers(): void {
     },
 
     // Create a new space
-    createSpace: async (input: { name: string; icon: string; customPath?: string }) => {
+    createSpace: async (input: { name: string; icon: string; color?: string; customPath?: string }) => {
       try {
-        const space = createSpace(input)
+        const space = await createSpace(input)
         return { success: true, data: space }
       } catch (error: unknown) {
         const err = error as Error
@@ -69,15 +69,7 @@ export function registerSpaceHandlers(): void {
     },
 
     // Delete a space
-    deleteSpace: async (spaceId: string) => {
-      try {
-        const result = await deleteSpace(spaceId)
-        return { success: true, data: result }
-      } catch (error: unknown) {
-        const err = error as Error
-        return { success: false, error: err.message }
-      }
-    },
+    deleteSpace: async (spaceId: string) => spaceController.deleteSpace(spaceId),
 
     // Get a specific space (with preferences for UI)
     getSpace: async (spaceId: string) => {
@@ -102,15 +94,19 @@ export function registerSpaceHandlers(): void {
     },
 
     // Update space
-    updateSpace: async (spaceId: string, updates: { name?: string; icon?: string }) => {
+    updateSpace: async (spaceId: string, updates: { name?: string; icon?: string; color?: string }) => {
       try {
-        const space = updateSpace(spaceId, updates)
+        const space = await updateSpace(spaceId, updates)
         return { success: true, data: space }
       } catch (error: unknown) {
         const err = error as Error
         return { success: false, error: err.message }
       }
     },
+
+    // Point the space at another working directory
+    setSpaceWorkingDir: async (spaceId: string, workingDir: string) =>
+      spaceController.changeSpaceWorkingDir(spaceId, workingDir),
 
     // Get default space path
     getDefaultSpacePath: async () => {
@@ -126,7 +122,7 @@ export function registerSpaceHandlers(): void {
     // Select folder dialog (for custom space location)
     selectFolder: async () => {
       try {
-        const result = await dialog.showOpenDialog({
+        const result = await showOpenDialog({
           title: 'Select Space Location',
           properties: ['openDirectory', 'createDirectory'],
           buttonLabel: 'Select Folder'
@@ -143,32 +139,21 @@ export function registerSpaceHandlers(): void {
       }
     },
 
-    // Update space preferences (layout settings)
-    updateSpacePreferences: async (spaceId: string, preferences: Partial<SpacePreferences>) => {
-      try {
-        const space = updateSpacePreferences(spaceId, preferences)
-        return { success: true, data: space }
-      } catch (error: unknown) {
-        const err = error as Error
-        return { success: false, error: err.message }
-      }
-    },
+    // Preferences and memory go through the same controller as HTTP, so the two
+    // transports answer alike (including for a space that does not exist).
+    updateSpacePreferences: async (spaceId: string, preferences: Partial<SpacePreferences>) =>
+      spaceController.updateSpacePreferences(spaceId, preferences),
 
-    // Get space preferences
-    getSpacePreferences: async (spaceId: string) => {
-      try {
-        const preferences = getSpacePreferences(spaceId)
-        return { success: true, data: preferences }
-      } catch (error: unknown) {
-        const err = error as Error
-        return { success: false, error: err.message }
-      }
-    },
+    getSpacePreferences: async (spaceId: string) => spaceController.getSpacePreferences(spaceId),
+
+    getSpaceMemoryStatus: async (spaceId: string) => spaceController.getSpaceMemoryStatus(spaceId),
+
+    consolidateSpaceMemory: async (spaceId: string) => spaceController.consolidateSpaceMemory(spaceId),
 
     // Reorder spaces (persist user-defined display order)
     reorderSpaces: async (spaceIds: string[]) => {
       try {
-        const spaces = reorderSpaces(spaceIds)
+        const spaces = await reorderSpaces(spaceIds)
         console.log('[SpaceIPC] space:reorder response: count=%d', spaces.length)
         return { success: true, data: spaces }
       } catch (error: unknown) {
@@ -177,6 +162,9 @@ export function registerSpaceHandlers(): void {
         return { success: false, error: err.message }
       }
     },
+
+    // Remove an unreachable space's registry entry (does not touch disk)
+    forgetSpace: async (spaceId: string) => spaceController.forgetSpace(spaceId),
   })
 
 }

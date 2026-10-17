@@ -4,11 +4,12 @@
  */
 
 import { useState, useCallback } from 'react'
-import { ArrowLeft } from 'lucide-react'
 import { useAppStore } from '../stores/app.store'
 import { api } from '../api'
 import type { HaloConfig } from '../types'
 import { Header } from '../components/layout/Header'
+import { SearchIcon } from '../components/search/SearchIcon'
+import { useSearchStore } from '../stores/search.store'
 import { useTranslation } from '../i18n'
 import { useIsMobile } from '../hooks/useIsMobile'
 
@@ -29,7 +30,8 @@ import {
 
 export function SettingsPage() {
   const { t } = useTranslation()
-  const { config, setConfig, goBack } = useAppStore()
+  const { config, setConfig } = useAppStore()
+  const { openSearch } = useSearchStore()
   const isMobile = useIsMobile()
   const isRemoteMode = api.isRemoteMode()
 
@@ -42,26 +44,12 @@ export function SettingsPage() {
     scrollToSection(sectionId)
   }, [])
 
-  // Handle back - return to previous view
-  const handleBack = () => {
-    goBack()
-  }
-
   return (
     <div className="h-full w-full flex flex-col">
       {/* Header */}
       <Header
-        left={
-          <>
-            <button
-              onClick={handleBack}
-              className="p-1.5 hover:bg-secondary rounded-lg transition-colors"
-            >
-              <ArrowLeft className="w-5 h-5" />
-            </button>
-            <span className="font-medium text-sm">{t('Settings')}</span>
-          </>
-        }
+        left={<span className="text-sm font-semibold text-foreground whitespace-nowrap">{t('Settings')}</span>}
+        right={<SearchIcon onClick={() => openSearch('global')} />}
       />
 
       {/* Main Content Area */}
@@ -90,7 +78,7 @@ export function SettingsPage() {
           <div className="p-6">
             <div className="max-w-2xl mx-auto space-y-6">
               {/* AI Sources Section (v2) */}
-              <section id="ai-model" className="bg-card rounded-xl border border-border p-6">
+              <section id="ai-model" className="bg-card rounded-xl border border-border-faint p-6">
                 <h2 className="text-lg font-medium mb-4">{t('AI Model')}</h2>
                 <AISourcesSection config={config as HaloConfig} setConfig={setConfig} />
               </section>
@@ -116,7 +104,7 @@ export function SettingsPage() {
 
               {/* Remote Access Section - Desktop only */}
               {!isRemoteMode && (
-                <RemoteAccessSection />
+                <RemoteAccessSection config={config} setConfig={setConfig} />
               )}
 
               {/* Recommend Section */}

@@ -1,5 +1,5 @@
 /**
- * Unit tests for apps/runtime/session-store — convertEventsToMessages()
+ * Unit tests for apps/runtime/session-transcript — convertEventsToMessages() (with the session-store writer)
  *
  * Tests the event-to-message conversion that powers three display scenarios:
  * - Digital human chat (Halo Chat)
@@ -11,10 +11,18 @@
  */
 
 import { describe, it, expect } from 'vitest'
+import { mkdtempSync, rmSync } from 'fs'
+import { tmpdir } from 'os'
+import { join } from 'path'
+import {
+  openSessionWriter,
+  readSessionMessages,
+} from '../../../../src/main/apps/runtime/session-store'
 import {
   convertEventsToMessages,
   type StoredEvent,
-} from '../../../../src/main/apps/runtime/session-store'
+} from '../../../../src/main/apps/runtime/session-transcript'
+import { TEAM_MCP_SERVER_NAME, TEAM_TOOL_NAMES } from '../../../../src/shared/apps/team-types'
 
 // ============================================
 // Test Helpers — Event Factories
@@ -112,6 +120,31 @@ function userTrigger(text: string, ts = '2026-01-01T00:00:00.000Z'): StoredEvent
   }
 }
 
+/** Create a user message carrying image blocks; `isTrigger` marks it as user-sent */
+function userTriggerWithImages(
+  text: string,
+  images: Array<{ name?: string; data: string }>,
+  ts = '2026-01-01T00:00:00.000Z',
+  isTrigger = true
+): StoredEvent {
+  return {
+    _ts: ts,
+    type: 'user',
+    ...(isTrigger ? { _isTrigger: true } : {}),
+    message: {
+      role: 'user',
+      content: [
+        { type: 'text', text },
+        ...images.map(img => ({
+          type: 'image',
+          source: { type: 'base64', media_type: 'image/png', data: img.data },
+          ...(img.name ? { _name: img.name } : {}),
+        })),
+      ],
+    },
+  }
+}
+
 /** Create a system event (should be skipped) */
 function systemEvent(ts = '2026-01-01T00:00:00.000Z'): StoredEvent {
   return { _ts: ts, type: 'system' }
@@ -140,6 +173,177 @@ function streamEvent(event: Record<string, unknown>, ts = '2026-01-01T00:00:00.0
 // ============================================
 
 describe('convertEventsToMessages', () => {
+  describe.each(['assistant', 'stream_event'] as const)('%s replay order', (format) => {
+    function replayBlock(block: Record<string, unknown>, ts = '2026-01-01T00:00:00.000Z'): StoredEvent[] {
+      return format === 'assistant'
+        ? [{ _ts: ts, type: 'assistant', message: { content: [block] } }]
+        : [
+            streamEvent({ type: 'content_block_start', index: 0, content_block: block }, ts),
+            streamEvent({ type: 'content_block_stop', index: 0 }, ts),
+          ]
+    }
+
+    it.each(['equal', 'backward'] as const)('keeps arrival order with %s timestamps', (clock) => {
+      const firstTs = '2026-01-01T00:00:02.000Z'
+      const laterTs = clock === 'equal' ? firstTs : '2026-01-01T00:00:01.000Z'
+      const events: StoredEvent[] = [
+        ...replayBlock({ type: 'text', text: 'Before read' }, firstTs),
+        ...replayBlock({ type: 'thinking', thinking: 'Inspecting' }, laterTs),
+        ...replayBlock({ type: 'tool_use', id: 'read', name: 'Read', input: { file_path: '/a' } }, laterTs),
+        ...replayBlock({ type: 'text', text: 'Before bash' }, laterTs),
+        ...replayBlock({ type: 'tool_use', id: 'bash', name: 'Bash', input: { command: 'pwd' } }, laterTs),
+        userToolResult('bash', 'bash failed', true, laterTs),
+        userToolResult('read', 'file content', false, laterTs),
+        ...replayBlock({ type: 'thinking', thinking: 'Finished' }, laterTs),
+        ...replayBlock({ type: 'text', text: 'Final answer' }, laterTs),
+        resultWithText('Unused fallback'),
+      ]
+
+      const messages = convertEventsToMessages(events)
+
+      expect(messages).toHaveLength(1)
+      expect(messages[0]).toMatchObject({ content: 'Final answer', timestamp: laterTs })
+      expect(messages[0].thoughts).toMatchObject([
+        { type: 'text', content: 'Before read', timestamp: firstTs },
+        { type: 'thinking', content: 'Inspecting' },
+        { type: 'tool_use', toolName: 'Read', toolInput: { file_path: '/a' }, toolResult: { output: 'file content', isError: false } },
+        { type: 'text', content: 'Before bash', timestamp: laterTs },
+        { type: 'tool_use', toolName: 'Bash', toolInput: { command: 'pwd' }, toolResult: { output: 'bash failed', isError: true } },
+        { type: 'thinking', content: 'Finished' },
+      ])
+      expect(messages[0].thoughtsSummary).toMatchObject({ count: 6, types: { text: 2, thinking: 2, tool_use: 2 } })
+    })
+
+    it('keeps the last text as the bubble when tools and thinking follow it', () => {
+      const events: StoredEvent[] = [
+        ...replayBlock({ type: 'text', text: 'Only answer' }),
+        ...replayBlock({ type: 'tool_use', id: 'read', name: 'Read', input: {} }),
+        ...replayBlock({ type: 'thinking', thinking: 'Still working' }),
+        userToolResult('read', 'ok'),
+        resultWithText('Unused fallback'),
+      ]
+
+      const messages = convertEventsToMessages(events)
+
+      expect(messages).toHaveLength(1)
+      expect(messages[0].content).toBe('Only answer')
+      expect(messages[0].thoughts).toMatchObject([
+        { type: 'tool_use', toolName: 'Read', toolResult: { output: 'ok' } },
+        { type: 'thinking', content: 'Still working' },
+      ])
+      expect(messages[0].thoughtsSummary).toMatchObject({ count: 2, types: { tool_use: 1, thinking: 1 } })
+    })
+
+    it('preserves merged text position across transparent tools and user boundaries', () => {
+      const events: StoredEvent[] = [
+        userTrigger('First task'),
+        ...replayBlock({ type: 'text', text: 'Part 1' }),
+        ...replayBlock({ type: 'text', text: 'Part 2' }),
+        ...replayBlock({ type: 'tool_use', id: 'todo', name: 'TodoWrite', input: { todos: [] } }),
+        userToolResult('todo', 'saved'),
+        ...replayBlock({ type: 'text', text: 'Part 3' }),
+        ...replayBlock({ type: 'tool_use', id: 'read', name: 'Read', input: {} }),
+        ...replayBlock({ type: 'text', text: 'First answer' }),
+        userTrigger('Second task'),
+        ...replayBlock({ type: 'text', text: 'Second answer' }),
+        ...replayBlock({ type: 'tool_use', id: 'bash', name: 'Bash', input: {} }),
+        userToolResult('bash', 'second result'),
+      ]
+
+      const messages = convertEventsToMessages(events)
+
+      expect(messages.map(message => [message.role, message.content])).toEqual([
+        ['user', 'First task'], ['assistant', 'First answer'],
+        ['user', 'Second task'], ['assistant', 'Second answer'],
+      ])
+      expect(messages[1].thoughts).toMatchObject([
+        { type: 'text', content: 'Part 1\n\nPart 2\n\nPart 3' },
+        { type: 'tool_use', toolName: 'TodoWrite', toolResult: { output: 'saved' } },
+        { type: 'tool_use', toolName: 'Read' },
+      ])
+      expect(messages[3].thoughts).toMatchObject([
+        { type: 'tool_use', toolName: 'Bash', toolResult: { output: 'second result' } },
+      ])
+      const ids = messages.flatMap(message => [message.id, ...(message.thoughts ?? []).map(thought => thought.id)])
+      expect(new Set(ids).size).toBe(ids.length)
+    })
+  })
+
+  describe('mixed assistant envelopes', () => {
+    it('preserves text, thinking and tool block order within one envelope', () => {
+      const events: StoredEvent[] = [{
+        _ts: '2026-01-01T00:00:00.000Z',
+        type: 'assistant',
+        message: { content: [
+          { type: 'text', text: 'Before read' },
+          { type: 'thinking', thinking: 'Inspecting' },
+          { type: 'tool_use', id: 'read', name: 'Read', input: {} },
+          { type: 'text', text: 'Before bash' },
+          { type: 'tool_use', id: 'bash', name: 'Bash', input: {} },
+          { type: 'thinking', thinking: 'Finished' },
+          { type: 'text', text: 'Final answer' },
+        ] },
+      }]
+
+      const messages = convertEventsToMessages(events)
+
+      expect(messages).toHaveLength(1)
+      expect(messages[0].thoughts).toMatchObject([
+        { type: 'text', content: 'Before read' },
+        { type: 'thinking', content: 'Inspecting' },
+        { type: 'tool_use', toolName: 'Read' },
+        { type: 'text', content: 'Before bash' },
+        { type: 'tool_use', toolName: 'Bash' },
+        { type: 'thinking', content: 'Finished' },
+      ])
+      expect(messages[0].content).toBe('Final answer')
+      expect(messages[0].thoughtsSummary).toMatchObject({ count: 6, types: { text: 2, thinking: 2, tool_use: 2 } })
+    })
+
+    it('keeps within-envelope concatenation across thinking and transparent tools', () => {
+      const events: StoredEvent[] = [
+        assistantText('Earlier'),
+        { _ts: '2026-01-01T00:00:01.000Z', type: 'assistant', message: { content: [
+          { type: 'text', text: 'Part 1' },
+          { type: 'text', text: 'Part 2' },
+          { type: 'thinking', thinking: 'Planning' },
+          { type: 'tool_use', id: 'todo', name: 'TodoWrite', input: {} },
+          { type: 'text', text: 'Part 3' },
+        ] } },
+        userToolResult('todo', 'ok'),
+      ]
+
+      const messages = convertEventsToMessages(events)
+
+      expect(messages).toHaveLength(1)
+      expect(messages[0].content).toBe('Earlier\n\nPart 1Part 2Part 3')
+      expect(messages[0].thoughts).toMatchObject([
+        { type: 'thinking', content: 'Planning' },
+        { type: 'tool_use', toolName: 'TodoWrite', toolResult: { output: 'ok' } },
+      ])
+    })
+
+    it('demotes both earlier texts when a tool follows the envelope text', () => {
+      const events: StoredEvent[] = [
+        assistantText('Earlier'),
+        { _ts: '2026-01-01T00:00:01.000Z', type: 'assistant', message: { content: [
+          { type: 'text', text: 'Before tool' },
+          { type: 'tool_use', id: 'read', name: 'Read', input: {} },
+        ] } },
+        assistantText('Final answer'),
+      ]
+
+      const messages = convertEventsToMessages(events)
+
+      expect(messages).toHaveLength(1)
+      expect(messages[0].content).toBe('Final answer')
+      expect(messages[0].thoughts).toMatchObject([
+        { type: 'text', content: 'Earlier\n\nBefore tool' },
+        { type: 'tool_use', toolName: 'Read' },
+      ])
+    })
+  })
+
   // ── Core: Single Turn Merging ──
 
   describe('single turn merging', () => {
@@ -232,27 +436,12 @@ describe('convertEventsToMessages', () => {
       expect(messages).toHaveLength(1)
       expect(messages[0].content).toBe('All fixed!')
 
-      // Should have: tool_use(Read), text(A demoted), tool_use(Bash), text(B demoted) = 4 thoughts
-      // Note: demoted text appears AFTER the tool that caused the demotion, because the
-      // demotion happens when the next text block arrives (deferred evaluation).
-      const thoughts = messages[0].thoughts!
-      expect(thoughts.length).toBe(4)
-
-      // First thought: Read tool (pushed when encountered)
-      expect(thoughts[0].type).toBe('tool_use')
-      expect(thoughts[0].toolName).toBe('Read')
-
-      // Second thought: demoted text A (pushed when text B arrives and sees hadSubstantiveTool)
-      expect(thoughts[1].type).toBe('text')
-      expect(thoughts[1].content).toBe('Looking at the code...')
-
-      // Third thought: Bash tool (pushed when encountered)
-      expect(thoughts[2].type).toBe('tool_use')
-      expect(thoughts[2].toolName).toBe('Bash')
-
-      // Fourth thought: demoted text B (pushed when text C arrives and sees hadSubstantiveTool)
-      expect(thoughts[3].type).toBe('text')
-      expect(thoughts[3].content).toBe('Found an issue, running fix...')
+      expect(messages[0].thoughts).toMatchObject([
+        { type: 'text', content: 'Looking at the code...' },
+        { type: 'tool_use', toolName: 'Read' },
+        { type: 'text', content: 'Found an issue, running fix...' },
+        { type: 'tool_use', toolName: 'Bash' },
+      ])
     })
 
     it('concatenates text when only TodoWrite (transparent tool) is between texts', () => {
@@ -272,6 +461,45 @@ describe('convertEventsToMessages', () => {
       expect(messages[0].thoughts!.some(t => t.type === 'tool_use' && t.toolName === 'TodoWrite')).toBe(true)
       // No demoted text thoughts
       expect(messages[0].thoughts!.filter(t => t.type === 'text')).toHaveLength(0)
+    })
+
+    it('concatenates text across a transparent MCP tool, which arrives prefixed', () => {
+      // The engine reports MCP tools as `mcp__<server>__<tool>`. Matching bare
+      // names only used to drop the agent's own summary before team_complete.
+      const events: StoredEvent[] = [
+        assistantText('# Report\n\nHere is what the team produced.'),
+        assistantToolUse(`mcp__${TEAM_MCP_SERVER_NAME}__${TEAM_TOOL_NAMES.complete}`, 'tool-1', {
+          summary: 'done',
+        }),
+        userToolResult('tool-1', 'Run will be sealed after this turn ends.'),
+        assistantText('The team has finished.'),
+      ]
+
+      const messages = convertEventsToMessages(events)
+
+      expect(messages).toHaveLength(1)
+      expect(messages[0].content).toBe(
+        '# Report\n\nHere is what the team produced.\n\nThe team has finished.'
+      )
+      expect(messages[0].thoughts!.filter(t => t.type === 'text')).toHaveLength(0)
+    })
+
+    it('replaces text when a substantive MCP tool is between texts', () => {
+      // Same prefixed shape, but reading an artifact IS the work the text
+      // before it announced — continuity must still break.
+      const events: StoredEvent[] = [
+        assistantText('Let me open the deliverable...'),
+        assistantToolUse(`mcp__${TEAM_MCP_SERVER_NAME}__${TEAM_TOOL_NAMES.readArtifact}`, 'tool-1', {
+          ref: 'brief.md',
+        }),
+        userToolResult('tool-1', 'file body'),
+        assistantText('The brief covers three competitors.'),
+      ]
+
+      const messages = convertEventsToMessages(events)
+
+      expect(messages).toHaveLength(1)
+      expect(messages[0].content).toBe('The brief covers three competitors.')
     })
 
     it('replaces text when a non-transparent tool follows a transparent tool', () => {
@@ -347,6 +575,45 @@ describe('convertEventsToMessages', () => {
   })
 
   // ── Edge Cases ──
+
+  describe('text payload normalization', () => {
+    it.each([
+      { text: 42, expected: '42' },
+      { text: true, expected: 'true' },
+      { text: { value: 'synthetic' }, expected: '[object Object]' },
+      { text: [], expected: '' },
+    ])('preserves string normalization for $text', ({ text, expected }) => {
+      const messages = convertEventsToMessages([{
+        _ts: '2026-01-01T00:00:00.000Z',
+        type: 'assistant',
+        message: { content: [{ type: 'text', text }] },
+      }])
+
+      if (expected) {
+        expect(messages).toHaveLength(1)
+        expect(messages[0].content).toBe(expected)
+        expect(typeof messages[0].content).toBe('string')
+        expect(messages[0].thoughts).toBeUndefined()
+      } else {
+        expect(messages).toEqual([])
+      }
+    })
+
+    it('keeps the envelope separator when an empty payload precedes text', () => {
+      const messages = convertEventsToMessages([
+        assistantText('Earlier'),
+        {
+          _ts: '2026-01-01T00:00:01.000Z',
+          type: 'assistant',
+          message: { content: [{ type: 'text', text: [] }, { type: 'text', text: 'Later' }] },
+        },
+      ])
+
+      expect(messages).toHaveLength(1)
+      expect(messages[0].content).toBe('Earlier\n\nLater')
+      expect(messages[0].thoughts).toBeUndefined()
+    })
+  })
 
   describe('edge cases', () => {
     it('returns empty array for no events', () => {
@@ -463,10 +730,13 @@ describe('convertEventsToMessages', () => {
       })
     })
 
-    it('uses repaired or raw tool input for malformed streamed JSON without dropping the panel', () => {
+    it.each([
+      { raw: '{"command":"npm test"', input: { command: 'npm test' } },
+      { raw: '}{', input: { raw: '}{' } },
+    ])('preserves malformed streamed tool input $raw without dropping the panel', ({ raw, input }) => {
       const events: StoredEvent[] = [
         streamEvent({ type: 'content_block_start', index: 0, content_block: { type: 'tool_use', id: 'tool-1', name: 'Bash', input: {} } }),
-        streamEvent({ type: 'content_block_delta', index: 0, delta: { type: 'input_json_delta', partial_json: '{"command":"npm test"' } }),
+        streamEvent({ type: 'content_block_delta', index: 0, delta: { type: 'input_json_delta', partial_json: raw } }),
         streamEvent({ type: 'content_block_stop', index: 0 }),
         assistantText('Done'),
       ]
@@ -478,7 +748,7 @@ describe('convertEventsToMessages', () => {
       expect(messages[0].thoughts![0]).toMatchObject({
         type: 'tool_use',
         toolName: 'Bash',
-        toolInput: { command: 'npm test' },
+        toolInput: input,
       })
     })
 
@@ -774,6 +1044,101 @@ describe('convertEventsToMessages', () => {
     })
   })
 
+  // ── Image attachments ──
+
+  describe('image attachments', () => {
+    it('reconstructs attached images on the user message', () => {
+      const events: StoredEvent[] = [
+        userTriggerWithImages('What is in this screenshot?', [
+          { name: 'shot.png', data: 'AAAA' },
+        ]),
+        assistantText('A table of contacts.'),
+      ]
+
+      const messages = convertEventsToMessages(events)
+
+      expect(messages[0]).toMatchObject({ role: 'user', content: 'What is in this screenshot?' })
+      expect(messages[0].images).toEqual([
+        { id: 'session-img-1-0', type: 'image', mediaType: 'image/png', data: 'AAAA', name: 'shot.png' },
+      ])
+      // Images belong to the user turn only.
+      expect(messages[1].images).toBeUndefined()
+    })
+
+    it('keeps an image-only message (no text) visible', () => {
+      const messages = convertEventsToMessages([
+        userTriggerWithImages('', [{ data: 'AAAA' }]),
+      ])
+
+      expect(messages).toHaveLength(1)
+      expect(messages[0].content).toBe('')
+      expect(messages[0].images).toHaveLength(1)
+    })
+
+    it('assigns distinct ids to the images of one message', () => {
+      const messages = convertEventsToMessages([
+        userTriggerWithImages('two', [{ data: 'AAAA' }, { data: 'BBBB' }]),
+      ])
+
+      const ids = messages[0].images!.map(i => i.id)
+      expect(new Set(ids).size).toBe(2)
+    })
+
+    it('ignores image blocks on a user event that is not a trigger', () => {
+      // SDK round-trip user events can carry image blocks that are tool
+      // plumbing rather than something the user attached.
+      const messages = convertEventsToMessages([
+        userTriggerWithImages('tool echo', [{ data: 'AAAA' }], undefined, false),
+      ])
+
+      expect(messages[0].images).toBeUndefined()
+    })
+
+    it('omits the images field for a text-only message', () => {
+      const messages = convertEventsToMessages([userTrigger('plain text')])
+      expect(messages[0].images).toBeUndefined()
+    })
+
+    it('round-trips images through the JSONL writer and reader', () => {
+      const spacePath = mkdtempSync(join(tmpdir(), 'halo-session-store-'))
+      try {
+        const writer = openSessionWriter(spacePath, 'app-1', 'run-1')
+        writer.writeTrigger('Look at this', [
+          { id: 'img-1', type: 'image', mediaType: 'image/png', data: 'AAAA', name: 'shot.png' },
+        ])
+        writer.writeEvent({
+          type: 'assistant',
+          message: { role: 'assistant', content: [{ type: 'text', text: 'Got it.' }] },
+        })
+
+        const messages = readSessionMessages(spacePath, 'app-1', 'run-1')
+
+        expect(messages.map(m => [m.role, m.content])).toEqual([
+          ['user', 'Look at this'],
+          ['assistant', 'Got it.'],
+        ])
+        expect(messages[0].images).toEqual([
+          { id: 'session-img-1-0', type: 'image', mediaType: 'image/png', data: 'AAAA', name: 'shot.png' },
+        ])
+      } finally {
+        rmSync(spacePath, { recursive: true, force: true })
+      }
+    })
+
+    it('writes no image blocks when a trigger has no attachments', () => {
+      const spacePath = mkdtempSync(join(tmpdir(), 'halo-session-store-'))
+      try {
+        openSessionWriter(spacePath, 'app-1', 'run-1').writeTrigger('text only')
+        const messages = readSessionMessages(spacePath, 'app-1', 'run-1')
+
+        expect(messages).toHaveLength(1)
+        expect(messages[0].images).toBeUndefined()
+      } finally {
+        rmSync(spacePath, { recursive: true, force: true })
+      }
+    })
+  })
+
   // ── Message ID uniqueness ──
 
   describe('message and thought IDs', () => {
@@ -800,5 +1165,18 @@ describe('convertEventsToMessages', () => {
         .map(t => t.id)
       expect(new Set(thoughtIds).size).toBe(thoughtIds.length)
     })
+  })
+})
+
+describe('team transcript origin', () => {
+  it('retains dispatch identity on input and response, then resets it for a human turn', () => {
+    const messages = convertEventsToMessages([
+      { type: 'user', _ts: '2026-09-14T00:00:00Z', _isTrigger: true, _teamOrigin: { kind: 'message', correlationId: 'dispatch-1' }, message: { content: 'Delegated work' } },
+      { type: 'assistant', _ts: '2026-09-14T00:00:01Z', message: { content: [{ type: 'text', text: 'Internal result' }] } },
+      { type: 'user', _ts: '2026-09-14T00:00:02Z', _isTrigger: true, _teamOrigin: { kind: 'human_message', correlationId: 'human-1' }, message: { content: 'My question' } },
+      { type: 'assistant', _ts: '2026-09-14T00:00:03Z', message: { content: [{ type: 'text', text: 'Your answer' }] } },
+    ])
+    expect(messages.map(message => message.metadata?.teamTriggerKind)).toEqual(['message', 'message', 'human_message', 'human_message'])
+    expect(messages[0].metadata?.correlationId).toBe('dispatch-1')
   })
 })

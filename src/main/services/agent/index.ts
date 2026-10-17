@@ -16,7 +16,9 @@
  * - stream-processor.ts - Core stream processing (shared by send-message + app-chat)
  * - session-consumer.ts - Persistent REPL consumer (mirrors CC's REPL model)
  * - send-message.ts    - Main conversation message sending (send-only, consumer handles response)
+ * - live-turn.ts       - Turn-in-flight probe + persistence-free mid-turn send
  * - control.ts         - Generation control (stop, status)
+ * - stored-session.ts  - Deleting a stored session that will never be resumed
  */
 
 // ============================================
@@ -66,6 +68,11 @@ export { sendMessage } from './send-message'
 // Inject message into active session mid-turn (Agent Team / deadlock recovery)
 export { injectMessage } from './inject-message'
 
+// Turn-in-flight probe + persistence-free mid-turn delivery, for callers that
+// own their own record of the message (an app chat's transcript)
+export { hasLiveTurn, sendIntoLiveTurn } from './live-turn'
+export type { LiveInputOptions } from './live-turn'
+
 // Stream processor (shared core for main agent + app chat)
 export { processStream } from './stream-processor'
 export type { ProcessStreamParams, StreamCallbacks, StreamResult } from './stream-processor'
@@ -73,10 +80,13 @@ export type { ProcessStreamParams, StreamCallbacks, StreamResult } from './strea
 // Generation control
 export {
   stopGeneration,
+  onUserStop,
+  onUserStopSettled,
   isGenerating,
   getActiveSessions,
   getSessionState
 } from './control'
+export type { StopReason, StopGenerationOptions } from './control'
 
 // ============================================
 // Session Management
@@ -88,6 +98,22 @@ export {
   closeAllV2Sessions,
   invalidateAllSessions
 } from './session-manager'
+// A space's sessions rebuild after their current turn, e.g. once its working directory moved;
+// whether anything in a space is running or about to, and whether anything started since
+export { invalidateSessionsForSpace, isSpaceBusy, countSessionAcquisitions } from './session-manager'
+// Close a space's idle sessions and wait for their processes to exit, before its folder is deleted
+export { closeSpaceSessions } from './session-manager'
+
+// Delete a stored session that will never be resumed (CC-protocol engines);
+// copy a working directory's stored sessions to the one a space moved to
+export { deleteStoredSession, copyStoredSessions } from './stored-session'
+
+// A session's working directory is missing; the chat offers to choose another.
+// Once a space moves, no session starts in the folders it left.
+export { WorkingDirectoryUnavailableError, workingDirErrorDetail, retireWorkingDirs } from './working-dir'
+
+// Conversation goal (engines with features.goal)
+export { getConversationGoal, setConversationGoal } from './goal'
 
 // ============================================
 // MCP Management
@@ -106,9 +132,54 @@ export type { McpProbeResult } from './mcp-probe'
 // ============================================
 
 export { createCanUseTool, resolveQuestion, rejectQuestion, rejectAllQuestions } from './permission-handler'
+export type { ToolGate } from './permission-handler'
 export { listToolsets, openToolsetByUser, closeToolsetByUser } from './toolsets'
+/**
+ * Toolsets opened or closed by Halo itself for one conversation (opener
+ * 'system'): unlike the user's toggle they never change the last-used set new
+ * conversations start from. `getToolset` answers whether one is available.
+ */
+export { openToolset, closeToolset, getToolset } from './toolsets'
 export type { ToolsetStatus, ToolsetsChangedEvent } from './toolsets'
-export { getWorkingDir, getApiCredentials } from './helpers'
+export { getWorkingDir, getApiCredentials, getApiCredentialsForSelection } from './helpers'
+/**
+ * The one way to add engine hooks to session options: merges event by event,
+ * so no concern that watches tool calls (the memory guard, a delegation audit,
+ * a file boundary) can drop another's by assigning `hooks`.
+ */
+export { addSdkHooks } from './sdk-config'
+/**
+ * For an in-process MCP server that keeps the settings it was built from: a
+ * live session built with other settings is then rebuilt on its next send.
+ */
+export { markMcpServerSettings } from './sdk-config'
+/**
+ * An engine's error text as users read it (a local connection refused by
+ * security software is explained), the test for such an error (raw or already
+ * explained), and the diagnostics' check of that same connection from a child
+ * process started the way engine processes start.
+ */
+export { explainEngineError, isRefusedLocalConnection, checkChildLocalConnection } from './local-connection'
 export { parseSDKMessage, buildMessageContent, formatCanvasContext } from './message-utils'
-export { getOrCreateV2Session, activeSessions, v2Sessions, getConsumerHandle } from './session-manager'
+/**
+ * What a user turn carries besides its text, as the model reads it (references
+ * and built-in task blocks), and the brief form a cross-conversation reader sees.
+ */
+export { formatTurnAttachments, formatReferencesBlock, formatMessageAttachmentsBrief } from './references'
+/** Making text that is not the user's own safe to place inside those blocks (see prompt-text.ts). */
+export { inlineCode, inlinePath, inlineText } from './prompt-text'
+export { getOrCreateV2Session, activeSessions, v2Sessions, getConsumerHandle, SessionOptionsStaleError } from './session-manager'
+/** Sending entries acquire before preparation and await lease.send() through SDK acceptance. */
+export { acquireV2Session } from './session-manager'
+export type { V2SessionLease } from './session-manager'
+/** Headless callers protect manager-owned sessions until their execution reaches its release boundary. */
+export { createSessionState, registerActiveSession, unregisterActiveSession } from './session-manager'
+// Whether a conversation's session must not be disturbed: a turn in flight, or team agents still working between turns.
+export { isSessionBusy, hasPendingSessionInput } from './session-manager'
+export { listResidentSessions, evictIdleSession, setResidentSessionLimit, getSessionEvictionCount, getResidentSessionLimit } from './session-manager'
+export type { ResidentSessionInfo } from './session-manager'
+export type { SessionGates } from './session-manager'
 export { broadcastMcpStatus } from './mcp-manager'
+
+/** Materialize accepted input images for the desktop event transport. */
+export { withInputImageFiles } from './image-attachments'

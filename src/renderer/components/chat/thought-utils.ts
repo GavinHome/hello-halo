@@ -26,6 +26,142 @@ void function _i18nThoughtKeys(t: (k: string) => string) {
 }
 
 // ============================================
+// Sub-agent grouping
+// ============================================
+
+export const NO_CHILD_THOUGHTS: Thought[] = []
+
+/**
+ * Sub-agent steps grouped under their parent Task/Agent step id. A parent whose
+ * steps did not change keeps its array from `previous`, so its memoized row is
+ * not re-rendered when an unrelated step streams in.
+ */
+export function groupChildThoughts(
+  thoughts: readonly Thought[],
+  previous?: ReadonlyMap<string, Thought[]>,
+): Map<string, Thought[]> {
+  const groups = new Map<string, Thought[]>()
+  for (const thought of thoughts) {
+    if (!thought.parentToolUseId) continue
+    const group = groups.get(thought.parentToolUseId)
+    if (group) group.push(thought)
+    else groups.set(thought.parentToolUseId, [thought])
+  }
+  if (previous) {
+    for (const [parentId, group] of groups) {
+      const before = previous.get(parentId)
+      if (before && before.length === group.length && before.every((thought, i) => thought === group[i])) {
+        groups.set(parentId, before)
+      }
+    }
+  }
+  return groups
+}
+
+// ============================================
+// Thought panel model
+// ============================================
+
+/** What the thought panel draws, live or saved, derived from a turn's steps. */
+export interface ThoughtPanelModel {
+  /** The steps it was derived from. */
+  readonly thoughts: readonly Thought[]
+  /**
+   * Timeline steps: no final result, no sub-agent steps (nested under their
+   * Task), no TodoWrite (one card below). A tool result stays only when it
+   * found no call to merge into.
+   */
+  readonly display: readonly Thought[]
+  /** Sub-agent steps by parent step id (see `groupChildThoughts`). */
+  readonly childGroups: ReadonlyMap<string, Thought[]>
+  /** The latest TodoWrite call that carries its input. */
+  readonly latestTodo: Thought | null
+  /** System errors; tool failures are part of normal investigation and not counted. */
+  readonly errorCount: number
+}
+
+function isTimelineStep(thought: Thought): boolean {
+  return thought.type !== 'result' && !thought.parentToolUseId && thought.toolName !== 'TodoWrite'
+}
+
+function isTodoCall(thought: Thought): boolean {
+  return thought.type === 'tool_use' && thought.toolName === 'TodoWrite' && !!thought.toolInput
+}
+
+/** Whether `next` can replace `prev` without entering or leaving any derived list. */
+function samePlace(prev: Thought, next: Thought): boolean {
+  return prev.id === next.id && prev.type === next.type && prev.toolName === next.toolName
+    && prev.parentToolUseId === next.parentToolUseId && isTodoCall(prev) === isTodoCall(next)
+}
+
+function buildThoughtPanelModel(thoughts: readonly Thought[], previousGroups?: ReadonlyMap<string, Thought[]>): ThoughtPanelModel {
+  let latestTodo: Thought | null = null
+  let errorCount = 0
+  for (const thought of thoughts) {
+    if (isTodoCall(thought)) latestTodo = thought
+    if (thought.type === 'error') errorCount++
+  }
+  return {
+    thoughts,
+    display: thoughts.filter(isTimelineStep),
+    childGroups: groupChildThoughts(thoughts, previousGroups),
+    latestTodo,
+    errorCount,
+  }
+}
+
+/**
+ * The panel model for `thoughts`, re-deriving only the steps that changed
+ * since `prev`. Steps are appended or replaced in place by a new object (a
+ * streamed delta, a tool result), so a step that kept its identity needs no
+ * work. A step that changed kind, or a shorter list, rebuilds the model. `prev`
+ * is never modified, and unchanged lists keep their identity.
+ */
+export function nextThoughtPanelModel(prev: ThoughtPanelModel | null, thoughts: readonly Thought[]): ThoughtPanelModel {
+  if (prev?.thoughts === thoughts) return prev
+  if (!prev || thoughts.length < prev.thoughts.length) return buildThoughtPanelModel(thoughts, prev?.childGroups)
+
+  let display: Thought[] | null = null
+  let groups: Map<string, Thought[]> | null = null
+  let latestTodo = prev.latestTodo
+  let errorCount = prev.errorCount
+  const editDisplay = (): Thought[] => (display ??= [...prev.display])
+  const editGroup = (parentId: string): Thought[] => {
+    groups ??= new Map(prev.childGroups)
+    const group = groups.get(parentId)
+    if (group && group !== prev.childGroups.get(parentId)) return group
+    const copy = group ? [...group] : []
+    groups.set(parentId, copy)
+    return copy
+  }
+
+  for (let i = 0; i < prev.thoughts.length; i++) {
+    const before = prev.thoughts[i]
+    const after = thoughts[i]
+    if (after === before) continue
+    if (!samePlace(before, after)) return buildThoughtPanelModel(thoughts, prev.childGroups)
+    if (isTimelineStep(after)) {
+      const list = editDisplay()
+      list[list.lastIndexOf(before)] = after
+    } else if (after.parentToolUseId) {
+      const group = editGroup(after.parentToolUseId)
+      group[group.lastIndexOf(before)] = after
+    }
+    if (latestTodo === before) latestTodo = after
+  }
+
+  for (let i = prev.thoughts.length; i < thoughts.length; i++) {
+    const thought = thoughts[i]
+    if (isTimelineStep(thought)) editDisplay().push(thought)
+    else if (thought.parentToolUseId) editGroup(thought.parentToolUseId).push(thought)
+    if (isTodoCall(thought)) latestTodo = thought
+    if (thought.type === 'error') errorCount++
+  }
+
+  return { thoughts, display: display ?? prev.display, childGroups: groups ?? prev.childGroups, latestTodo, errorCount }
+}
+
+// ============================================
 // Text Utilities
 // ============================================
 
@@ -78,16 +214,17 @@ export function getThoughtIcon(type: Thought['type'], toolName?: string): Lucide
  */
 export function getThoughtColor(type: Thought['type'], isError?: boolean): string {
   // Tool errors use amber (warning) instead of red (destructive) because
-  // they are internal AI feedback, not user-facing errors
+  // they are internal AI feedback, not user-facing errors. Tool icons and names
+  // stay bright amber in both themes. Elsewhere: tokens, with the dark hues set by `theme-dark:`.
   if (isError) return 'text-amber-500'
 
   switch (type) {
     case 'thinking':
-      return 'text-blue-400'
+      return 'text-primary theme-dark:text-blue-400'
     case 'tool_use':
       return 'text-amber-400'
     case 'tool_result':
-      return 'text-green-400'
+      return 'text-halo-success theme-dark:text-green-400'
     case 'text':
       return 'text-foreground'
     case 'system':
@@ -195,6 +332,10 @@ export function getToolFriendlyFormat(
 
     case 'NotebookEdit':
       return typeof toolInput.notebook_path === 'string' ? toolInput.notebook_path : ''
+
+    case 'Goal':
+      if (typeof toolInput.objective === 'string') return toolInput.objective
+      return typeof toolInput.note === 'string' ? toolInput.note : ''
 
     default:
       // Fallback: show first non-empty string value

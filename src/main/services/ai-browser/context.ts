@@ -3,7 +3,7 @@
  *
  * The BrowserContext is the central manager for AI Browser operations.
  * It provides:
- * - Access to the active BrowserView's WebContents
+ * - Access to the active browser page's WebContents
  * - CDP command execution with automatic timeout protection
  * - Accessibility snapshot management
  * - Network and console monitoring
@@ -16,19 +16,29 @@
 import * as path from 'path'
 import * as fs from 'fs'
 import { nativeImage, app } from 'electron'
+import { AsyncLocalStorage } from 'node:async_hooks'
+import { randomUUID } from 'node:crypto'
 import { browserViewManager } from '../browser-view.service'
+import { browserHostManager, captureBrowserPage, MainHostAttachError, withBrowserFrames } from '../browser-host'
+import { BROWSER_INPUT_METHODS, BrowserInputOperation, type BrowserInputCommandSender } from '../browser-input'
+import type { BrowserViewState, DeviceMode } from '../browser-view.service'
 import {
   createAccessibilitySnapshot,
   getElementBoundingBox,
   scrollIntoView,
-  focusElement
+  focusElement,
+  PageCommandRejectedError,
+  type SnapshotCommandSender
 } from './snapshot'
 import {
   registerWebContentsForDownload,
   unregisterWebContentsForDownload
 } from './download-handler'
-import { emitBrowserActiveView, emitBrowserViewGone } from './events'
+import { emitBrowserActiveView, emitBrowserViewGone, emitBrowserConversationReleased } from './events'
+import { CROSS_ORIGIN_FRAME_REFUSED, FOCUS_REFUSED, READ_FILLED_VALUE, SELECT_IF_FOCUSED } from './fill-check'
+import type { AIBrowserLivePage, AIBrowserStopResult } from '../../../shared/types/ai-browser'
 import { sanitizeFilename, resolveUniquePath } from '../../foundation/file-naming'
+import { isEngineControlFileName } from '../../../shared/engine-control-files'
 import type {
   BrowserContextInterface,
   AccessibilitySnapshot,
@@ -37,8 +47,106 @@ import type {
   ConsoleMessage,
   DialogInfo,
   DownloadInfo,
-  DownloadState
+  DownloadState,
+  FieldReadBack
 } from './types'
+
+/**
+ * Every tab opened by an automation, across all of them.
+ *
+ * Ownership has to be answerable from outside the owning context: the
+ * interactive context must be able to tell "a tab the user opened" from "a tab
+ * some digital human opened" without holding a reference to every agent alive.
+ * Membership is added on track and removed on destroy, so the set tracks live
+ * automation views only.
+ */
+const automationOwnedViewIds = new Set<string>()
+
+/**
+ * Every context currently alive: the user's singleton, one per conversation,
+ * and every automation's.
+ *
+ * A tab can be closed by someone other than whoever is pointing at it — the
+ * user closing a canvas tab, the tray "stop" button — and more than one context
+ * may hold that pointer. Reconciling only the context the closer happens to
+ * know about leaves the rest pointing at a dead page, which surfaces as a
+ * navigation that fails instead of opening a fresh one.
+ */
+const liveContexts = new Set<BrowserContext>()
+
+/**
+ * Pages a context with a UI had to open in the hidden host because the main
+ * window could not attach them. Nothing can ever display them, so no context
+ * announces them, whichever holds or selects them.
+ */
+const backgroundOnlyViewIds = new Set<string>()
+
+/**
+ * A view is gone: reconcile EVERY context, then announce it once.
+ *
+ * Announcing per context would tell the renderer to drop the same live session
+ * several times; announcing from inside the loop would also fire for an
+ * automation's offscreen page, which the renderer has no entry for.
+ */
+export function notifyViewDestroyed(viewId: string, webContentsId?: number): void {
+  if (webContentsId !== undefined) unregisterWebContentsForDownload(webContentsId)
+  automationOwnedViewIds.delete(viewId)
+  const wasAnnounced = !backgroundOnlyViewIds.delete(viewId)
+  let announce = false
+  for (const ctx of liveContexts) {
+    const held = ctx.handleViewDestroyed(viewId)
+    if (held && ctx.hasUi && wasAnnounced) announce = true
+  }
+  if (announce) {
+    emitBrowserViewGone({ viewId })
+    console.log(`[BrowserContext] View gone: ${viewId}`)
+  }
+}
+
+// Every destroy path (canvas close, tray stop, an agent closing a tab, window
+// teardown, a context ending) funnels through the manager, so reconciling here
+// is what keeps a long-lived context from pointing at a dead page.
+browserViewManager.onViewDestroyed(notifyViewDestroyed)
+
+/**
+ * Every page held by a context that has a UI — the one it acts on and every
+ * other it opened — for a client that missed the live events (renderer reload,
+ * late-connecting window).
+ */
+export function listLivePages(): AIBrowserLivePage[] {
+  const pages: AIBrowserLivePage[] = []
+  for (const ctx of liveContexts) pages.push(...ctx.describeLivePages())
+  return pages
+}
+
+/**
+ * Stop a page from the live-session tray on behalf of `conversationId`.
+ *
+ * The authoritative check (the renderer's is only a fast path, and can be one
+ * event behind): the page must have been opened by that conversation's context,
+ * and no other context may be on it right now — otherwise closing it would pull
+ * it from under another conversation, or close a tab the user opened. A canvas
+ * tab close does not come here; it closes whatever the user asked to close.
+ */
+export function stopLivePage(viewId: string, conversationId: string): AIBrowserStopResult {
+  let owner: BrowserContext | null = null
+  for (const ctx of liveContexts) {
+    if (ctx.isWatchable(viewId) && ctx.conversationId === conversationId && ctx.ownsView(viewId)) owner = ctx
+  }
+  if (!owner) {
+    console.warn(`[BrowserContext] Stop refused: ${viewId} is not a page ${conversationId} opened`)
+    return { stopped: false, reason: 'not-owned' }
+  }
+  for (const ctx of liveContexts) {
+    if (ctx !== owner && ctx.getActiveViewId() === viewId) {
+      console.warn(`[BrowserContext] Stop refused: ${viewId} is in use by ${ctx.conversationId ?? 'another context'}`)
+      return { stopped: false, reason: 'in-use' }
+    }
+  }
+  browserViewManager.destroy(viewId)
+  console.log(`[BrowserContext] Page stopped from the tray: ${viewId} (conversation=${conversationId})`)
+  return { stopped: true }
+}
 
 // Default timeout for CDP commands (ms)
 const CDP_TIMEOUT = 15_000
@@ -66,9 +174,61 @@ function withTimeout<T>(promise: Promise<T>, ms: number, label = 'Operation'): P
 }
 
 /**
+ * The name a download is saved under. Never one an agent engine reads as its
+ * instructions: downloads land in the workspace the engine works in.
+ */
+function downloadFileName(suggested: string): string {
+  const name = sanitizeFilename(suggested)
+  if (!isEngineControlFileName(name)) return name
+  const ext = path.extname(name)
+  return `${name.slice(0, name.length - ext.length)} (downloaded)${ext}`
+}
+
+function waitForPolling(delayMs: number, signal?: AbortSignal): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const cleanup = () => { clearTimeout(timer); signal?.removeEventListener('abort', onAbort) }
+    const onAbort = () => {
+      cleanup()
+      reject(signal?.reason instanceof Error ? signal.reason : new Error('Browser wait was cancelled'))
+    }
+    const timer = setTimeout(() => { cleanup(); resolve() }, delayMs)
+    signal?.addEventListener('abort', onAbort, { once: true })
+    if (signal?.aborted) onAbort()
+  })
+}
+
+/**
  * BrowserContext - Manages the browser state for AI operations
  */
+interface PageOperation {
+  viewId: string
+  contents: Electron.WebContents
+  snapshot: AccessibilitySnapshot | null
+  version: number
+  deadline: number
+  signal: AbortSignal
+  input?: BrowserInputOperation
+}
+
+type BrowserScreenshotOptions = Parameters<BrowserContextInterface['captureScreenshot']>[0]
+
 export class BrowserContext implements BrowserContextInterface {
+  private pageTarget = new AsyncLocalStorage<PageOperation>()
+  private operationVersion = 0
+  private pageOperations = 0
+  private released = false
+  private snapshotContents: Electron.WebContents | null = null
+  /** Only a rejection by the operation's still-current page is element-level; see PageCommandRejectedError. */
+  private sendSnapshotCommand: SnapshotCommandSender = async <T>(method: string, params?: Record<string, unknown>): Promise<T> => {
+    const contents = this.getWebContents()
+    try {
+      return await this.sendCDPCommand<T>(method, params)
+    } catch (error) {
+      if (this.released || !contents || this.getWebContents() !== contents) throw error
+      throw new PageCommandRejectedError(method, error)
+    }
+  }
+  private operationCancellations = new Map<AbortController, PageOperation>()
   /**
    * Working directory for resolving relative paths (e.g. browser_run scripts).
    * Set by createAIBrowserMcpServer() at server creation time.
@@ -108,22 +268,158 @@ export class BrowserContext implements BrowserContextInterface {
   private isTracing: boolean = false
   private traceStartTime: number = 0
 
-  // View tracking for scoped cleanup
+  // The views this context opened. Both an access boundary (see
+  // `visibleViewStates`) and the cleanup list `destroy()` walks.
   private ownedViewIds: Set<string> = new Set()
 
   // Whether this is a scoped context (used for automation isolation).
-  // Scoped contexts create BrowserViews on the offscreen host window instead
-  // of the main window, preventing lifecycle conflicts with user-visible views.
   private _isScoped: boolean = false
+  // See `hasUi`. Also picks the page host: watchable pages use the permanent
+  // main host, unattended ones the hidden host.
+  private _hasUi: boolean = true
+
+  /**
+   * The conversation this context serves. Lets the renderer tell whose page an
+   * active-view event describes; a scoped context has one only when created
+   * with a live view.
+   */
+  readonly conversationId: string | null
+  /** Space of that conversation, so a client can list pages per space. */
+  readonly spaceId: string | null
+
+  constructor(options?: { conversationId?: string; spaceId?: string }) {
+    this.conversationId = options?.conversationId ?? null
+    this.spaceId = options?.spaceId ?? null
+    // Enrolled here rather than at each factory so a context can never be built
+    // that an external tab close cannot reach (see `notifyViewDestroyed`).
+    liveContexts.add(this)
+  }
 
   /** Whether this context is scoped (automation) vs the global singleton (interactive). */
   get isScoped(): boolean {
     return this._isScoped
   }
 
-  /** Mark this context as scoped. Called by createScopedBrowserContext(). */
-  markAsScoped(): void {
+  /**
+   * Whether anything in the renderer can show this context's pages: the user's
+   * singleton, every interactive context and a scoped context created with a
+   * live view. Any other scoped context runs unattended and stays silent.
+   */
+  get hasUi(): boolean {
+    return this._hasUi
+  }
+
+  /** Whether the renderer may hear of this page through this context (see `openPage` for the exception). */
+  isWatchable(viewId: string): boolean {
+    return this._hasUi && !backgroundOnlyViewIds.has(viewId)
+  }
+
+  /** How many tabs this context currently owns (diagnostics). */
+  get ownedViewCount(): number {
+    return this.ownedViewIds.size
+  }
+
+  /** Whether this context opened the view itself. */
+  ownsView(viewId: string): boolean {
+    return this.ownedViewIds.has(viewId)
+  }
+
+  /** Whether the user is watching one of this context's tabs on the main window right now. */
+  hasRevealedView(): boolean {
+    for (const viewId of this.ownedViewIds) {
+      if (browserViewManager.isRevealed(viewId)) return true
+    }
+    return false
+  }
+
+  /** The pages this context holds (owned plus active) that a UI could reveal. */
+  describeLivePages(): AIBrowserLivePage[] {
+    if (!this.hasUi) return []
+    const ids = new Set(this.ownedViewIds)
+    if (this.activeViewId) ids.add(this.activeViewId)
+    const pages: AIBrowserLivePage[] = []
+    for (const viewId of ids) {
+      const state = browserViewManager.getState(viewId)
+      if (!state || !this.isWatchable(viewId)) continue
+      pages.push({
+        conversationId: this.conversationId,
+        spaceId: this.spaceId,
+        viewId,
+        owned: this.ownedViewIds.has(viewId),
+        url: state.url || null,
+        title: state.title || null,
+        active: viewId === this.activeViewId,
+      })
+    }
+    return pages
+  }
+
+  /**
+   * The tabs this context may see and act on — NOT every tab in the app.
+   *
+   * Tabs live in one process-wide manager, so enumerating it directly handed
+   * every agent every other agent's pages AND the user's own. That is how a
+   * digital human listed a colleague's logged-in pages, and how one agent
+   * navigated a tab another was working on straight out from under it (the
+   * victim keeps pointing at the same view id, so its next screenshot silently
+   * returns someone else's page).
+   *
+   * Two rules, from who the tab belongs to:
+   *   - an automation sees only what it opened itself;
+   *   - the interactive context (the user's own browser) sees the user's tabs
+   *     and never an automation's — the human asked about the page in front of
+   *     them, not about what some digital human is doing offscreen.
+   */
+  visibleViewStates(): Array<BrowserViewState & { id: string }> {
+    const all = browserViewManager.getAllStates()
+    if (this._isScoped) return all.filter((s) => this.ownedViewIds.has(s.id))
+    return all.filter((s) => !automationOwnedViewIds.has(s.id))
+  }
+
+  /** Whether this context may act on a view at all (see `visibleViewStates`). */
+  canReachView(viewId: string): boolean {
+    if (this._isScoped) return this.ownedViewIds.has(viewId)
+    return !automationOwnedViewIds.has(viewId)
+  }
+
+  /** Mark this context as scoped, watchable or not. Called by createScopedBrowserContext(). */
+  markAsScoped(watchable: boolean): void {
     this._isScoped = true
+    this._hasUi = watchable
+  }
+
+  /**
+   * Open a new page and act on it from now on.
+   *
+   * A page someone could watch opens in the main window. When that window
+   * cannot attach it in time, or is restarting, the page opens in the hidden
+   * host instead: it works, but nothing can ever show it, so it is announced
+   * nowhere (`isWatchable`). While the main window has not recovered from such
+   * a timeout it is skipped outright, so the wait is paid once, not per page.
+   * Resolves `fellBack` when a page that could have been watched cannot be.
+   */
+  async openPage(url: string, deviceMode: DeviceMode): Promise<{ viewId: string; fellBack: boolean }> {
+    if (this.released) throw new Error('Browser context was released')
+    const viewId = `ai-browser-${randomUUID()}`
+    let fellBack = this._hasUi && browserHostManager.isMainHostStalled()
+    if (fellBack) console.log('[BrowserContext] Main host stalled; opening a watchable page in the hidden host', { viewId, conversationId: this.conversationId })
+    try {
+      await browserViewManager.create(viewId, url, { offscreen: !this._hasUi || fellBack, deviceMode })
+    } catch (error) {
+      if (fellBack || !this._hasUi || this.released || !(error instanceof MainHostAttachError)) throw error
+      fellBack = true
+      console.warn('[BrowserContext] Main host could not attach a watchable page; opening it in the hidden host', { viewId, conversationId: this.conversationId, reason: error.message })
+      await browserViewManager.create(viewId, url, { offscreen: true, deviceMode })
+    }
+    if (fellBack) backgroundOnlyViewIds.add(viewId)
+    // A context released while its page was being created would never close it.
+    if (this.released) {
+      browserViewManager.destroy(viewId)
+      throw new Error('Browser context was released')
+    }
+    this.trackView(viewId)
+    this.setActiveViewId(viewId)
+    return { viewId, fellBack }
   }
 
   /**
@@ -140,11 +436,12 @@ export class BrowserContext implements BrowserContextInterface {
   setActiveViewId(viewId: string): void {
     // If changing views, disable monitoring on old view
     if (this.activeViewId && this.activeViewId !== viewId) {
+      this.lastSnapshot = null
+      this.snapshotContents = null
       this.disableMonitoring()
     }
 
     this.activeViewId = viewId
-    console.log(`[BrowserContext] Active view set to: ${viewId}`)
 
     // Enable monitoring on new view
     this.enableMonitoring()
@@ -155,44 +452,66 @@ export class BrowserContext implements BrowserContextInterface {
 
   /**
    * Broadcast the active view change to the global event bus so the transport
-   * layer can reach the renderer and remote clients. Only the interactive
-   * singleton (non-scoped) has a UI; scoped automation contexts stay silent.
+   * layer can reach the renderer and remote clients. Contexts without a UI
+   * (automation runs) stay silent, and so does a page nothing can display.
    */
   private notifyActiveViewChange(viewId: string): void {
-    if (this._isScoped) return
+    if (!this.isWatchable(viewId)) return
     const state = browserViewManager.getState(viewId)
     emitBrowserActiveView({
+      conversationId: this.conversationId,
+      spaceId: this.spaceId,
       viewId,
+      owned: this.ownedViewIds.has(viewId),
       url: state?.url || null,
       title: state?.title || null,
     })
-    console.log(`[BrowserContext] Broadcast active view: ${viewId}`)
   }
 
   /**
-   * Reconcile context state when a view is destroyed elsewhere (user closes the
-   * canvas tab, tray "stop", or AI closes a tab). If the destroyed view was the
-   * AI's active one, clear it — the next tool call will create a fresh page
-   * instead of operating a dead WebContents — and announce it so the renderer
-   * drops the live-session entry and the AI-operating indicator.
+   * Reconcile this context when a view is destroyed elsewhere (user closes the
+   * canvas tab, tray "stop", or an agent closes a tab). Clearing the pointer is
+   * what lets the next tool call create a fresh page instead of operating a
+   * dead WebContents.
+   *
+   * Returns whether this context held it — opened it or was pointing at it —
+   * so the caller can announce the removal exactly once: a page the context had
+   * moved away from may still be open in a canvas tab, and every context
+   * holding it must be reconciled without telling the renderer several times.
+   *
+   * Route external closes through {@link notifyViewDestroyed}, never here:
+   * calling one context leaves every other one holding a dead pointer.
    */
-  handleViewDestroyed(viewId: string): void {
-    this.ownedViewIds.delete(viewId)
-    if (this.activeViewId !== viewId) return
+  handleViewDestroyed(viewId: string): boolean {
+    for (const [controller, target] of this.operationCancellations) {
+      if (target.viewId === viewId) controller.abort(new Error('Browser page was destroyed during operation'))
+    }
+    const owned = this.ownedViewIds.delete(viewId)
+    if (this.activeViewId !== viewId) return owned
 
     this.disableMonitoring()
     this.activeViewId = null
     this.lastSnapshot = null
-    if (!this._isScoped) {
-      emitBrowserViewGone({ viewId })
-      console.log(`[BrowserContext] Active view gone: ${viewId}`)
+    this.snapshotContents = null
+    if (this.pendingDownloadResolvers.length) {
+      console.warn('[BrowserContext] Page lost while waiting for downloads', { viewId, waiters: this.pendingDownloadResolvers.length })
+      for (const waiter of this.pendingDownloadResolvers) {
+        clearTimeout(waiter.timer)
+        waiter.reject(new Error('Browser page was destroyed'))
+      }
+      this.pendingDownloadResolvers = []
     }
+    return true
   }
 
   /**
-   * Get the WebContents of the active BrowserView
+   * Get the WebContents of the active browser page
    */
   getWebContents(): Electron.WebContents | null {
+    const target = this.pageTarget.getStore()
+    if (target?.signal.aborted) throw target.signal.reason instanceof Error ? target.signal.reason : new Error('Browser operation was cancelled')
+    if (target && Date.now() >= target.deadline) throw new Error('Browser operation timed out')
+    if (target) return target.version === this.operationVersion && !target.contents.isDestroyed() && browserViewManager.getWebContents(target.viewId) === target.contents ? target.contents : null
     if (!this.activeViewId) {
       console.warn('[BrowserContext] No active view ID')
       return null
@@ -204,9 +523,7 @@ export class BrowserContext implements BrowserContextInterface {
       return null
     }
 
-    // Access the BrowserView's webContents through the manager
-    // We need to extend browserViewManager to expose this
-    return (browserViewManager as any).getWebContents(this.activeViewId)
+    return browserViewManager.getWebContents(this.activeViewId)
   }
 
   /**
@@ -214,10 +531,12 @@ export class BrowserContext implements BrowserContextInterface {
    * Safe to call repeatedly - silently ignores "already attached" errors.
    */
   private ensureDebuggerAttached(webContents: Electron.WebContents): void {
+    if (webContents.debugger.isAttached()) return
     try {
       webContents.debugger.attach('1.3')
-    } catch (_e) {
-      // Already attached - this is expected
+    } catch (error) {
+      console.warn('[BrowserContext] Failed to attach page debugger', { contentsId: webContents.id }, error)
+      throw error
     }
   }
 
@@ -229,20 +548,81 @@ export class BrowserContext implements BrowserContextInterface {
   async sendCDPCommand<T = unknown>(
     method: string,
     params?: Record<string, unknown>,
-    timeout: number = CDP_TIMEOUT
+    timeout: number = CDP_TIMEOUT,
+    sessionId?: string
   ): Promise<T> {
+    if (this.released) throw new Error('Browser context was released')
     const webContents = this.getWebContents()
     if (!webContents) {
       throw new Error('No active browser view')
     }
 
+    const started = Date.now()
+    const assertOriginalPage = () => {
+      if (this.released || this.getWebContents() !== webContents) throw new Error('Browser operation no longer has its original page')
+    }
     this.ensureDebuggerAttached(webContents)
-
-    return withTimeout(
-      webContents.debugger.sendCommand(method, params) as Promise<T>,
-      timeout,
+    let abandoned = false
+    const send = () => withTimeout((async () => {
+      if (BROWSER_INPUT_METHODS.has(method)) {
+        await this.dispatchInput(webContents, assertOriginalPage, method, params ?? {}, sessionId)
+        assertOriginalPage()
+        return {} as T
+      }
+      const result = await webContents.debugger.sendCommand(method, params, sessionId) as T
+      if (abandoned) {
+        this.releaseLateResult(webContents, result, method, sessionId)
+        return result
+      }
+      try {
+        assertOriginalPage()
+      } catch (error) {
+        this.releaseLateResult(webContents, result, method, sessionId)
+        throw error
+      }
+      return result
+    })(),
+      Math.max(1, Math.min(timeout - (Date.now() - started), (this.pageTarget.getStore()?.deadline ?? Infinity) - Date.now())),
       `CDP ${method}`
-    )
+    ).catch(error => {
+      abandoned = true
+      throw error
+    })
+    return method === 'Page.captureScreenshot' && !this.pageTarget.getStore()
+      ? withBrowserFrames(webContents, send, Math.min(5000, timeout)) : send()
+  }
+
+  /** Input inside a page operation shares its ledger, so cleanup can lift anything left pressed. */
+  private async dispatchInput(
+    webContents: Electron.WebContents,
+    assertOriginalPage: () => void,
+    method: string,
+    params: Record<string, unknown>,
+    sessionId?: string
+  ): Promise<void> {
+    const sender: BrowserInputCommandSender = (command, commandParams, childSession) =>
+      this.sendCDPCommand(command, commandParams, CDP_TIMEOUT, childSession)
+    const target = this.pageTarget.getStore()
+    if (target) {
+      target.input ??= new BrowserInputOperation(webContents, sender, assertOriginalPage)
+      return target.input.dispatch(method, params, sessionId)
+    }
+    const input = new BrowserInputOperation(webContents, sender, assertOriginalPage)
+    try {
+      await input.dispatch(method, params, sessionId)
+    } finally {
+      void input.dispose()
+    }
+  }
+
+  /** A reply its caller no longer reads would otherwise pin the remote object until navigation. */
+  private releaseLateResult(webContents: Electron.WebContents, result: unknown, method: string, sessionId?: string): void {
+    const handle = result as { result?: { objectId?: string }; object?: { objectId?: string } } | undefined
+    const objectId = handle?.result?.objectId ?? handle?.object?.objectId
+    if (!objectId || webContents.isDestroyed()) return
+    void webContents.debugger.sendCommand('Runtime.releaseObject', { objectId }, sessionId).catch(cleanupError => {
+      if (!webContents.isDestroyed()) console.warn('[BrowserContext] Failed to release late command result', { contentsId: webContents.id, method }, cleanupError)
+    })
   }
 
   // ============================================
@@ -253,13 +633,31 @@ export class BrowserContext implements BrowserContextInterface {
    * Create a new accessibility snapshot
    */
   async createSnapshot(verbose: boolean = false): Promise<AccessibilitySnapshot> {
+    return this.withPageFrames(() => this.createReadySnapshot(verbose))
+  }
+
+  private async createReadySnapshot(verbose: boolean): Promise<AccessibilitySnapshot> {
     const webContents = this.getWebContents()
     if (!webContents) {
       throw new Error('No active browser view')
     }
 
-    this.lastSnapshot = await createAccessibilitySnapshot(webContents, verbose)
-    return this.lastSnapshot
+    let navigated = false
+    const onNavigation = (_event: Electron.Event, _url: string, _inPlace: boolean, isMainFrame: boolean) => { if (isMainFrame) navigated = true }
+    webContents.on('did-start-navigation', onNavigation)
+    try {
+      const snapshot = await createAccessibilitySnapshot(webContents, this.sendSnapshotCommand, verbose)
+      if (navigated || this.released || webContents.isDestroyed()) throw new Error('Browser page changed while taking its snapshot')
+      if (this.activeViewId && browserViewManager.getWebContents(this.activeViewId) === webContents) {
+        this.lastSnapshot = snapshot
+        this.snapshotContents = webContents
+      }
+      const target = this.pageTarget.getStore()
+      if (target?.contents === webContents) target.snapshot = snapshot
+      return snapshot
+    } finally {
+      webContents.off('did-start-navigation', onNavigation)
+    }
   }
 
   /**
@@ -273,10 +671,12 @@ export class BrowserContext implements BrowserContextInterface {
    * Get an element by its UID from the last snapshot
    */
   getElementByUid(uid: string): AccessibilityNode | null {
-    if (!this.lastSnapshot) {
+    const target = this.pageTarget.getStore()
+    const snapshot = target ? (target.version === this.operationVersion ? target.snapshot : null) : this.snapshotContents === this.getWebContents() ? this.lastSnapshot : null
+    if (!snapshot) {
       return null
     }
-    return this.lastSnapshot.idToNode.get(uid) || null
+    return snapshot.idToNode.get(uid) || null
   }
 
   // ============================================
@@ -642,6 +1042,7 @@ export class BrowserContext implements BrowserContextInterface {
   /**
    * Register a new download. Called by the session-level will-download handler.
    * Sanitizes the filename, resolves a unique path, and creates a tracking entry.
+   * The entry's `filename` is the name actually saved, which the model is told.
    */
   registerDownload(
     url: string,
@@ -651,9 +1052,8 @@ export class BrowserContext implements BrowserContextInterface {
   ): { id: string; resolvedPath: string } {
     this.downloadCounter++
     const id = `dl_${this.downloadCounter}`
-    const sanitized = sanitizeFilename(suggestedFilename)
     const downloadDir = this.getDownloadDir()
-    const resolvedPath = resolveUniquePath(downloadDir, sanitized)
+    const resolvedPath = resolveUniquePath(downloadDir, downloadFileName(suggestedFilename))
 
     const info: DownloadInfo = {
       id,
@@ -742,10 +1142,55 @@ export class BrowserContext implements BrowserContextInterface {
   // Element Operations
   // ============================================
 
+  private cancelPageOperations(): void {
+    this.operationVersion++
+    for (const controller of this.operationCancellations.keys()) controller.abort(new Error('Browser context was released during operation'))
+    this.operationCancellations.clear()
+    if (!this.pageOperations && this.released) this.pageTarget.disable()
+  }
+
+  private async withPageFrames<T>(operation: () => Promise<T>, timeoutMs = CDP_TIMEOUT): Promise<T> {
+    const contents = this.getWebContents()
+    if (!contents || this.released) throw new Error('No active browser view')
+    const inherited = this.pageTarget.getStore()
+    const viewId = inherited?.viewId ?? this.activeViewId
+    if (!viewId) throw new Error('No active browser view')
+    const controller = new AbortController()
+    const target: PageOperation = {
+      viewId,
+      contents,
+      snapshot: inherited ? inherited.snapshot : this.snapshotContents === contents ? this.lastSnapshot : null,
+      version: this.operationVersion,
+      deadline: inherited?.deadline ?? Date.now() + timeoutMs,
+      signal: controller.signal,
+    }
+    this.pageOperations++
+    this.operationCancellations.set(controller, target)
+    try {
+      return await withBrowserFrames(contents, () => this.pageTarget.run(target, async () => {
+        if (this.released || target.version !== this.operationVersion) throw new Error('Browser context was released during operation')
+        return operation()
+      }), Math.min(5000, timeoutMs), {
+        signal: controller.signal,
+        deadline: target.deadline,
+        beforeRelease: () => target.input?.release() ?? Promise.resolve(),
+      })
+    } finally {
+      controller.abort(new Error('Browser operation finished'))
+      void target.input?.dispose()
+      this.operationCancellations.delete(controller)
+      if (!--this.pageOperations && this.released) this.pageTarget.disable()
+    }
+  }
+
   /**
    * Click an element by UID
    */
   async clickElement(uid: string, options?: { dblClick?: boolean }): Promise<void> {
+    return this.withPageFrames(() => this.clickElementWithFrames(uid, options))
+  }
+
+  private async clickElementWithFrames(uid: string, options?: { dblClick?: boolean }): Promise<void> {
     const element = this.getElementByUid(uid)
     if (!element) {
       throw new Error(`Element not found: ${uid}`)
@@ -757,10 +1202,10 @@ export class BrowserContext implements BrowserContextInterface {
     }
 
     // Scroll element into view
-    await scrollIntoView(webContents, element.backendNodeId)
+    await scrollIntoView(this.sendSnapshotCommand, element.backendNodeId)
 
     // Get element bounding box
-    const box = await getElementBoundingBox(webContents, element.backendNodeId)
+    const box = await getElementBoundingBox(this.sendSnapshotCommand, element.backendNodeId)
     if (!box) {
       throw new Error(`Could not get bounding box for element: ${uid}`)
     }
@@ -803,6 +1248,10 @@ export class BrowserContext implements BrowserContextInterface {
    * Hover over an element by UID
    */
   async hoverElement(uid: string): Promise<void> {
+    return this.withPageFrames(() => this.hoverElementWithFrames(uid))
+  }
+
+  private async hoverElementWithFrames(uid: string): Promise<void> {
     const element = this.getElementByUid(uid)
     if (!element) {
       throw new Error(`Element not found: ${uid}`)
@@ -814,10 +1263,10 @@ export class BrowserContext implements BrowserContextInterface {
     }
 
     // Scroll element into view
-    await scrollIntoView(webContents, element.backendNodeId)
+    await scrollIntoView(this.sendSnapshotCommand, element.backendNodeId)
 
     // Get element bounding box
-    const box = await getElementBoundingBox(webContents, element.backendNodeId)
+    const box = await getElementBoundingBox(this.sendSnapshotCommand, element.backendNodeId)
     if (!box) {
       throw new Error(`Could not get bounding box for element: ${uid}`)
     }
@@ -834,9 +1283,13 @@ export class BrowserContext implements BrowserContextInterface {
   }
 
   /**
-   * Fill an input element with text
+   * Fill an input element with text, then read back what it holds
    */
-  async fillElement(uid: string, value: string): Promise<void> {
+  async fillElement(uid: string, value: string): Promise<FieldReadBack> {
+    return this.withPageFrames(() => this.fillElementWithFrames(uid, value))
+  }
+
+  private async fillElementWithFrames(uid: string, value: string): Promise<FieldReadBack> {
     const element = this.getElementByUid(uid)
     if (!element) {
       throw new Error(`Element not found: ${uid}`)
@@ -848,38 +1301,32 @@ export class BrowserContext implements BrowserContextInterface {
     }
 
     // Focus the element
-    await focusElement(webContents, element.backendNodeId)
+    await focusElement(this.sendSnapshotCommand, element.backendNodeId)
 
-    // Clear existing content
-    // Use platform-specific modifier: macOS uses Command (Meta=4), others use Ctrl (2)
-    const selectAllModifier = process.platform === 'darwin' ? 4 : 2
-    await this.sendCDPCommand('Input.dispatchKeyEvent', {
-      type: 'keyDown',
-      key: 'a',
-      code: 'KeyA',
-      modifiers: selectAllModifier
-    })
-    await this.sendCDPCommand('Input.dispatchKeyEvent', {
-      type: 'keyUp',
-      key: 'a',
-      code: 'KeyA',
-      modifiers: selectAllModifier
-    })
-
-    // Delete selection
-    await this.sendCDPCommand('Input.dispatchKeyEvent', {
-      type: 'keyDown',
-      key: 'Backspace',
-      code: 'Backspace'
-    })
-    await this.sendCDPCommand('Input.dispatchKeyEvent', {
-      type: 'keyUp',
-      key: 'Backspace',
-      code: 'Backspace'
-    })
-
-    // Insert new text
-    await this.sendCDPCommand('Input.insertText', { text: value })
+    const resolved = await this.sendCDPCommand<{ object?: { objectId?: string } }>('DOM.resolveNode', { backendNodeId: element.backendNodeId })
+    if (!resolved.object?.objectId) throw new Error(`Input element is unavailable: ${uid}`)
+    try {
+      const focused = await this.sendCDPCommand<{ result?: { value?: string } }>('Runtime.callFunctionOn', {
+        objectId: resolved.object.objectId,
+        functionDeclaration: SELECT_IF_FOCUSED,
+        returnByValue: true,
+      })
+      if (focused.result?.value !== 'ok') {
+        throw new Error(focused.result?.value === 'cross-origin-frame' ? CROSS_ORIGIN_FRAME_REFUSED : FOCUS_REFUSED)
+      }
+      await this.sendCDPCommand('Input.insertText', { text: value })
+      const filled = await this.sendCDPCommand<{ result?: { value?: FieldReadBack } }>('Runtime.callFunctionOn', {
+        objectId: resolved.object.objectId,
+        functionDeclaration: READ_FILLED_VALUE,
+        awaitPromise: true,
+        returnByValue: true,
+      })
+      return filled.result?.value ?? { kind: 'unreadable' }
+    } finally {
+      if (!webContents.isDestroyed()) void webContents.debugger.sendCommand('Runtime.releaseObject', { objectId: resolved.object.objectId }).catch(error => {
+        console.warn('[BrowserContext] Could not release an input node handle', { viewId: this.activeViewId }, error)
+      })
+    }
   }
 
   /**
@@ -890,6 +1337,10 @@ export class BrowserContext implements BrowserContextInterface {
    * We need to find the matching option and get its actual DOM value.
    */
   async selectOption(uid: string, value: string): Promise<void> {
+    return this.withPageFrames(() => this.selectOptionWithFrames(uid, value))
+  }
+
+  private async selectOptionWithFrames(uid: string, value: string): Promise<void> {
     const element = this.getElementByUid(uid)
     if (!element) {
       throw new Error(`Element not found: ${uid}`)
@@ -968,6 +1419,10 @@ export class BrowserContext implements BrowserContextInterface {
    * Drag an element to another element
    */
   async dragElement(fromUid: string, toUid: string): Promise<void> {
+    return this.withPageFrames(() => this.dragElementWithFrames(fromUid, toUid))
+  }
+
+  private async dragElementWithFrames(fromUid: string, toUid: string): Promise<void> {
     const fromElement = this.getElementByUid(fromUid)
     const toElement = this.getElementByUid(toUid)
 
@@ -984,8 +1439,8 @@ export class BrowserContext implements BrowserContextInterface {
     }
 
     // Get bounding boxes
-    const fromBox = await getElementBoundingBox(webContents, fromElement.backendNodeId)
-    const toBox = await getElementBoundingBox(webContents, toElement.backendNodeId)
+    const fromBox = await getElementBoundingBox(this.sendSnapshotCommand, fromElement.backendNodeId)
+    const toBox = await getElementBoundingBox(this.sendSnapshotCommand, toElement.backendNodeId)
 
     if (!fromBox || !toBox) {
       throw new Error('Could not get element positions')
@@ -1037,23 +1492,42 @@ export class BrowserContext implements BrowserContextInterface {
    * Press a keyboard key
    */
   async pressKey(key: string): Promise<void> {
+    return this.withPageFrames(() => this.pressKeyWithFrames(key))
+  }
+
+  private async pressKeyWithFrames(key: string): Promise<void> {
     const keyInfo = parseKey(key)
-
-    await this.sendCDPCommand('Input.dispatchKeyEvent', {
-      type: 'keyDown',
-      ...keyInfo
-    })
-
-    await this.sendCDPCommand('Input.dispatchKeyEvent', {
-      type: 'keyUp',
-      ...keyInfo
-    })
+    const contents = this.getWebContents()
+    if (!contents) throw new Error('No active browser view')
+    let navigating = false
+    let downCompleted = false
+    const onNavigation = (_event: Electron.Event, _url: string, isInPlace: boolean, isMainFrame: boolean) => {
+      if (isMainFrame && !isInPlace) navigating = true
+    }
+    contents.on('did-start-navigation', onNavigation)
+    try {
+      await this.sendCDPCommand('Input.dispatchKeyEvent', { type: 'keyDown', ...keyInfo })
+      downCompleted = true
+      await this.sendCDPCommand('Input.dispatchKeyEvent', { type: 'keyUp', ...keyInfo })
+    } catch (error) {
+      const target = this.pageTarget.getStore()
+      const delivered = downCompleted || target?.input?.isKeyPressed(keyInfo.code)
+      const originalPage = target && browserViewManager.getWebContents(target.viewId) === contents && !contents.isDestroyed()
+      // A submitted page can discard its key acknowledgement together with the old document.
+      if (!navigating || !delivered || !originalPage || this.released || target.signal.aborted || Date.now() >= target.deadline) throw error
+    } finally {
+      contents.off('did-start-navigation', onNavigation)
+    }
   }
 
   /**
    * Type text character by character
    */
   async typeText(text: string): Promise<void> {
+    return this.withPageFrames(() => this.typeTextWithFrames(text))
+  }
+
+  private async typeTextWithFrames(text: string): Promise<void> {
     await this.sendCDPCommand('Input.insertText', { text })
   }
 
@@ -1078,12 +1552,11 @@ export class BrowserContext implements BrowserContextInterface {
    * This keeps each screenshot at ~150-400KB instead of 1-3MB,
    * preventing Anthropic API 6MB request-body limit from being hit.
    */
-  async captureScreenshot(options?: {
-    format?: 'png' | 'jpeg' | 'webp'
-    quality?: number
-    fullPage?: boolean
-    uid?: string
-  }): Promise<{ data: string; mimeType: string }> {
+  async captureScreenshot(options?: BrowserScreenshotOptions): Promise<{ data: string; mimeType: string }> {
+    return this.withPageFrames(() => this.captureScreenshotWithFrames(options), CDP_TIMEOUT + CAPTURE_PAGE_TIMEOUT)
+  }
+
+  private async captureScreenshotWithFrames(options?: BrowserScreenshotOptions): Promise<{ data: string; mimeType: string }> {
     // Default to jpeg for much smaller payloads (was 'png')
     const format = options?.format || 'jpeg'
     // Quality only applies to jpeg and webp, not png
@@ -1103,8 +1576,8 @@ export class BrowserContext implements BrowserContextInterface {
         throw new Error('No active browser view')
       }
 
-      await scrollIntoView(webContents, element.backendNodeId)
-      const box = await getElementBoundingBox(webContents, element.backendNodeId)
+      await scrollIntoView(this.sendSnapshotCommand, element.backendNodeId)
+      const box = await getElementBoundingBox(this.sendSnapshotCommand, element.backendNodeId)
 
       if (box) {
         try {
@@ -1171,7 +1644,7 @@ export class BrowserContext implements BrowserContextInterface {
     cdpError: unknown,
     rect?: { x: number; y: number; width: number; height: number }
   ): Promise<{ data: string; mimeType: string }> {
-    if (!webContents) throw cdpError
+    if (!webContents || this.released || this.getWebContents() !== webContents) throw cdpError
 
     try {
       const clip = rect
@@ -1183,11 +1656,12 @@ export class BrowserContext implements BrowserContextInterface {
           }
         : undefined
 
-      const image = await withTimeout(
-        clip ? webContents.capturePage(clip) : webContents.capturePage(),
-        CAPTURE_PAGE_TIMEOUT,
-        'webContents.capturePage'
-      )
+      const target = this.pageTarget.getStore()
+      const remaining = (target?.deadline ?? Infinity) - Date.now()
+      const image = await captureBrowserPage(webContents, clip, Math.min(CAPTURE_PAGE_TIMEOUT, Math.max(1, remaining)), {
+        signal: target?.signal,
+        deadline: target?.deadline,
+      })
 
       if (image.isEmpty()) {
         throw new Error('capturePage returned an empty image')
@@ -1277,6 +1751,10 @@ export class BrowserContext implements BrowserContextInterface {
    * Evaluate JavaScript in the browser context
    */
   async evaluateScript<T = unknown>(script: string, args?: unknown[], timeout?: number): Promise<T> {
+    return this.withPageFrames(() => this.evaluateScriptInPage<T>(script, args, timeout), timeout ?? CDP_TIMEOUT)
+  }
+
+  private async evaluateScriptInPage<T = unknown>(script: string, args?: unknown[], timeout?: number): Promise<T> {
     // Always wrap script in a function call so arrow functions are invoked
     let expression: string
     if (args && args.length > 0) {
@@ -1344,7 +1822,12 @@ export class BrowserContext implements BrowserContextInterface {
    * Uses polling with an overall timeout guard.
    */
   async waitForText(text: string, timeout: number = WAIT_TIMEOUT): Promise<void> {
-    const deadline = Date.now() + timeout
+    return this.withPageFrames(() => this.waitForTextWithFrames(text, timeout), timeout)
+  }
+
+  private async waitForTextWithFrames(text: string, timeout: number = WAIT_TIMEOUT): Promise<void> {
+    const target = this.pageTarget.getStore()
+    const deadline = Math.min(Date.now() + timeout, target?.deadline ?? Infinity)
     const pollInterval = 500
 
     while (Date.now() < deadline) {
@@ -1357,13 +1840,14 @@ export class BrowserContext implements BrowserContextInterface {
         if (snapshot.format().includes(text)) {
           return
         }
-      } catch (_e) {
+      } catch (error) {
+        if (this.released || target?.signal.aborted || (target && this.getWebContents() !== target.contents)) throw error
         // Snapshot may fail if page is navigating; ignore and retry
       }
 
       const remaining = deadline - Date.now()
       if (remaining <= 0) break
-      await new Promise(resolve => setTimeout(resolve, Math.min(pollInterval, remaining)))
+      await waitForPolling(Math.min(pollInterval, remaining), target?.signal)
     }
 
     throw new Error(`Timeout waiting for text: "${text}"`)
@@ -1374,14 +1858,19 @@ export class BrowserContext implements BrowserContextInterface {
    * Uses polling with an overall timeout guard.
    */
   async waitForElement(selector: string, timeout: number = WAIT_TIMEOUT): Promise<void> {
-    const deadline = Date.now() + timeout
+    return this.withPageFrames(() => this.waitForElementWithFrames(selector, timeout), timeout)
+  }
+
+  private async waitForElementWithFrames(selector: string, timeout: number = WAIT_TIMEOUT): Promise<void> {
+    const target = this.pageTarget.getStore()
+    const deadline = Math.min(Date.now() + timeout, target?.deadline ?? Infinity)
     const pollInterval = 500
 
     while (Date.now() < deadline) {
       try {
         const result = await withTimeout(
-          this.evaluateScript<boolean>(
-            `!!document.querySelector("${selector.replace(/"/g, '\\"')}")`
+          this.evaluateScriptInPage<boolean>(
+            `() => !!document.querySelector(${JSON.stringify(selector)})`
           ),
           Math.min(CDP_TIMEOUT, deadline - Date.now()),
           'waitForElement evaluate'
@@ -1389,13 +1878,14 @@ export class BrowserContext implements BrowserContextInterface {
         if (result) {
           return
         }
-      } catch (_e) {
+      } catch (error) {
+        if (this.released || target?.signal.aborted || (target && this.getWebContents() !== target.contents)) throw error
         // Ignore and retry
       }
 
       const remaining = deadline - Date.now()
       if (remaining <= 0) break
-      await new Promise(resolve => setTimeout(resolve, Math.min(pollInterval, remaining)))
+      await waitForPolling(Math.min(pollInterval, remaining), target?.signal)
     }
 
     throw new Error(`Timeout waiting for element: "${selector}"`)
@@ -1596,11 +2086,11 @@ export class BrowserContext implements BrowserContextInterface {
 
   /**
    * Register a view as owned by this context (for scoped cleanup).
-   * Only applies to scoped (automation) contexts — the global singleton
-   * used for interactive browsing is intentionally excluded so that
-   * normal user browsing is unaffected.
+   * Only applies to scoped (automation) contexts and to pages the hidden host
+   * had to take (see `openPage`) — the interactive browser is otherwise
+   * excluded so that normal user browsing is unaffected.
    *
-   * Automation views are muted, have autoplay blocked, and report
+   * Such views are muted, have autoplay blocked, and report
    * visibilityState='visible' regardless of the parent window's actual
    * visibility. This prevents sites like Xiaohongshu from detecting the
    * Electron window is in the background and auto-closing UI overlays
@@ -1614,6 +2104,9 @@ export class BrowserContext implements BrowserContextInterface {
    */
   trackView(viewId: string): void {
     this.ownedViewIds.add(viewId)
+    // Claim it app-wide too, so the user's own browser can tell this tab is an
+    // automation's and leave it alone.
+    if (this._isScoped) automationOwnedViewIds.add(viewId)
 
     const wc = browserViewManager.getWebContents(viewId)
     if (!wc) return
@@ -1623,10 +2116,10 @@ export class BrowserContext implements BrowserContextInterface {
     // to the correct BrowserContext for silent saving.
     registerWebContentsForDownload(wc.id, this)
 
-    // Guard: media suppression is only for automation (scoped) contexts.
-    // The global singleton serves the user's interactive browser and must
-    // not interfere with normal autoplay behaviour.
-    if (!this._isScoped) return
+    // Media suppression is for automation (scoped) contexts, and for a page the
+    // hidden host had to take, which nothing can show or stop. The interactive
+    // browser otherwise keeps normal autoplay.
+    if (!this._isScoped && !backgroundOnlyViewIds.has(viewId)) return
 
     // Layer 2: mute audio output
     wc.setAudioMuted(true)
@@ -1678,12 +2171,82 @@ export class BrowserContext implements BrowserContextInterface {
   }
 
   /**
-   * Cleanup when context is destroyed.
-   * Also destroys any BrowserViews created during this context's lifetime.
+   * Let go of this context WITHOUT closing the tabs it opened.
+   *
+   * For an automation, closing its tabs on the way out is correct — nobody else
+   * was ever going to use them. For a conversation driving the user's own
+   * browser it is the opposite: those tabs are the user's, still on screen, and
+   * ending the conversation must not sweep them away. So the two endings are
+   * separate calls rather than one with a flag, because getting it wrong is
+   * silent and destroys the user's work.
    */
-  destroy(): void {
+  release(): void {
+    this.released = true
+    this.cancelPageOperations()
     this.disableMonitoring()
 
+    // Hand the tabs back before forgetting them. Download routing is keyed by
+    // WebContents, so a tab left registered to a released context keeps sending
+    // the USER's own downloads to the AI's download folder — silently, on a tab
+    // that outlives the conversation and looks like any other.
+    for (const viewId of this.ownedViewIds) {
+      const wc = browserViewManager.getWebContents(viewId)
+      if (wc && !wc.isDestroyed()) {
+        unregisterWebContentsForDownload(wc.id)
+      }
+    }
+    // A page only the hidden host could open is not one the user can keep:
+    // nothing can show it, so it would outlive the conversation unseen.
+    const unseen = [...this.ownedViewIds].filter(viewId => backgroundOnlyViewIds.has(viewId))
+
+    for (const waiter of this.pendingDownloadResolvers) {
+      clearTimeout(waiter.timer)
+      waiter.reject(new Error('Context released'))
+    }
+    this.pendingDownloadResolvers = []
+    this.downloads.clear()
+    this.ownedViewIds.clear()
+    this.activeViewId = null
+    this.lastSnapshot = null
+    this.snapshotContents = null
+    this.workDir = undefined
+    liveContexts.delete(this)
+    for (const viewId of unseen) browserViewManager.destroy(viewId)
+    this.announceReleased()
+  }
+
+  /**
+   * Tell the renderer this conversation holds no page any more. Its surviving
+   * pages would otherwise still be listed (and stoppable) as its own after they
+   * became the user's, and its stale pointer would keep hiding another
+   * conversation's page as "in use".
+   */
+  private announceReleased(): void {
+    if (!this.hasUi || !this.conversationId) return
+    emitBrowserConversationReleased({ conversationId: this.conversationId })
+  }
+
+  /**
+   * Close every page this context opened and forget where it was, and stay
+   * usable: the next page opens fresh.
+   *
+   * This is the end of a turn, not of the context. The tools an engine session
+   * holds were built around this very object and serve every later turn of
+   * that session, so the pages can go while the context cannot — a context
+   * ended for good (`destroy`) under a live session leaves that session's
+   * browser refusing every call until the session itself is gone.
+   */
+  closePages(): void {
+    this.cancelPageOperations()
+    this.disableMonitoring()
+    this.forgetOwnedPages('Browser pages closed')
+  }
+
+  /**
+   * Unregister, close and drop the pages this context opened. Download waiters
+   * are rejected with `reason`.
+   */
+  private forgetOwnedPages(reason: string): void {
     // Unregister webContents from download routing before destroying views
     for (const viewId of this.ownedViewIds) {
       const wc = browserViewManager.getWebContents(viewId)
@@ -1695,13 +2258,14 @@ export class BrowserContext implements BrowserContextInterface {
     // Reject any pending download waiters
     for (const waiter of this.pendingDownloadResolvers) {
       clearTimeout(waiter.timer)
-      waiter.reject(new Error('Context destroyed'))
+      waiter.reject(new Error(reason))
     }
     this.pendingDownloadResolvers = []
     this.downloads.clear()
 
     // Destroy owned views (scoped contexts only -- singleton has no owned views)
     for (const viewId of this.ownedViewIds) {
+      automationOwnedViewIds.delete(viewId)
       try {
         browserViewManager.destroy(viewId)
       } catch (_e) {
@@ -1712,7 +2276,22 @@ export class BrowserContext implements BrowserContextInterface {
 
     this.activeViewId = null
     this.lastSnapshot = null
+    this.snapshotContents = null
+  }
+
+  /**
+   * End this context for good: close the pages it opened and refuse every
+   * later call. Only for a context no engine session can still reach through
+   * its tools; see `closePages` for the end of a turn.
+   */
+  destroy(): void {
+    this.released = true
+    this.cancelPageOperations()
+    this.disableMonitoring()
+    this.forgetOwnedPages('Context destroyed')
     this.workDir = undefined
+    liveContexts.delete(this)
+    this.announceReleased()
   }
 }
 
@@ -1779,20 +2358,66 @@ function parseKey(key: string): {
   }
 }
 
+export interface ScopedBrowserContextOptions {
+  /**
+   * The chat or desktop run whose live view shows these pages, and its space.
+   * Only with it do the pages open in the main window and reach the renderer;
+   * without it they stay in the hidden host and nothing about them is announced.
+   */
+  liveView?: { conversationId: string; spaceId: string }
+}
+
 /**
- * Create a scoped BrowserContext for automation runs.
+ * Create a scoped BrowserContext for an automation run or a digital-human chat.
  *
  * A scoped context has its own activeViewId tracking (isolated from the global
  * singleton and other scoped contexts) but shares the same browserViewManager
  * and therefore the same Electron session (persist:browser) and cookies.
  *
  * Lifecycle: create before the run, call `destroy()` after the run.
- * `destroy()` also cleans up any BrowserViews created during the scope.
+ * `destroy()` also cleans up pages created during the scope.
+ *
+ * Give it a `liveView` only when someone can open the pages while they run:
+ * whether anyone can watch is what decides the host, never whether the caller
+ * happens to have a conversation id.
  */
-export function createScopedBrowserContext(): BrowserContext {
-  const scoped = new BrowserContext()
-  scoped.markAsScoped()
+export function createScopedBrowserContext(options: ScopedBrowserContextOptions = {}): BrowserContext {
+  const scoped = new BrowserContext(options.liveView)
+  scoped.markAsScoped(options.liveView !== undefined)
   return scoped
+}
+
+/**
+ * One interactive context per conversation, all sharing the user's tabs.
+ *
+ * "Which tab am I on" is per conversation; the tabs themselves are the user's
+ * and shared. Every conversation used to share ONE pointer, so a navigation in
+ * one silently retargeted the next tool call of another — no select needed, no
+ * error, just the wrong page. Splitting only the pointer fixes that without
+ * walling conversations off from the browser the user actually has open.
+ *
+ * NOT scoped: these must keep seeing the user's tabs (answering "what is on the
+ * page I have open" is the point). Only automations get their own tab set.
+ */
+const interactiveContexts = new Map<string, BrowserContext>()
+
+export function getInteractiveBrowserContext(conversationId: string, spaceId?: string): BrowserContext {
+  const existing = interactiveContexts.get(conversationId)
+  if (existing) return existing
+  const created = new BrowserContext({ conversationId, spaceId })
+  interactiveContexts.set(conversationId, created)
+  return created
+}
+
+/**
+ * Drop a conversation's context when its agent session goes away. Releases
+ * rather than destroys: the tabs belong to the user and stay open.
+ */
+export function releaseInteractiveBrowserContext(conversationId: string): void {
+  const ctx = interactiveContexts.get(conversationId)
+  if (!ctx) return
+  interactiveContexts.delete(conversationId)
+  ctx.release()
 }
 
 // Singleton instance (used for interactive user-facing browser)

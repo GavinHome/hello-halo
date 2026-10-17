@@ -4,6 +4,20 @@
  * so the worker can import them without touching Electron or main-process code.
  */
 
+/**
+ * Both transports answer "that session is not in the registry" with this code,
+ * so a caller can tell "already gone" — often the outcome it wanted — from a
+ * real failure without matching on message text.
+ */
+export const TERMINAL_NOT_FOUND = 'TERMINAL_NOT_FOUND'
+
+/** The one response both transports return for a session not in the registry. */
+export const NO_SUCH_TERMINAL_SESSION = {
+  success: false as const,
+  error: 'No such terminal session',
+  code: TERMINAL_NOT_FOUND,
+}
+
 /** How a terminal session was created */
 export type TerminalOwner = 'ai' | 'user'
 
@@ -137,8 +151,13 @@ export interface TerminalDataEvent {
 /** Lifecycle event pushed to renderer / WS */
 export interface TerminalLifecycleEvent {
   sessionId: string
-  /** 'touched' fires once when a user-owned session first becomes aiTouched. */
-  type: 'created' | 'exited' | 'title' | 'ai-activity' | 'touched'
+  /**
+   * 'touched' fires once when a user-owned session first becomes aiTouched.
+   * 'removed' fires when the main process drops the session from its registry
+   * (pty-host eviction, or a kill of an already-exited session) — it is the
+   * only way a mirror learns a session is gone, and always follows 'exited'.
+   */
+  type: 'created' | 'exited' | 'title' | 'ai-activity' | 'touched' | 'removed'
   info?: TerminalInfo
   /** For 'ai-activity': whether the AI is currently writing */
   aiWriting?: boolean

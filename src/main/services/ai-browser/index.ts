@@ -7,7 +7,9 @@
  *
  * Entry Points (see DESIGN.md for full architecture):
  *   createAIBrowserMcpServer()   — Creates the MCP tool server (primary entry)
- *   createScopedBrowserContext()  — Creates an isolated context for automation
+ *   createScopedBrowserContext()  — Creates an isolated context (automation, digital-human chat)
+ *   getInteractiveBrowserContext() — Per-conversation view of the USER's browser
+ *   releaseInteractiveBrowserContext() — Drop one when its session ends
  *   cleanupAIBrowser()           — Destroys the global singleton on shutdown
  *   AI_BROWSER_SYSTEM_PROMPT     — System prompt fragment for AI instructions
  */
@@ -18,13 +20,21 @@ import { createAIBrowserMcpServer } from './sdk-mcp-server'
 // Re-export public API
 export { createAIBrowserMcpServer }
 export { createScopedBrowserContext }
+export { getInteractiveBrowserContext, releaseInteractiveBrowserContext } from './context'
+// Every page a conversation holds, for a client that missed the live events.
+export { listLivePages } from './context'
+// A tray stop, refused unless the page is the named conversation's alone.
+export { stopLivePage } from './context'
+export type { BrowserContext } from './context'
 
 // View-lifecycle event bus (consumed by ipc/ai-browser.ts transport layer)
 export {
   onBrowserActiveView,
   onBrowserViewGone,
+  onBrowserConversationReleased,
   type BrowserActiveViewEvent,
   type BrowserViewGoneEvent,
+  type BrowserConversationReleasedEvent,
 } from './events'
 
 // ============================================

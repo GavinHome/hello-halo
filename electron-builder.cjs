@@ -19,6 +19,8 @@
 
 const fs = require('node:fs')
 const path = require('node:path')
+const { runtimeAsarUnpackGlob } = require('./runtimes/dsh/manifest.cjs')
+const { createStagedArtifactsHook } = require('./scripts/release/staged-artifacts.cjs')
 
 const ROOT = __dirname
 const PRODUCT_FILE = path.join(ROOT, 'product.json')
@@ -97,9 +99,45 @@ function resolvePublish() {
   )
 }
 
+/**
+ * Files that must ship for the packaged app to behave like dev.
+ *
+ * Dev loads every non-builtin auth provider listed in product.json via dynamic
+ * import from its `path`. In a packaged build the same import resolves inside
+ * app.asar, so each declared provider file must be added to the packaging file
+ * list — deriving it here from the same product.json keeps "what dev loads" and
+ * "what the package contains" a single source of truth. A variant that forgets
+ * this wiring would otherwise build fine and fail only at login time with
+ * "Unknown provider type".
+ */
+function resolveProviderFiles() {
+  const providers = product.content.authProviders ?? []
+  return providers
+    .filter((p) => p.enabled !== false && typeof p.path === 'string' && p.path.trim())
+    .map((p) => p.path.trim().replace(/^\.\//, ''))
+}
+
+/**
+ * asarUnpack, static entries plus the dsh runtime bundle.
+ *
+ * The bundle is unpacked for the same reason as the native binaries listed in
+ * package.json#build: the dsh engine is a plain Node child process, and a plain
+ * Node process cannot read inside an asar archive. It is added here rather than
+ * there because it is a build product — a vanilla checkout has no
+ * resources/dsh-runtime until runtimes/dsh/build.mjs has run.
+ */
+function resolveAsarUnpack(base) {
+  return [...new Set([...(base.asarUnpack || []), runtimeAsarUnpackGlob()])]
+}
+
+const base = loadBaseConfig()
+
 module.exports = {
-  ...loadBaseConfig(),
+  ...base,
+  asarUnpack: resolveAsarUnpack(base),
   productName: field('name'),
   appId: field('appId'),
-  publish: resolvePublish()
+  publish: resolvePublish(),
+  files: [...(base.files ?? []), ...resolveProviderFiles()],
+  afterAllArtifactBuild: createStagedArtifactsHook(product.content)
 }

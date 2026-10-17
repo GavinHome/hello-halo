@@ -9,11 +9,15 @@
  * - Window maximize for fullscreen viewing
  */
 
-import { useState, useRef, useCallback, useEffect } from 'react'
+import { useState, useRef, useCallback, useEffect, useSyncExternalStore } from 'react'
 import { ZoomIn, ZoomOut, Maximize, ExternalLink, Download, RotateCw } from 'lucide-react'
 import { api } from '../../../api'
 import type { CanvasTab } from '../../../stores/canvas.store'
+import { useViewerResources } from '../viewer-resources'
 import { useTranslation } from '../../../i18n'
+import { subscribeArtifactVersions, getArtifactVersion } from '../../../services/artifact-version'
+import { toHaloFileUrl } from '../../../../shared/halo-file-url'
+import { downloadArtifact } from '../../../services/artifact-download'
 
 interface ImageViewerProps {
   tab: CanvasTab
@@ -22,6 +26,7 @@ interface ImageViewerProps {
 export function ImageViewer({ tab }: ImageViewerProps) {
   const { t } = useTranslation()
   const containerRef = useRef<HTMLDivElement>(null)
+  const resources = useViewerResources()
   const [scale, setScale] = useState(1)
   const [position, setPosition] = useState({ x: 0, y: 0 })
   const [isDragging, setIsDragging] = useState(false)
@@ -42,18 +47,21 @@ export function ImageViewer({ tab }: ImageViewerProps) {
     return Math.max(0.05, Math.min((c.clientWidth - 48) / w, (c.clientHeight - 48) / h, 1))
   }, [])
 
-  // Cache-buster: bumps to defeat Chromium's <img> URL cache when the same path is
-  // rewritten in place (in-place overwrite keeps tab.path stable, so the URL would
-  // otherwise be identical and serve a stale image).
-  const [reloadToken, setReloadToken] = useState(() => Date.now())
-  const isFirstRender = useRef(true)
+  // Cache key: an in-place overwrite keeps tab.path stable, so without this the
+  // URL would be identical and serve a stale image. It counts rewrites rather
+  // than mounts — a per-mount value makes every open a cache miss and leaves a
+  // new entry behind, which is a memory leak proportional to how often the user
+  // opens images.
+  const reloadToken = useSyncExternalStore(subscribeArtifactVersions, () =>
+    tab.path ? getArtifactVersion(tab.path) : 0
+  )
 
   // Get image URL
   // Priority: halo-file:// (custom protocol, fast) > remote download > base64 fallback
   const fileUrl = tab.path
     ? (api.isRemoteMode()
         ? api.getArtifactDownloadUrl(tab.path)
-        : `halo-file://${tab.path}`)
+        : toHaloFileUrl(tab.path))
     : ''
   const imageUrl = fileUrl
     ? `${fileUrl}${fileUrl.includes('?') ? '&' : '?'}v=${reloadToken}`
@@ -61,31 +69,14 @@ export function ImageViewer({ tab }: ImageViewerProps) {
       ? `data:${tab.mimeType || 'image/png'};base64,${tab.content}`
       : ''
 
-  // Reset view when the viewer switches to another file; also force a fresh fetch so
-  // switching back to a file changed while it was hidden never shows a cached image.
+  // A rewrite swaps the image under a viewer that stays mounted. Clearing the
+  // error matters on its own: a rewrite that repairs a broken file would
+  // otherwise never be retried. Zoom and pan are deliberately left alone —
+  // it is still the same file, and the user aimed them at it.
   useEffect(() => {
-    setScale(1)
-    setPosition({ x: 0, y: 0 })
     setImageLoaded(false)
     setImageError(false)
-    setIsFitted(true)
-    if (isFirstRender.current) {
-      isFirstRender.current = false
-    } else {
-      setReloadToken(t => t + 1)
-    }
-  }, [tab.id])
-
-  // Live-refresh when the file currently shown is rewritten on disk.
-  useEffect(() => {
-    if (!tab.path) return
-    return api.onArtifactChanged((data) => {
-      if (data.path === tab.path && (data.type === 'change' || data.type === 'add')) {
-        setImageError(false)
-        setReloadToken(t => t + 1)
-      }
-    })
-  }, [tab.path])
+  }, [reloadToken])
 
   // Zoom functions — manual zoom exits fitted mode so resizes stop refitting.
   const zoomIn = () => { setIsFitted(false); setScale(s => Math.min(s * 1.25, 5)) }
@@ -115,14 +106,15 @@ export function ImageViewer({ tab }: ImageViewerProps) {
   useEffect(() => {
     const c = containerRef.current
     if (!c) return
-    const ro = new ResizeObserver(() => {
+    const scope = resources.scope()
+    const ro = scope.add(new ResizeObserver(() => {
       if (!isFitted || !naturalSize.width) return
       setScale(fitScaleFor(naturalSize.width, naturalSize.height))
       setPosition({ x: 0, y: 0 })
-    })
+    }))
     ro.observe(c)
-    return () => ro.disconnect()
-  }, [isFitted, naturalSize, fitScaleFor])
+    return () => scope.dispose()
+  }, [resources, isFitted, naturalSize, fitScaleFor])
 
   // Handle drag
   const handleMouseDown = (e: React.MouseEvent) => {
@@ -144,7 +136,7 @@ export function ImageViewer({ tab }: ImageViewerProps) {
   // Download image
   const handleDownload = () => {
     if (tab.path) {
-      api.downloadArtifact(tab.path)
+      void downloadArtifact(tab.path)
     }
   }
 
@@ -199,28 +191,28 @@ export function ImageViewer({ tab }: ImageViewerProps) {
             className="p-1.5 rounded hover:bg-secondary transition-colors"
             title={t('Zoom out')}
           >
-            <ZoomOut className="w-4 h-4 text-muted-foreground" />
+            <ZoomOut className="w-3.5 h-3.5 text-muted-foreground" strokeWidth={1.5} />
           </button>
           <button
             onClick={zoomIn}
             className="p-1.5 rounded hover:bg-secondary transition-colors"
             title={t('Zoom in')}
           >
-            <ZoomIn className="w-4 h-4 text-muted-foreground" />
+            <ZoomIn className="w-3.5 h-3.5 text-muted-foreground" strokeWidth={1.5} />
           </button>
           <button
             onClick={fitToWindow}
             className="p-1.5 rounded hover:bg-secondary transition-colors"
             title={t('Fit to window')}
           >
-            <Maximize className="w-4 h-4 text-muted-foreground" />
+            <Maximize className="w-3.5 h-3.5 text-muted-foreground" strokeWidth={1.5} />
           </button>
           <button
             onClick={resetZoom}
             className="p-1.5 rounded hover:bg-secondary transition-colors"
             title={t('Reset')}
           >
-            <RotateCw className="w-4 h-4 text-muted-foreground" />
+            <RotateCw className="w-3.5 h-3.5 text-muted-foreground" strokeWidth={1.5} />
           </button>
 
           <div className="w-px h-4 bg-border mx-1" />
@@ -232,7 +224,7 @@ export function ImageViewer({ tab }: ImageViewerProps) {
               className="p-1.5 rounded hover:bg-secondary transition-colors"
               title={t('Download')}
             >
-              <Download className="w-4 h-4 text-muted-foreground" />
+              <Download className="w-3.5 h-3.5 text-muted-foreground" strokeWidth={1.5} />
             </button>
           )}
 
@@ -243,7 +235,7 @@ export function ImageViewer({ tab }: ImageViewerProps) {
               className="p-1.5 rounded hover:bg-secondary transition-colors"
               title={t('Open in external application')}
             >
-              <ExternalLink className="w-4 h-4 text-muted-foreground" />
+              <ExternalLink className="w-3.5 h-3.5 text-muted-foreground" strokeWidth={1.5} />
             </button>
           )}
         </div>

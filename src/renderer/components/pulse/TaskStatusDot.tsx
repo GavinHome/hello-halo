@@ -1,5 +1,5 @@
 /**
- * TaskStatusDot - Reusable animated status indicator dot
+ * TaskStatusDot - Reusable status indicator dot
  * Used in ConversationList, ChatHistoryPanel, and SidebarToggle
  */
 
@@ -11,6 +11,8 @@ interface TaskStatusDotProps {
   className?: string
 }
 
+// Colour alone tells the states apart; no animation, so a long list of busy
+// conversations costs nothing to render.
 const STATUS_CLASS: Record<Exclude<TaskStatus, 'idle'>, string> = {
   'generating': 'pulse-dot-generating',
   'waiting': 'pulse-dot-waiting',

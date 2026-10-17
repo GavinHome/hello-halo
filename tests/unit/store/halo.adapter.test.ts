@@ -14,7 +14,7 @@ vi.mock('../../../src/main/services/proxy-fetch', () => ({
   proxyFetch: (url: string, init?: RequestInit) => fetch(url, init),
 }))
 
-import { HaloAdapter } from '../../../src/main/store/adapters/halo.adapter'
+import { HaloAdapter, fetchWithTimeout } from '../../../src/main/store/adapters/halo.adapter'
 import type { RegistrySource } from '../../../src/shared/store/store-types'
 
 const MOCK_SOURCE: RegistrySource = {
@@ -26,6 +26,37 @@ const MOCK_SOURCE: RegistrySource = {
 }
 
 const realFetch = globalThis.fetch
+
+describe('fetch response compatibility', () => {
+  it('keeps native getters and clone bound to the response while consuming its body', async () => {
+    const savedFetch = globalThis.fetch
+    globalThis.fetch = vi.fn().mockResolvedValue(new Response('{"ready":true}', { status: 201 }))
+    try {
+      const response = await fetchWithTimeout('http://example.test/native-response')
+      expect(response.status).toBe(201)
+      expect(response.ok).toBe(true)
+      expect(response.bodyUsed).toBe(false)
+      expect(await response.clone().text()).toBe('{"ready":true}')
+      expect(await response.json()).toEqual({ ready: true })
+      expect(response.bodyUsed).toBe(true)
+    } finally {
+      globalThis.fetch = savedFetch
+    }
+  })
+
+  it('returns a 400 as the answer without retrying it', async () => {
+    const savedFetch = globalThis.fetch
+    const fetchMock = vi.fn().mockResolvedValue(new Response(null, { status: 400 }))
+    globalThis.fetch = fetchMock
+    try {
+      const response = await fetchWithTimeout('http://example.test/unknown-category')
+      expect(response.status).toBe(400)
+      expect(fetchMock).toHaveBeenCalledTimes(1)
+    } finally {
+      globalThis.fetch = savedFetch
+    }
+  })
+})
 
 function envelope(apps: Array<Record<string, unknown>>): Record<string, unknown> {
   return {
@@ -107,6 +138,7 @@ describe('HaloAdapter', () => {
     const adapter = new HaloAdapter()
     const { index } = await adapter.fetchIndex(MOCK_SOURCE)
 
+    if (!index) throw new Error('Expected a populated index')
     expect(index.apps).toHaveLength(1)
     expect(index.apps[0].slug).toBe('alice/hello')
     expect(index.apps[0].format).toBe('bundle')
@@ -164,6 +196,7 @@ describe('HaloAdapter', () => {
     const adapter = new HaloAdapter()
     const { index } = await adapter.fetchIndex(MOCK_SOURCE)
 
+    if (!index) throw new Error('Expected a populated index')
     expect(index.apps).toHaveLength(1)
     expect(index.apps[0].format).toBe('bundle')
   })

@@ -16,6 +16,11 @@ POST   /api/spaces                                                 [ai]       wo
 PUT    /api/spaces/reorder                                         [ai]       workspace               Set the display order of spaces
 GET    /api/spaces/$HALO_SPACE_ID                                  [ai]       workspace               Read one space
 PUT    /api/spaces/$HALO_SPACE_ID                                  [ai]       workspace               Rename a space or change its icon
+PUT    /api/spaces/$HALO_SPACE_ID/working-dir                      [ai]       workspace               Point a space at another working directory
+GET    /api/spaces/$HALO_SPACE_ID/preferences                      [ai]       workspace               Read a space's preferences (layout, memory settings)
+PUT    /api/spaces/$HALO_SPACE_ID/preferences                      [ai]       workspace               Change a space's preferences, e.g. turn its shared memory on or off
+GET    /api/spaces/$HALO_SPACE_ID/memory                           [ai]       workspace               Read the state of a space's memory
+POST   /api/spaces/$HALO_SPACE_ID/memory/consolidate               [ai]       workspace               Consolidate a space's memory now
 DELETE /api/spaces/$HALO_SPACE_ID                                  [ai]       workspace               Delete a space and everything inside it
 POST   /api/spaces/$HALO_SPACE_ID/open                             [ai]       workspace               Get a space working directory path
 GET    /api/spaces/$HALO_SPACE_ID/conversations                    [ai]       conversation            List conversations in a space
@@ -41,6 +46,7 @@ POST   /api/terminal/resize                                        [wrapped]  te
 POST   /api/terminal/kill                                          [wrapped]  terminal                Close a terminal session
 POST   /api/terminal/replay                                        [wrapped]  terminal                Read back a terminal session buffer
 GET    /api/spaces/$HALO_SPACE_ID/artifacts                        [ai]       workspace               List files and folders in a space
+GET    /api/spaces/$HALO_SPACE_ID/artifacts/query                  [ai]       workspace               Search file and folder paths in a space by name
 GET    /api/spaces/$HALO_SPACE_ID/artifacts/tree                   [ai]       workspace               Get the full lazy-loadable file tree for a space
 POST   /api/spaces/$HALO_SPACE_ID/artifacts/children               [ai]       workspace               Load one folder's children in the file tree
 GET    /api/artifacts/content                                      [ai]       workspace               Read one file from a space
@@ -57,6 +63,7 @@ POST   /api/notify-channels/clear-cache                            [ai]       ch
 GET    /api/notify-channels/product-config                         [ai]       channels                Read the product-level notification channel customisation
 GET    /api/wecom-bot/status                                       [ai]       channels                Check whether a WeCom bot channel is configured and connected
 POST   /api/wecom-bot/reconnect                                    [ai]       channels                Reconnect all configured WeCom bot instances
+POST   /api/feishu-bot/reachability                                [ai]       channels                Check whether a Feishu bot is actually reachable, not just connected
 GET    /api/im-channels/status                                     [ai]       channels                Get connection status for all IM channel instances, or one via ?instanceId=
 POST   /api/im-channels/reconnect                                  [ai]       channels                Reconnect one IM channel instance
 POST   /api/im-channels/reload                                     [ai]       channels                Reload all IM channel instances from saved config
@@ -68,6 +75,8 @@ GET    /api/im-sessions                                            [ai]       ch
 POST   /api/im-sessions/set-proactive                              [ai]       channels,digital-human  Toggle whether a run's result is auto-pushed to this chat when it finishes
 POST   /api/im-sessions/remove                                     [ai]       channels,digital-human  Remove a chat binding from the IM session registry
 POST   /api/im-sessions/set-custom-name                            [ai]       channels,digital-human  Set a custom display name for a chat binding
+GET    /api/im-sessions/linked                                     [ai]       channels,digital-human  List the IM chats a digital human pushes to through another digital human's bot
+POST   /api/im-sessions/set-push-link                              [ai]       channels,digital-human  Let a digital human push to an IM chat another digital human's bot knows, or stop it
 GET    /api/auth/providers                                         [ai]       settings                List the sign-in and model providers this build offers
 GET    /api/system/version                                         [ai]       settings                Read the running Halo version
 GET    /api/apps                                                   [ai]       digital-human           List digital humans (and other installed apps) in a space
@@ -77,8 +86,12 @@ GET    /api/apps/<appId>/available-skills                          [ai]       di
 GET    /api/skills/command-name                                    [ai]       store                   Preview the slash-command name a skill title would install under
 DELETE /api/apps/<appId>                                           [ai]       digital-human           Soft-delete (uninstall) a digital human; recoverable via reinstall
 POST   /api/apps/<appId>/reinstall                                 [ai]       digital-human           Reinstall a previously soft-deleted (uninstalled) digital human
-POST   /api/apps/<appId>/move-space                                [ai]       digital-human,workspace Move a digital human to a different space (or make it global)
+POST   /api/apps/<appId>/move-space                                [ai]       digital-human,workspace Set which space a digital human starts new work in
 POST   /api/apps/<appId>/clear-memory                              [ai]       digital-human           Delete all of a digital human's memory files
+GET    /api/apps/<appId>/memory                                    [ai]       digital-human           Read the state of a digital human's memory
+POST   /api/apps/<appId>/memory/consolidate                        [ai]       digital-human           Consolidate a digital human's memory now
+GET    /api/apps/<appId>/reminders                                 [ai]       digital-human           List the reminders a digital human set in its conversations
+DELETE /api/apps/<appId>/reminders/<reminderId>                    [ai]       digital-human           Cancel a reminder a digital human set in one of its conversations
 DELETE /api/apps/<appId>/permanent                                 [wrapped]  digital-human           Permanently delete a digital human and all its data
 POST   /api/apps/<appId>/pause                                     [ai]       digital-human           Pause a digital human (stops scheduling)
 POST   /api/apps/<appId>/resume                                    [ai]       digital-human           Resume a paused digital human
@@ -89,8 +102,8 @@ POST   /api/apps/<appId>/runs/<runId>/continue                     [ai]       di
 POST   /api/apps/<appId>/runs/<runId>/inject                       [ai]       digital-human           Inject a text message into a currently active run
 GET    /api/apps/<appId>/runs/<runId>/session                      [ai]       digital-human           Read what a run actually did, step by step
 POST   /api/apps/<appId>/config                                    [ai]       digital-human           Replace a digital human's user configuration values
-PATCH  /api/apps/<appId>/overrides                                 [ai]       digital-human           Merge-patch per-installation overrides (frequency, notification level, model)
-POST   /api/apps/<appId>/frequency                                 [ai]       digital-human           Change how often a digital human runs, without editing its full definition (spec)
+PATCH  /api/apps/<appId>/overrides                                 [ai]       digital-human           Merge-patch per-installation overrides (notification level, model)
+POST   /api/apps/<appId>/frequency                                 [ai]       digital-human           Change how often a digital human runs, without editing the rest of its definition (spec)
 POST   /api/apps/<appId>/permissions/grant                         [ai]       digital-human           Grant a named permission to a digital human
 POST   /api/apps/<appId>/upgrade-strategy                          [ai]       digital-human,store     Set how a store-installed digital human handles version upgrades
 POST   /api/apps/<appId>/permissions/revoke                        [ai]       digital-human           Revoke a named permission from a digital human
@@ -104,11 +117,45 @@ GET    /api/apps/<appId>/chat/messages                             [ai]       di
 GET    /api/apps/<appId>/im-chat/messages                          [ai]       digital-human,channels  Read a digital human's transcript in a bound IM chat
 POST   /api/apps/<appId>/chat/clear                                [ai]       digital-human           Clear a digital human's chat history
 POST   /api/apps/<appId>/chat/restart                              [ai]       digital-human           Restart a digital human's chat agent process (reloads system prompt and config)
+GET    /api/apps/<appId>/chats/clearable                           [ai]       digital-human           Count the conversations clearing all of a digital human's chats would clear
+POST   /api/apps/<appId>/chats/clear-all                           [ai]       digital-human           Clear the history of all of a digital human's chats at once
 POST   /api/apps/<appId>/im-chat/clear                             [ai]       digital-human,channels  Clear a digital human's chat history in a bound IM chat
 POST   /api/apps/<appId>/im-chat/stop                              [ai]       digital-human,channels  Stop a digital human's in-progress reply in a bound IM chat (keeps history)
 POST   /api/apps/<appId>/sessions/create                           [ai]       digital-human           Start a new chat thread with a digital human
 POST   /api/apps/<appId>/sessions/fork                             [ai]       digital-human           Branch an existing chat thread into a new one, copying its history
 POST   /api/apps/<appId>/sessions/delete                           [ai]       digital-human           Delete a chat thread with a digital human
+GET    /api/teams                                                  [ai]       team                    List teams, optionally only those owned by one space
+POST   /api/teams                                                  [ai]       team                    Create a persistent team, with a lead provisioned for it
+POST   /api/teams/propose-members                                  [ai]       team                    Draft AI member roles for a team goal (creates nothing)
+GET    /api/teams/collab-for-conversation/<conversationId>         [ai]       team                    Get the temporary collaboration started from one conversation
+POST   /api/teams/<teamId>/save-collab                             [ai]       team                    Keep a temporary collaboration as a persistent team
+GET    /api/teams/<teamId>                                         [ai]       team                    Get one team's own record
+GET    /api/teams/<teamId>/detail                                  [ai]       team                    Get a team with members, edges, roster status, board and decisions
+GET    /api/teams/<teamId>/chat-messages                           [ai]       team                    Read one member's transcript within a team
+POST   /api/teams/<teamId>/members/<appId>/send                    [ai]       team                    Send a message to one team member and wait for its reply
+POST   /api/teams/<teamId>/members/<appId>/stop                    [ai]       team                    Stop the turn one team member is running
+GET    /api/teams/<teamId>/artifacts                               [ai]       team                    List files each member produced in the current or latest run
+GET    /api/teams/<teamId>/conversations                           [ai]       team                    List a team's open conversations, newest first
+POST   /api/teams/<teamId>/conversations                           [ai]       team                    Open a new team conversation
+PATCH  /api/teams/<teamId>/conversations/<epochId>                 [ai]       team                    Rename a team conversation
+DELETE /api/teams/<teamId>/conversations/<epochId>                 [ai]       team                    Archive (close) a team conversation
+GET    /api/teams/<teamId>/epochs                                  [ai]       team                    List a team's runs and conversations (history), newest first
+GET    /api/teams/<teamId>/epochs/<epochId>/board                  [ai]       team                    Get the tasks, findings and members of one run
+GET    /api/teams/<teamId>/epochs/<epochId>/artifacts              [ai]       team                    List files produced during one run
+PATCH  /api/teams/<teamId>                                         [ai]       team                    Edit a team's name, goal, mode, escalation routing or lead
+DELETE /api/teams/<teamId>                                         [ai]       team                    Dissolve a team
+POST   /api/teams/<teamId>/members                                 [ai]       team                    Add an existing digital human to a team
+PATCH  /api/teams/<teamId>/members/<appId>                         [ai]       team                    Rewrite what a member is responsible for in this team
+DELETE /api/teams/<teamId>/checks/<checkId>                        [ai]       team                    Stop one periodic check a member set inside a team
+DELETE /api/teams/<teamId>/members/<appId>                         [ai]       team                    Remove a member from a team
+PUT    /api/teams/<teamId>/edges                                   [ai]       team                    Replace who hands work to whom in a structured team
+POST   /api/teams/<teamId>/run                                     [ai]       team                    Start a team run on its goal
+POST   /api/teams/<teamId>/pause                                   [ai]       team                    Stop the team's current run
+GET    /api/teams/<teamId>/triggers                                [ai]       team                    List a team's schedules and other triggers
+POST   /api/teams/<teamId>/triggers                                [ai]       team                    Add a schedule, file or WeCom trigger to a team, or change one
+POST   /api/teams/<teamId>/leave                                   [ai]       team                    Leave a team hosted on someone else's computer
+GET    /api/teams/<teamId>/federation/presence                     [ai]       team                    See which computers of a shared team are online
+DELETE /api/teams/<teamId>/triggers/<triggerId>                    [ai]       team                    Remove a schedule or other trigger from a team
 POST   /api/store/query                                            [ai]       store                   Paginated search over store listings (primary browse endpoint)
 GET    /api/store/apps                                             [ai]       store                   List store listings (legacy, non-paginated; prefer POST /api/store/query)
 GET    /api/store/apps/<slug>                                      [ai]       store                   Get full detail for one store listing by slug
@@ -147,6 +194,7 @@ POST   /api/tlon/<kbId>/bind-app                                   [ai]       kn
 POST   /api/tlon/<kbId>/unbind-app                                 [ai]       knowledge-base,digital-humanUnbind a knowledge collection from a digital human
 POST   /api/tlon/<kbId>/linked-dirs                                [ai]       knowledge-base          Watch a server-local directory as a live document source
 DELETE /api/tlon/<kbId>/linked-dirs/<linkId>                       [ai]       knowledge-base          Stop watching a linked directory
+POST   /api/tlon/<kbId>/linked-dirs/<linkId>/retry                 [ai]       knowledge-base          Look for an unavailable linked directory again and resume watching it if it is back
 POST   /api/tlon/<kbId>/files                                      [ai]       knowledge-base          Add existing server-local files to a collection by absolute path
 GET    /api/tlon/<kbId>/raw                                        [ai]       knowledge-base          List the raw source files added to a collection
 POST   /api/tlon/<kbId>/remove-raw                                 [ai]       knowledge-base          Remove one document (raw source file) from a collection

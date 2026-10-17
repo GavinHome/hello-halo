@@ -36,7 +36,18 @@ interface AppRow {
   upgrade_strategy: string
   ignored_versions: string
   knowledge_seeded: number
+  data_path: string | null
 }
+
+/**
+ * The columns an InstalledApp is built from. The author's original spec is
+ * left out on purpose: only an upgrade reads it, and every list call would
+ * otherwise copy a second spec per row.
+ */
+const APP_COLUMNS = `id, spec_id, space_id, spec_json, status, pending_escalation_id,
+  user_config_json, user_overrides_json, permissions_json, installed_at, last_run_at,
+  last_run_outcome, error_message, uninstalled_at, upgrade_strategy, ignored_versions,
+  knowledge_seeded, data_path`
 
 // ============================================
 // Row <-> Domain Mapping
@@ -50,6 +61,7 @@ function rowToInstalledApp(row: AppRow): InstalledApp {
     id: row.id,
     specId: row.spec_id,
     spaceId: row.space_id,  // null for global apps
+    dataPath: row.data_path ?? undefined,
     spec: JSON.parse(row.spec_json) as AppSpec,
     status: row.status as AppStatus,
     pendingEscalationId: row.pending_escalation_id ?? undefined,
@@ -64,6 +76,17 @@ function rowToInstalledApp(row: AppRow): InstalledApp {
     upgradeStrategy: (row.upgrade_strategy as UpgradeStrategy) ?? 'auto',
     ignoredVersions: row.ignored_versions ? (JSON.parse(row.ignored_versions) as string[]) : [],
     knowledgeSeeded: row.knowledge_seeded === 1,
+  }
+}
+
+function directoryDisplayExpressions(language?: string) {
+  const locale = language && /^[A-Za-z0-9-]{1,40}$/.test(language) ? language : 'en'
+  const prefix = locale.split('-')[0]
+  const block = `COALESCE(json_extract(spec_json, '$.i18n."${locale}"'),
+    (SELECT value FROM json_each(json_extract(spec_json, '$.i18n')) WHERE key = '${prefix}' OR key LIKE '${prefix}-%' LIMIT 1))`
+  return {
+    name: `COALESCE(json_extract(${block}, '$.name'), json_extract(spec_json, '$.display_name'), json_extract(spec_json, '$.name'), '')`,
+    description: `COALESCE(json_extract(${block}, '$.description'), json_extract(spec_json, '$.description'), '')`,
   }
 }
 
@@ -97,6 +120,65 @@ export class AppManagerStore {
   private readonly stmtUpdateIgnoredVersions: Database.Statement
   private readonly stmtUpdateKnowledgeSeeded: Database.Statement
 
+  getStudioSummary(language?: string, excludeIds: string[] = []): import('../../../shared/apps/people-directory').StudioSummary {
+    const { name, description } = directoryDisplayExpressions(language)
+    const rows = this.db.prepare(`WITH summaries AS (
+      SELECT id, json_extract(spec_json, '$.type') AS type,
+        COUNT(*) OVER (PARTITION BY json_extract(spec_json, '$.type')) AS total,
+        ROW_NUMBER() OVER (PARTITION BY json_extract(spec_json, '$.type') ORDER BY installed_at DESC, id ASC) AS position
+      FROM installed_apps WHERE status != 'uninstalled' AND id NOT IN (SELECT value FROM json_each(?))
+    ) SELECT app.id, app.spec_id AS specId, app.space_id AS spaceId, app.status, app.installed_at AS installedAt,
+      ${name} AS name, ${description} AS description, summaries.type, summaries.total, summaries.position
+      FROM summaries JOIN installed_apps app ON app.id = summaries.id WHERE summaries.position <= 3
+      ORDER BY app.installed_at DESC, app.id ASC`)
+      .all(JSON.stringify(excludeIds)) as Array<import('../../../shared/apps/people-directory').AppDirectoryRecord & { type: 'automation' | 'skill' | 'mcp'; total: number; position: number }>
+    const result: import('../../../shared/apps/people-directory').StudioSummary = { automation: { total: 0, items: [] }, skill: { total: 0, items: [] }, mcp: { total: 0, items: [] } }
+    for (const { type, total, position: _position, ...item } of rows) {
+      if (!Object.prototype.hasOwnProperty.call(result, type)) continue
+      result[type].total = total
+      result[type].items.push(item)
+    }
+    return result
+  }
+
+  /**
+   * Ids of digital humans currently in one of the given statuses.
+   *
+   * Deliberately narrow: the directory needs the membership of a small set
+   * before it paginates, and answering through `list()` would deserialize
+   * every installed spec to read one column.
+   */
+  listPersonIdsByStatus(statuses: readonly AppStatus[]): string[] {
+    if (statuses.length === 0) return []
+    const rows = this.db.prepare(`SELECT id FROM installed_apps
+      WHERE json_extract(spec_json, '$.type') = 'automation'
+        AND status IN (SELECT value FROM json_each(?))`).all(JSON.stringify(statuses)) as Array<{ id: string }>
+    return rows.map(row => row.id)
+  }
+
+  listPeopleDirectory(filter: import('../../../shared/apps/people-directory').PersonDirectoryFilter) {
+    const limit = Math.min(100, Math.max(1, Math.floor(filter.limit ?? 24)))
+    const offset = Math.max(0, Math.floor(filter.offset ?? 0))
+    if (!Number.isFinite(limit) || !Number.isFinite(offset)) throw new Error('Invalid directory pagination')
+    const where = ["json_extract(spec_json, '$.type') = 'automation'", filter.removed ? "status = 'uninstalled'" : "status != 'uninstalled'"]
+    const params: unknown[] = []
+    if (filter.spaceId) { where.push('space_id = ?'); params.push(filter.spaceId) }
+    if (filter.includeIds) { where.push('id IN (SELECT value FROM json_each(?))'); params.push(JSON.stringify(filter.includeIds)) }
+    if (filter.excludeIds?.length) { where.push('id NOT IN (SELECT value FROM json_each(?))'); params.push(JSON.stringify(filter.excludeIds)) }
+    const { name, description } = directoryDisplayExpressions(filter.language)
+    if (filter.q?.trim()) {
+      where.push(`(instr(lower(${name} || ' ' || ${description}), lower(?)) > 0 OR id IN (SELECT value FROM json_each(?)))`)
+      params.push(filter.q.trim(), JSON.stringify(filter.searchTeamMemberIds ?? []))
+    }
+    const clause = where.join(' AND ')
+    const total = (this.db.prepare(`SELECT COUNT(*) AS count FROM installed_apps WHERE ${clause}`).get(...params) as { count: number }).count
+    const items = this.db.prepare(`SELECT id, spec_id AS specId, space_id AS spaceId, status,
+      installed_at AS installedAt, ${name} AS name, ${description} AS description
+      FROM installed_apps WHERE ${clause} ORDER BY installed_at DESC, id ASC LIMIT ? OFFSET ?`)
+      .all(...params, limit, offset) as import('../../../shared/apps/people-directory').PersonDirectoryRecord[]
+    return { items, total, offset, limit }
+  }
+
   constructor(private readonly db: Database.Database) {
     // ── INSERT ────────────────────────────────────
     this.stmtInsert = db.prepare(`
@@ -104,30 +186,30 @@ export class AppManagerStore {
         id, spec_id, space_id, spec_json, status,
         pending_escalation_id, user_config_json, user_overrides_json,
         permissions_json, installed_at, last_run_at, last_run_outcome, error_message,
-        upgrade_strategy, ignored_versions, knowledge_seeded
+        upgrade_strategy, ignored_versions, knowledge_seeded, author_spec_json
       ) VALUES (
         @id, @spec_id, @space_id, @spec_json, @status,
         @pending_escalation_id, @user_config_json, @user_overrides_json,
         @permissions_json, @installed_at, @last_run_at, @last_run_outcome, @error_message,
-        @upgrade_strategy, @ignored_versions, @knowledge_seeded
+        @upgrade_strategy, @ignored_versions, @knowledge_seeded, @author_spec_json
       )
     `)
 
     // ── SELECT ────────────────────────────────────
     this.stmtGetById = db.prepare(`
-      SELECT * FROM installed_apps WHERE id = ?
+      SELECT ${APP_COLUMNS} FROM installed_apps WHERE id = ?
     `)
 
     this.stmtGetBySpecAndSpace = db.prepare(`
-      SELECT * FROM installed_apps WHERE spec_id = ? AND space_id = ?
+      SELECT ${APP_COLUMNS} FROM installed_apps WHERE spec_id = ? AND space_id = ?
     `)
 
     this.stmtGetBySpecGlobal = db.prepare(`
-      SELECT * FROM installed_apps WHERE spec_id = ? AND space_id IS NULL
+      SELECT ${APP_COLUMNS} FROM installed_apps WHERE spec_id = ? AND space_id IS NULL
     `)
 
     this.stmtListAll = db.prepare(`
-      SELECT * FROM installed_apps ORDER BY installed_at DESC
+      SELECT ${APP_COLUMNS} FROM installed_apps ORDER BY installed_at DESC
     `)
 
     // ── DELETE ────────────────────────────────────
@@ -211,11 +293,12 @@ export class AppManagerStore {
   // ── Create ─────────────────────────────────────
 
   /**
-   * Insert a new installed App record.
+   * Insert a new installed App record, with the author's original spec when
+   * the App came from one.
    *
    * @throws If the UNIQUE(spec_id, space_id) constraint is violated.
    */
-  insert(app: InstalledApp): void {
+  insert(app: InstalledApp, authorSpec: AppSpec | null = null): void {
     this.stmtInsert.run({
       id: app.id,
       spec_id: app.specId,
@@ -233,6 +316,7 @@ export class AppManagerStore {
       upgrade_strategy: app.upgradeStrategy ?? 'auto',
       ignored_versions: JSON.stringify(app.ignoredVersions ?? []),
       knowledge_seeded: app.knowledgeSeeded ? 1 : 0,
+      author_spec_json: authorSpec ? JSON.stringify(authorSpec) : null,
     })
   }
 
@@ -260,6 +344,11 @@ export class AppManagerStore {
   }
 
   // ── Read ───────────────────────────────────────
+
+  pinDataPath(appId: string, dataPath: string): void {
+    this.db.prepare('UPDATE installed_apps SET data_path = COALESCE(data_path, ?) WHERE id = ?')
+      .run(dataPath, appId)
+  }
 
   /**
    * Get an installed App by its unique ID.
@@ -374,6 +463,39 @@ export class AppManagerStore {
       spec_json: JSON.stringify(spec),
       spec_id: spec.name,
     })
+  }
+
+  // ── Author's original spec ─────────────────────
+
+  /** The author's spec as last installed or upgraded, or null when none was recorded. */
+  getAuthorSpec(appId: string): AppSpec | null {
+    const row = this.db.prepare('SELECT author_spec_json FROM installed_apps WHERE id = ?')
+      .get(appId) as { author_spec_json: string | null } | undefined
+    return row?.author_spec_json ? JSON.parse(row.author_spec_json) as AppSpec : null
+  }
+
+  /**
+   * Replace the spec and the author's original together, in one statement, so
+   * an upgrade can never leave one without the other.
+   */
+  updateSpecAndAuthorSpec(appId: string, spec: AppSpec, authorSpec: AppSpec | null): void {
+    this.db.prepare('UPDATE installed_apps SET spec_json = ?, spec_id = ?, author_spec_json = ? WHERE id = ?')
+      .run(JSON.stringify(spec), spec.name, authorSpec ? JSON.stringify(authorSpec) : null, appId)
+  }
+
+  /** Record the author's original only where none exists. Returns whether it was written. */
+  recordAuthorSpec(appId: string, authorSpec: AppSpec): boolean {
+    return this.db.prepare('UPDATE installed_apps SET author_spec_json = ? WHERE id = ? AND author_spec_json IS NULL')
+      .run(JSON.stringify(authorSpec), appId).changes > 0
+  }
+
+  /** Digital humans installed from a store that have no author's original recorded. */
+  listStoreInstallsWithoutAuthorSpec(): string[] {
+    const rows = this.db.prepare(`SELECT id FROM installed_apps
+      WHERE author_spec_json IS NULL AND status != 'uninstalled'
+        AND json_extract(spec_json, '$.type') = 'automation'
+        AND json_extract(spec_json, '$.store.slug') IS NOT NULL`).all() as Array<{ id: string }>
+    return rows.map(row => row.id)
   }
 
   /**

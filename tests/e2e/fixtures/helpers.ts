@@ -5,66 +5,83 @@
  * Centralized to avoid duplication and ensure consistency.
  */
 
-import type { Page } from '@playwright/test'
+import { expect, type Page } from '@playwright/test'
 
 /**
- * Wait for the app to finish loading and show the Home Page.
- * The Home Page has the Halo space card and Apps card.
+ * Wait for the app to finish loading and show its shell.
+ *
+ * The rail is the shell's persistent furniture on every view, so it is what a
+ * loaded app can be recognised by.
  */
 export async function waitForHomePage(window: Page) {
   await window.waitForSelector('#root', { timeout: 15000 })
-  await window.waitForLoadState('networkidle')
-  // Wait for the Halo space card to appear (data-onboarding="halo-space")
-  await window.waitForSelector('[data-onboarding="halo-space"]', { timeout: 15000 })
+  await window.waitForLoadState('domcontentloaded')
+  const skip = window.getByRole('button', { name: 'Skip for now', exact: true })
+  await skip.or(window.locator('nav button').first()).first().waitFor({ state: 'visible', timeout: 15000 })
+  if (await skip.isVisible()) await skip.click()
+  await window.waitForSelector('nav button', { timeout: 15000 })
 }
 
 /**
- * Navigate from Home Page to Chat Interface (SpacePage) by clicking the Halo space card.
+ * Switch the rendered theme the way App.tsx's applyTheme does: `light` for the
+ * light theme, `theme-dark` for dark-only rules. Toggling one alone mixes both.
+ */
+export async function setTheme(window: Page, theme: 'light' | 'dark') {
+  await window.evaluate((mode) => {
+    const root = document.documentElement
+    root.classList.toggle('light', mode === 'light')
+    root.classList.toggle('theme-dark', mode === 'dark')
+  }, theme)
+}
+
+/**
+ * Navigate to the chat interface through the rail's Conversation entry.
  * Waits for the textarea input to appear, indicating the chat is ready.
  */
 export async function navigateToChat(window: Page) {
   await waitForHomePage(window)
 
-  // Click the Halo space card
-  const haloCard = await window.waitForSelector('[data-onboarding="halo-space"]', { timeout: 10000 })
-  await haloCard.click()
+  await window.getByRole('button', { name: 'Conversation', exact: true }).first().click()
 
   // Wait for chat interface to load (textarea should appear)
   await window.waitForSelector('textarea', { timeout: 15000 })
 }
 
 /**
- * Navigate from Home Page to Settings Page.
- * Settings button is in the header (gear icon).
+ * Open a digital human's conversation from the sidebar's conversation list
+ * (desktop layouts; at phone width they are in the history sheet). The Digital
+ * Humans section starts folded, and so does each digital human's group unless
+ * one of its conversations is open, so each is unfolded only while folded.
  */
-export async function navigateToSettings(window: Page) {
-  await waitForHomePage(window)
-
-  // Find settings button in header - it's the button with a gear/settings SVG
-  // The header uses a Settings icon from lucide-react
-  const settingsButton = await window.waitForSelector(
-    'button:has(svg)',
-    { timeout: 10000 }
-  )
-  await settingsButton.click()
-
-  // Wait for Settings page to render
-  await window.waitForSelector('text=/Settings|设置/i', { timeout: 10000 })
+export async function openDigitalHumanConversation(window: Page, name: string, rowText: string) {
+  const section = window.getByTitle('Conversations with digital humans available in this workspace', { exact: true })
+  await section.waitFor({ state: 'visible', timeout: 15000 })
+  if (await section.getAttribute('aria-expanded') !== 'true') await section.click()
+  const group = window.getByRole('button', { name, exact: true }).first()
+  await group.waitFor({ state: 'visible' })
+  if (await group.getAttribute('aria-expanded') !== 'true') await group.click()
+  await window.getByText(rowText).first().click()
 }
 
-/**
- * Navigate from Home Page to Apps Page by clicking the Studio card.
- * Card heading was renamed from "Apps" to "Studio" (zh: 工坊).
- */
+/** Navigate through the persistent rail and wait for the settings content. */
+export async function navigateToSettings(window: Page) {
+  await waitForHomePage(window)
+  await window.getByRole('button', { name: 'Settings', exact: true }).first().click()
+  await expect(window.locator('#ai-model').getByRole('heading', { name: 'AI Model', exact: true })).toBeVisible()
+}
+
+/** Workspace management is reached from the shared header selector. */
+export async function navigateToWorkspaces(window: Page) {
+  await waitForHomePage(window)
+  await window.getByTitle('Manage workspaces', { exact: true }).click()
+  await expect(window.getByRole('heading', { name: 'Workspace', exact: true, level: 1 })).toBeVisible()
+}
+
+/** Navigate to the Apps page through the rail's Digital Humans entry. */
 export async function navigateToApps(window: Page) {
   await waitForHomePage(window)
 
-  // Click the Studio/Apps card heading (supports EN/CN, legacy "Apps")
-  const appsCard = await window.waitForSelector(
-    'text=/^Studio$|^工坊$|^Apps$/i',
-    { timeout: 10000 }
-  )
-  await appsCard.click()
+  await window.getByRole('button', { name: 'Digital Humans', exact: true }).first().click()
 
   // Wait for Apps page tab bar to render
   await window.waitForSelector(
@@ -73,50 +90,21 @@ export async function navigateToApps(window: Page) {
   )
 }
 
-/**
- * Navigate to Remote Access settings section.
- * Goes through Settings page and scrolls to find Remote Access.
- */
+/** The section sits inside Settings' scrollable main content. */
 export async function navigateToRemoteSettings(window: Page) {
-  await waitForHomePage(window)
-
-  // Navigate to Settings
-  const settingsButton = await window.waitForSelector(
-    'button:has(svg)',
-    { timeout: 10000 }
-  )
-  await settingsButton.click()
-  await window.waitForTimeout(500)
-
-  // Scroll to bottom to find remote access section
-  await window.evaluate(() => window.scrollTo(0, document.body.scrollHeight))
-  await window.waitForTimeout(500)
-
-  // Wait for remote access section (supports both EN and CN)
-  await window.waitForSelector('text=/Remote Access|远程访问/i', { timeout: 10000 })
+  await navigateToSettings(window)
+  await window.locator('#remote').scrollIntoViewIfNeeded()
+  await expect(window.locator('#remote').getByRole('heading', { name: 'Remote Access', exact: true })).toBeVisible()
 }
 
-/**
- * Click the remote access toggle.
- * Finds the toggle near the "Enable Remote Access" text.
- */
+/** Toggle remote access and wait for the accessible state to change. */
 export async function clickRemoteToggle(window: Page) {
-  await window.evaluate(() => {
-    const labels = document.querySelectorAll('label')
-    for (const label of labels) {
-      const checkbox = label.querySelector('input[type="checkbox"]')
-      if (checkbox) {
-        const parent = label.closest('div')
-        if (parent && (
-          parent.textContent?.includes('启用远程访问') ||
-          parent.textContent?.includes('Enable Remote Access')
-        )) {
-          label.click()
-          break
-        }
-      }
-    }
-  })
+  const toggle = window.locator('#remote').getByRole('switch')
+  await expect(toggle).toHaveAttribute('aria-checked', /^(true|false)$/)
+  const enabled = await toggle.getAttribute('aria-checked') === 'true'
+  await expect(toggle).toBeEnabled()
+  await toggle.click()
+  await expect(toggle).toHaveAttribute('aria-checked', String(!enabled))
 }
 
 /**

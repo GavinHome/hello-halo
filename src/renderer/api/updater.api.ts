@@ -9,6 +9,7 @@ import {
 import type {
   ApiResponse,
 } from './_shared'
+import type { UpdaterChannel, UpdaterStatusPayload } from '../../shared/types/updater'
 
 export const updaterApi = {
   // ===== Updater (Electron only) =====
@@ -35,19 +36,21 @@ export const updaterApi = {
     return httpRequest('GET', '/api/system/version')
   },
 
-  onUpdaterStatus: (callback: (data: {
-    status: 'checking' | 'available' | 'not-available' | 'downloading' | 'downloaded' | 'manual-download' | 'error'
-    version?: string
-    percent?: number
-    message?: string
-    releaseNotes?: string | { version: string; note: string }[]
-    /** How the downloaded update is applied — decided by the main process. */
-    installMode?: 'installer' | 'restart'
-    /** Download page to fall back to when the update cannot be applied. */
-    downloadUrl?: string
-    /** Release marked unskippable by the feed — the prompt offers no way out but updating. */
-    mandatory?: boolean
-  }) => void) => {
+  /**
+   * Which release feed this build follows.
+   *
+   * Remote clients are looking at somebody else's desktop install and cannot
+   * act on its update channel, so they are told nothing rather than shown a
+   * channel that is not theirs.
+   */
+  getUpdateChannel: async (): Promise<ApiResponse<UpdaterChannel>> => {
+    if (!isElectron()) {
+      return { success: false, error: 'Only available in desktop app' }
+    }
+    return { success: true, data: await window.halo.getUpdateChannel() }
+  },
+
+  onUpdaterStatus: (callback: (data: UpdaterStatusPayload) => void) => {
     if (!isElectron()) {
       return () => { } // No-op in remote mode
     }

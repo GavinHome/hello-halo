@@ -17,14 +17,22 @@
  *   app:trigger            Manually trigger a run
  *   app:get-state          Get real-time automation state
  *   app:get-activity       Get activity log entries for an App
+ *   app:get-runs           Get run history for an App, with each run's last activity summary
+ *   app:get-run-stats      Get aggregate outcome/token/duration stats over an App's recent runs
+ *   app:get-overview       Batched card-wall first paint: state + latest summary + recent runs per App
  *   app:respond-escalation Respond to a pending user escalation
  *   app:update-config      Update App user configuration
  *   app:update-frequency   Update subscription frequency override
  *   app:update-spec        Update App spec (JSON Merge Patch)
+ *   app:get-author-spec    Get the author's original a digital human's upgrades compare against
+ *   app:adopt-author-version  Switch fields an upgrade kept at the user's version to the author's
  *   app:chat-send          Send a chat message to an App's AI agent
  *   app:chat-stop          Stop an active app chat generation
+ *   app:chat-inject        Add a message to the turn an app chat is running
  *   app:chat-status        Get app chat status (generating + conversationId)
  *   app:chat-messages      Load persisted chat messages for an app
+ *   app:chat-transcript    Load one page of persisted chat messages (newest first, thoughts omitted)
+ *   app:chat-message-thoughts  Load the thought process of one chat message
  *   app:chat-session-state Get session state for recovery after refresh
  *   app:chat-restart       Restart an app's chat agent (reload prompt/config)
  *   app:im-chat-messages   Load persisted IM session chat messages
@@ -47,14 +55,25 @@ import { deriveSkillCommandName } from '../apps/spec/skill-identity'
 import { listAvailableSkills } from '../apps/skill-discovery'
 import {
   getAppRuntime,
+  getAppSpaceChangePreview,
+  getAppCapabilityInventory,
+  listPeopleDirectory,
+  getStudioSummary,
+  moveAppDefaultSpace,
+  readAppRunMessages,
+  RunProcessClearedError,
+  EscalationAnswerValidationError,
   sendAppChatMessage,
   stopAppChat,
   stopAppChatConversation,
+  injectIntoAppChatWhenLive,
   isAppChatGenerating,
   isAppChatConversationGenerating,
   loadAppChatMessages,
   loadImChatMessages,
   loadChatMessagesForConversation,
+  loadChatTranscriptForConversation,
+  loadChatMessageThoughts,
   getAppChatSessionState,
   getAppChatConversationId,
   clearAppChat,
@@ -64,12 +83,20 @@ import {
   createNativeChatSession,
   forkNativeChatSession,
   deleteNativeChatSession,
+  getDigitalHumanMemoryStatus,
+  consolidateDigitalHumanMemoryNow,
+  listAppReminders,
+  cancelAppReminder,
+  countClearableChats,
+  clearAllChats,
 } from '../apps/runtime'
 import type { AppSpec } from '../apps/spec'
 import type { AppListFilter, UninstallOptions, UpgradeStrategy } from '../apps/manager'
-import type { ActivityQueryOptions, EscalationResponse, AppChatRequest } from '../apps/runtime'
-import { readSessionMessages } from '../apps/runtime/session-store'
+import type { ActivityQueryOptions, RunQueryOptions, EscalationResponse, AppChatRequest } from '../apps/runtime'
 import { getSpace } from '../services/space.service'
+import { resolveUserInjectTarget } from '../controllers/app-chat-target.controller'
+import { parseTurnReferences, toAppChatRequest } from '../controllers/chat-turn-input'
+import type { ContentReference } from '../../shared/types/content-reference'
 import { broadcastToAll } from '../http/websocket'
 import * as appController from '../controllers/app.controller'
 import { analytics } from '../services/analytics/analytics.service'
@@ -107,8 +134,85 @@ function requireRuntime() {
 // Handler Registration
 // ---------------------------------------------------------------------------
 
+async function appOperation(name: string, operation: () => unknown | Promise<unknown>) {
+  try {
+    return await operation()
+  } catch (error) {
+    console.error(`[AppIPC] ${name} failed:`, error)
+    return { success: false, error: error instanceof Error ? error.message : String(error) }
+  }
+}
+
 export function registerAppHandlers(): void {
   registerRawRpcHandlers(appRpc, {
+    // The desktop's Run once: the user is at the screen, so the run's pages open where they can watch them.
+    appStartRun: (appId: string) => appOperation('start-run', async () => {
+      const r = requireRuntime()
+      return r.success ? { success: true, data: await r.runtime.startManually(appId, { watchable: true }) } : r
+    }),
+    appGetStudioSummary: (language?: string) => appOperation('studio-summary', () => ({ success: true, data: getStudioSummary(language) })),
+    appListPeople: (query?: import('../../shared/apps/people-directory').PeopleDirectoryQuery) => appOperation('list-people', () => ({ success: true, data: listPeopleDirectory(query) })),
+    appGetAllStates: () => appOperation('get-all-states', () => {
+      const r = requireRuntime()
+      return r.success ? { success: true, data: r.runtime.getAllAppStates() } : r
+    }),
+    appGetPendingInbox: (options?: import('../../shared/apps/app-types').PendingDecisionQuery) => appOperation('get-pending-inbox', () => {
+      const r = requireRuntime()
+      return r.success ? { success: true, data: r.runtime.getPendingInbox(options) } : r
+    }),
+    appGetActivityEntry: (input: { appId: string; entryId: string }) => appOperation('get-activity-entry', () => {
+      const r = requireRuntime()
+      return r.success ? { success: true, data: r.runtime.getActivityEntry(input.appId, input.entryId) } : r
+    }),
+    appGetPendingEntries: (input: { appId: string; options?: import('../../shared/apps/app-types').PendingDecisionQuery }) => appOperation('get-pending-entries', () => {
+      const r = requireRuntime()
+      return r.success ? { success: true, data: r.runtime.getPendingEntries(input.appId, input.options) } : r
+    }),
+    appGetCapabilityInventory: () => appOperation('get-capability-inventory', () => {
+      const r = requireManager()
+      return r.success ? { success: true, data: getAppCapabilityInventory() } : r
+    }),
+    appPreviewSpaceChange: (input: { appId: string; newSpaceId: string }) => appOperation('preview-space-change', () => ({
+      success: true, data: getAppSpaceChangePreview(input.appId, input.newSpaceId),
+    })),
+    appRetryEscalationContinuation: (input: { appId: string; entryId: string }) => appOperation('retry-escalation-continuation', async () => {
+      const r = requireRuntime()
+      if (!r.success) return r
+      await r.runtime.retryEscalationContinuation(input.appId, input.entryId)
+      return { success: true }
+    }),
+    appConfirmEscalationDeadline: (input: { appId: string; entryId: string; deadlineAt: number | null }) => appOperation('confirm-escalation-deadline', async () => {
+      const r = requireRuntime()
+      if (!r.success) return r
+      await r.runtime.confirmEscalationDeadline(input.appId, input.entryId, input.deadlineAt)
+      return { success: true }
+    }),
+    appDismissEscalation: (input: { appId: string; entryId: string }) => appOperation('dismiss-escalation', async () => {
+      const r = requireRuntime()
+      if (!r.success) return r
+      await r.runtime.dismissEscalation(input.appId, input.entryId)
+      return { success: true }
+    }),
+    appCloseRun: (input: { appId: string; runId: string }) => appOperation('close-run', async () => {
+      const r = requireRuntime()
+      if (!r.success) return r
+      await r.runtime.closeRun(input.appId, input.runId)
+      return { success: true }
+    }),
+    appStopRun: (input: { appId: string; runId: string }) => appOperation('stop-run', async () => {
+      const r = requireRuntime()
+      if (!r.success) return r
+      await r.runtime.stopRun(input.appId, input.runId)
+      return { success: true }
+    }),
+    appGetAuthorSpec: (appId: string) => appOperation('get-author-spec', () => {
+      const r = requireManager()
+      return r.success ? { success: true, data: r.manager.getAuthorSpec(appId) } : r
+    }),
+    appAdoptAuthorVersion: (input: { appId: string; entryId: string; fields: string[] }) => appOperation('adopt-author-version', () => {
+      const r = requireRuntime()
+      return r.success ? { success: true, data: r.runtime.adoptAuthorVersion(input.appId, input.entryId, input.fields) } : r
+    }),
     // ── app:install ──────────────────────────────────────────────────────────
     appInstall: async (input: { spaceId: string | null; spec: AppSpec; userConfig?: Record<string, unknown> }) => {
       // Shared install + activate orchestration lives in the controller.
@@ -136,7 +240,7 @@ export function registerAppHandlers(): void {
           })
         }
 
-        await r.manager.uninstall(input.appId, input.options)
+        await r.manager.uninstall(input.appId, { ...input.options, reason: 'user' })
         console.log(`[AppIPC] app:uninstall: appId=${input.appId}`)
         return { success: true }
       } catch (error: unknown) {
@@ -327,17 +431,61 @@ export function registerAppHandlers(): void {
       }
     },
 
+    // ── app:get-runs ─────────────────────────────────────────────────────────
+    appGetRuns: async (input: { appId: string; options?: RunQueryOptions }) => {
+      try {
+        const r = requireRuntime()
+        if (!r.success) return r
+        const runs = r.runtime.getRunsForAppWithSummary(input.appId, input.options)
+        return { success: true, data: runs }
+      } catch (error: unknown) {
+        const err = error as Error
+        console.error('[AppIPC] app:get-runs error:', err.message)
+        return { success: false, error: err.message }
+      }
+    },
+
+    // ── app:get-run-stats ────────────────────────────────────────────────────
+    appGetRunStats: async (input: { appId: string; window?: number }) => {
+      try {
+        const r = requireRuntime()
+        if (!r.success) return r
+        const stats = r.runtime.getRunStats(input.appId, input.window)
+        return { success: true, data: stats }
+      } catch (error: unknown) {
+        const err = error as Error
+        console.error('[AppIPC] app:get-run-stats error:', err.message)
+        return { success: false, error: err.message }
+      }
+    },
+
+    // ── app:get-overview ─────────────────────────────────────────────────────
+    appGetOverview: async (input?: { spaceId?: string }) => {
+      try {
+        const r = requireRuntime()
+        if (!r.success) return r
+        const overview = r.runtime.getOverview(input?.spaceId)
+        return { success: true, data: overview }
+      } catch (error: unknown) {
+        const err = error as Error
+        console.error('[AppIPC] app:get-overview error:', err.message)
+        return { success: false, error: err.message }
+      }
+    },
+
     // ── app:respond-escalation ───────────────────────────────────────────────
     appRespondEscalation: async (input: { appId: string; escalationId: string; response: EscalationResponse }) => {
       try {
         const r = requireRuntime()
         if (!r.success) return r
-        await r.runtime.respondToEscalation(input.appId, input.escalationId, input.response)
+        const entry = await r.runtime.respondToEscalation(input.appId, input.escalationId, input.response)
         console.log(`[AppIPC] app:respond-escalation: appId=${input.appId}, escalationId=${input.escalationId}`)
-        return { success: true }
+        return { success: true, data: entry }
       } catch (error: unknown) {
         const err = error as Error
-        console.error('[AppIPC] app:respond-escalation error:', err.message)
+        if (!(err instanceof EscalationAnswerValidationError)) {
+          console.error(`[AppIPC] app:respond-escalation error: appId=${input.appId}, entryId=${input.escalationId}`, err.message)
+        }
         return { success: false, error: err.message }
       }
     },
@@ -358,11 +506,13 @@ export function registerAppHandlers(): void {
     },
 
     // ── app:inject-run ───────────────────────────────────────────────────────
-    appInjectRun: async (input: { appId: string; runId: string; text: string }) => {
+    appInjectRun: async (input: { appId: string; runId: string; text: string; references?: ContentReference[] }) => {
       try {
+        const references = parseTurnReferences(input.references)
+        if (!references.ok) return { success: false, error: references.error }
         const r = requireRuntime()
         if (!r.success) return r
-        await r.runtime.injectIntoRun(input.appId, input.runId, input.text)
+        await r.runtime.injectIntoRun(input.appId, input.runId, input.text, references.references)
         console.log(`[AppIPC] app:inject-run: appId=${input.appId}, runId=${input.runId}`)
         return { success: true }
       } catch (error: unknown) {
@@ -511,19 +661,11 @@ export function registerAppHandlers(): void {
           return { success: false, error: `App not found: ${input.appId}` }
         }
 
-        if (!app.spaceId) {
-          return { success: false, error: `Global apps do not have session data` }
-        }
-
-        const space = getSpace(app.spaceId)
-        if (!space?.path) {
-          return { success: false, error: `Space not found for app: ${input.appId}` }
-        }
-
-        const messages = readSessionMessages(space.path, input.appId, input.runId)
+        const messages = readAppRunMessages(input.appId, input.runId)
         return { success: true, data: messages }
       } catch (error: unknown) {
         const err = error as Error
+        if (error instanceof RunProcessClearedError) return { success: false, error: err.message, code: error.code }
         console.error('[AppIPC] app:get-session error:', err.message)
         return { success: false, error: err.message }
       }
@@ -532,17 +674,23 @@ export function registerAppHandlers(): void {
     // ── app:chat-send ─────────────────────────────────────────────────────
     appChatSend: async (request: AppChatRequest) => {
       try {
+        // Built field by field, exactly as the HTTP route does: identity is derived, never taken.
+        const built = toAppChatRequest(request?.appId, request)
+        if (!built.ok) {
+          console.warn(`[AppIPC] app:chat-send refused: appId=${request?.appId} ${built.error}`)
+          return { success: false, error: built.error }
+        }
         // Fire-and-forget: streaming events are pushed to renderer via agent:* channels.
         // We don't await the full completion here because the renderer listens for
         // real-time events (agent:message, agent:thought, etc.) keyed by conversationId.
-        sendAppChatMessage(request).catch((error: unknown) => {
+        sendAppChatMessage(built.request).catch((error: unknown) => {
           const err = error as Error
           console.error(`[AppIPC] app:chat-send background error:`, err.message)
         })
         // Echo back the session actually addressed: the caller's explicit
-        // conversationId (native local / IM / HTTP session) or the app's
-        // native default when none was supplied.
-        const conversationId = request.conversationId ?? getAppChatConversationId(request.appId)
+        // conversationId (native local / team session) or the app's native
+        // default when none was supplied.
+        const conversationId = built.request.conversationId ?? getAppChatConversationId(request.appId)
         console.log(`[AppIPC] app:chat-send: appId=${request.appId} conversationId=${conversationId}`)
         return {
           success: true,
@@ -571,6 +719,32 @@ export function registerAppHandlers(): void {
       } catch (error: unknown) {
         const err = error as Error
         console.error('[AppIPC] app:chat-stop error:', err.message)
+        return { success: false, error: err.message }
+      }
+    },
+
+    // ── app:chat-inject ────────────────────────────────────────────────────
+    // The user adding to the turn a digital human is running — or is about to
+    // run: a turn still starting is waited for. `delivered: false` means no turn
+    // was in flight to take it (it ended in the meantime) — the caller then
+    // sends the text as a new message — unless `stopped`: the user stopped that
+    // turn, and the text goes back to them.
+    appChatInject: async (input: { appId: string; conversationId: string; message: string; references?: ContentReference[] }) => {
+      try {
+        const message = typeof input?.message === 'string' ? input.message.trim() : ''
+        const references = parseTurnReferences(input?.references)
+        if (!references.ok) return { success: false, error: references.error }
+        if ((!message && !references.references) || !input?.conversationId) {
+          return { success: false, error: 'Missing conversationId or message' }
+        }
+        const target = resolveUserInjectTarget(input.appId, input.conversationId)
+        if (!target.ok) return { success: false, error: target.error }
+        const outcome = await injectIntoAppChatWhenLive(target.conversationId, message, { source: 'injection' }, references.references)
+        console.log(`[AppIPC] app:chat-inject: appId=${input.appId} conversationId=${input.conversationId} outcome=${outcome}`)
+        return { success: true, data: { delivered: outcome === 'delivered', ...(outcome === 'stopped' ? { stopped: true } : {}) } }
+      } catch (error: unknown) {
+        const err = error as Error
+        console.error('[AppIPC] app:chat-inject error:', err.message)
         return { success: false, error: err.message }
       }
     },
@@ -613,6 +787,50 @@ export function registerAppHandlers(): void {
       } catch (error: unknown) {
         const err = error as Error
         console.error('[AppIPC] app:chat-messages error:', err.message)
+        return { success: false, error: err.message }
+      }
+    },
+
+    // ── app:chat-transcript ────────────────────────────────────────────────
+    // Paged read of the same transcript app:chat-messages returns whole: newest
+    // page first, thought processes left out (app:chat-message-thoughts).
+    appChatTranscript: async (input: { appId: string; spaceId: string; conversationId?: string; before?: string; limit?: number; through?: string }) => {
+      try {
+        const space = getSpace(input.spaceId)
+        if (!space?.path) {
+          return { success: true, data: { messages: [], hasMoreBefore: false, cursor: null, total: 0 } }
+        }
+        const data = loadChatTranscriptForConversation(
+          space.path,
+          input.appId,
+          input.conversationId ?? getAppChatConversationId(input.appId),
+          { before: input.before, limit: input.limit, through: input.through }
+        )
+        return { success: true, data }
+      } catch (error: unknown) {
+        const err = error as Error
+        console.error('[AppIPC] app:chat-transcript error:', err.message)
+        return { success: false, error: err.message }
+      }
+    },
+
+    // ── app:chat-message-thoughts ──────────────────────────────────────────
+    appChatMessageThoughts: async (input: { appId: string; spaceId: string; conversationId?: string; messageId: string }) => {
+      try {
+        const space = getSpace(input.spaceId)
+        if (!space?.path) {
+          return { success: true, data: [] }
+        }
+        const data = loadChatMessageThoughts(
+          space.path,
+          input.appId,
+          input.conversationId ?? getAppChatConversationId(input.appId),
+          input.messageId
+        )
+        return { success: true, data }
+      } catch (error: unknown) {
+        const err = error as Error
+        console.error('[AppIPC] app:chat-message-thoughts error:', err.message)
         return { success: false, error: err.message }
       }
     },
@@ -662,12 +880,36 @@ export function registerAppHandlers(): void {
       }
     },
 
+    // ── app:chats-clearable / app:chats-clear-all ─────────────────────────
+    // Every conversation of the digital human cleared as /clear clears each;
+    // the count comes first so the confirmation can say what will go.
+    appChatsClearable: async (appId: string) => {
+      try {
+        return { success: true, data: countClearableChats(appId) }
+      } catch (error: unknown) {
+        const err = error as Error
+        console.error('[AppIPC] app:chats-clearable error:', err.message)
+        return { success: false, error: err.message }
+      }
+    },
+
+    appChatsClearAll: async (appId: string) => {
+      try {
+        return { success: true, data: await clearAllChats(appId) }
+      } catch (error: unknown) {
+        const err = error as Error
+        console.error('[AppIPC] app:chats-clear-all error:', err.message)
+        return { success: false, error: err.message }
+      }
+    },
+
     // ── app:im-chat-messages ────────────────────────────────────────────
     appImChatMessages: async (input: { appId: string; spaceId: string; channel: string; chatType: 'direct' | 'group'; chatId: string }) => {
       try {
         const space = getSpace(input.spaceId)
         if (!space?.path) {
-          return { success: true, data: [] }
+          console.warn('[AppIPC] IM history unavailable: missing space', { appId: input.appId, spaceId: input.spaceId })
+          return { success: false, error: 'The conversation storage is unavailable.' }
         }
         const messages = loadImChatMessages(space.path, input.appId, input.channel, input.chatType, input.chatId)
         return { success: true, data: messages }
@@ -847,6 +1089,35 @@ export function registerAppHandlers(): void {
       }
     },
 
+    // ── app:list-available-skills-for-space ─────────────────────────────────
+    // Same disk-scan as above, keyed directly by spaceId — for surfaces (the
+    // space resource rail) that have a space, not a digital human, in hand.
+    appListAvailableSkillsForSpace: async (spaceId: string) => {
+      try {
+        return { success: true, data: listAvailableSkills(spaceId) }
+      } catch (error: unknown) {
+        const err = error as Error
+        console.error('[AppIPC] app:list-available-skills-for-space error:', err.message)
+        return { success: false, error: err.message }
+      }
+    },
+
+    // ── app:list-effective-mcp-apps ──────────────────────────────────────────
+    // Space-scoped ∪ global MCP apps (space overrides global), for read-only
+    // display in the space resource rail — not the "declared dependencies of
+    // one digital human" list AppMcpDepsSection shows.
+    appListEffectiveMcpApps: async (spaceId: string) => {
+      try {
+        const r = requireManager()
+        if (!r.success) return r
+        return { success: true, data: r.manager.listEffectiveMcpApps(spaceId) }
+      } catch (error: unknown) {
+        const err = error as Error
+        console.error('[AppIPC] app:list-effective-mcp-apps error:', err.message)
+        return { success: false, error: err.message }
+      }
+    },
+
     // ── app:get-data-path ──────────────────────────────────────────────────
     appGetDataPath: async (appId: string) => {
       try {
@@ -914,6 +1185,51 @@ export function registerAppHandlers(): void {
       }
     },
 
+    // ── app:memory-status / app:memory-consolidate ──────────────────────────
+    appGetMemoryStatus: async (appId: string) => {
+      try {
+        const status = await getDigitalHumanMemoryStatus(appId)
+        return status ? { success: true, data: status } : { success: false, error: 'App not found' }
+      } catch (error: unknown) {
+        const err = error as Error
+        console.error('[AppIPC] app:memory-status error:', err.message)
+        return { success: false, error: err.message }
+      }
+    },
+
+    appConsolidateMemory: async (appId: string) => {
+      try {
+        return { success: true, data: consolidateDigitalHumanMemoryNow(appId) }
+      } catch (error: unknown) {
+        const err = error as Error
+        console.error('[AppIPC] app:memory-consolidate error:', err.message)
+        return { success: false, error: err.message }
+      }
+    },
+
+    // ── app:reminders-list / app:reminder-cancel ───────────────────────────
+    appListReminders: async (appId: string) => {
+      try {
+        return { success: true, data: listAppReminders(appId) }
+      } catch (error: unknown) {
+        const err = error as Error
+        console.error('[AppIPC] app:reminders-list error:', err.message)
+        return { success: false, error: err.message }
+      }
+    },
+
+    appCancelReminder: async (input: { appId: string; reminderId: string }) => {
+      try {
+        return cancelAppReminder(input.appId, input.reminderId)
+          ? { success: true }
+          : { success: false, error: 'Reminder not found' }
+      } catch (error: unknown) {
+        const err = error as Error
+        console.error('[AppIPC] app:reminder-cancel error:', err.message)
+        return { success: false, error: err.message }
+      }
+    },
+
     // ── app:move-space ─────────────────────────────────────────────────────
     appMoveSpace: async (input: { appId: string; newSpaceId: string | null }) => {
       try {
@@ -925,37 +1241,17 @@ export function registerAppHandlers(): void {
           return { success: false, error: `App not found: ${input.appId}` }
         }
 
-        // For automation apps that are active: deactivate before moving so the
-        // scheduler and event router don't hold stale space references, then
-        // re-activate after the move completes.
-        const isAutomation = app.spec.type === 'automation'
-        const wasActive = app.status === 'active'
-        const runtime = getAppRuntime()
-
-        if (isAutomation && wasActive && runtime) {
-          await runtime.deactivate(input.appId).catch(err => {
-            console.warn(`[AppIPC] app:move-space -- runtime deactivate failed (non-fatal): ${err}`)
-          })
-        }
-
-        await r.manager.moveToSpace(input.appId, input.newSpaceId)
-
-        // Re-activate automation apps that were running before the move
-        let activationWarning: string | undefined
-        if (isAutomation && wasActive && runtime) {
-          try {
-            await runtime.activate(input.appId)
-          } catch (err) {
-            const errMsg = err instanceof Error ? err.message : String(err)
-            console.warn(`[AppIPC] app:move-space -- runtime activate failed: ${errMsg}`)
-            activationWarning = errMsg
-          }
+        if (app.spec.type === 'automation') {
+          if (!input.newSpaceId) throw new Error('Digital humans require a work space')
+          await moveAppDefaultSpace(input.appId, input.newSpaceId)
+        } else {
+          await r.manager.moveToSpace(input.appId, input.newSpaceId)
         }
 
         console.log(
           `[AppIPC] app:move-space: appId=${input.appId}, newSpaceId=${input.newSpaceId ?? 'global'}`
         )
-        return { success: true, data: { activationWarning } }
+        return { success: true }
       } catch (error: unknown) {
         const err = error as Error
         console.error('[AppIPC] app:move-space error:', err.message)

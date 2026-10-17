@@ -12,12 +12,14 @@
  * queue is autonomous and must never settle somebody's round.
  */
 
-import { describe, it, expect, beforeEach, vi } from 'vitest'
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 
 // ── Collaborators the sink reaches for on delivery / persistence ──
-const { pushToChat, findSession } = vi.hoisted(() => ({
+const { pushToChat, findSession, writeEvent, saveChatSessionId } = vi.hoisted(() => ({
   pushToChat: vi.fn(() => true),
   findSession: vi.fn(() => ({ instanceId: 'inst-1' })),
+  writeEvent: vi.fn(),
+  saveChatSessionId: vi.fn(),
 }))
 
 vi.mock('../../../../src/main/apps/runtime/im-session-registry', () => ({
@@ -29,15 +31,24 @@ vi.mock('../../../../src/main/apps/runtime/im-channels', () => ({
 }))
 
 vi.mock('../../../../src/main/apps/runtime/session-store', () => ({
-  openSessionWriter: () => ({ writeEvent: vi.fn(), writeTrigger: vi.fn() }),
-  saveChatSessionId: vi.fn(),
+  openSessionWriter: () => ({ writeEvent, writeTrigger: vi.fn() }),
+  saveChatSessionId,
 }))
+
+const { stopGeneration } = vi.hoisted(() => ({ stopGeneration: vi.fn(async () => {}) }))
+
+vi.mock('../../../../src/main/services/agent/control', () => ({ stopGeneration }))
+vi.mock('../../../../src/main/services/agent', () => ({ listResidentSessions: () => [], hasPendingSessionInput: () => false }))
 
 import {
   getAppChatSink,
   hasActiveAppChatRound,
   disposeAppChatSink,
+  onAppChatRoundChange,
+  sweepIdleAppChatSinks,
+  SINK_IDLE_RELEASE_MS,
 } from '../../../../src/main/apps/runtime/app-chat-sink'
+import { AppChatTurnInterrupted } from '../../../../src/main/apps/runtime/turn-ending'
 
 // ============================================
 // Helpers
@@ -97,6 +108,8 @@ describe('app-chat sink turn ownership', () => {
     disposeAppChatSink(IM_KEY)
     pushToChat.mockClear()
     findSession.mockClear()
+    writeEvent.mockReset()
+    saveChatSessionId.mockReset()
   })
 
   it('settles the round with the reply of the turn that follows it', async () => {
@@ -262,6 +275,42 @@ describe('app-chat sink turn ownership', () => {
     await expect(second.done).rejects.toThrow(/session ended/i)
   })
 
+  it.each(['session-id', 'checkpoint'] as const)('settles every round even when retirement cannot persist its %s', async stage => {
+    const sink = makeSink()
+    const onReply = vi.fn()
+    const first = sink.beginRound({ onReply })
+    const second = sink.beginRound({ onReply })
+    sink.onTurnStart()
+    const failure = new Error('Fixture disk write failed')
+    const writer = stage === 'session-id' ? saveChatSessionId : writeEvent
+    writer.mockImplementationOnce(() => { throw failure })
+
+    expect(() => sink.onConsumerStopped(makeResult({
+      capturedSessionId: 'partial-sdk', finalContent: 'Received partial reply',
+    }))).toThrow(failure)
+    await expect(first.done).rejects.toThrow(/session ended/i)
+    await expect(second.done).rejects.toThrow(/session ended/i)
+    expect(hasActiveAppChatRound(IM_KEY)).toBe(false)
+    expect(onReply).not.toHaveBeenCalled()
+    expect(pushToChat).not.toHaveBeenCalled()
+  })
+
+  it('rejects a failed turn even when its partial checkpoint cannot be written', async () => {
+    const sink = makeSink()
+    const onReply = vi.fn()
+    const round = sink.beginRound({ onReply })
+    sink.onTurnStart()
+    const streamError = new Error('Fixture stream failed')
+    const diskError = new Error('Fixture checkpoint write failed')
+    writeEvent.mockImplementationOnce(() => { throw diskError })
+
+    expect(() => sink.onTurnError(streamError, true, makeResult({ finalContent: 'Received partial reply' }))).toThrow(diskError)
+    await expect(round.done).rejects.toBe(streamError)
+    expect(hasActiveAppChatRound(IM_KEY)).toBe(false)
+    expect(onReply).not.toHaveBeenCalled()
+    expect(pushToChat).not.toHaveBeenCalled()
+  })
+
   it('does not push an autonomous turn for a native session', () => {
     const nativeKey = 'app-chat:app-1'
     disposeAppChatSink(nativeKey)
@@ -272,5 +321,469 @@ describe('app-chat sink turn ownership', () => {
     sink.onTurnComplete(makeResult())
 
     expect(pushToChat).not.toHaveBeenCalled()
+  })
+})
+
+/**
+ * A turn that stopped before its answer was done — the step limit, or cut off
+ * other than by the person's own stop. Whoever waits on the round must learn
+ * how it ended, and must hear back even when nothing was written: a silent
+ * resolve left an IM chat's "working on it" message open with no answer.
+ */
+describe('app-chat sink: a turn that stopped short', () => {
+  beforeEach(() => {
+    disposeAppChatSink(IM_KEY)
+    pushToChat.mockClear()
+  })
+
+  it('hands over what was written with the step limit as its ending', async () => {
+    const sink = makeSink()
+    const onReply = vi.fn()
+    const round = sink.beginRound({ onReply })
+
+    sink.onTurnStart()
+    feedText(sink, 'first half of the work')
+    sink.onTurnComplete(makeResult({ reachedMaxTurns: true, maxTurnsLimit: 3 }))
+
+    await expect(round.done).resolves.toBeUndefined()
+    expect(onReply).toHaveBeenCalledWith('first half of the work', { kind: 'max_turns', limit: 3 })
+  })
+
+  it('still answers the round when the step limit came before any text', async () => {
+    const sink = makeSink()
+    const onReply = vi.fn()
+    const round = sink.beginRound({ onReply })
+
+    sink.onTurnStart()
+    sink.onTurnComplete(makeResult({ reachedMaxTurns: true, maxTurnsLimit: 3, hasMeaningfulContent: false }))
+
+    await expect(round.done).resolves.toBeUndefined()
+    expect(onReply).toHaveBeenCalledWith('', { kind: 'max_turns', limit: 3 })
+  })
+
+  it('marks a turn cut off after writing something as interrupted', async () => {
+    const sink = makeSink()
+    const onReply = vi.fn()
+    sink.beginRound({ onReply })
+
+    sink.onTurnStart()
+    feedText(sink, 'partial')
+    sink.onTurnComplete(makeResult({ isInterrupted: true }))
+
+    expect(onReply).toHaveBeenCalledWith('partial', { kind: 'interrupted' })
+  })
+
+  it('fails a turn cut off before writing anything in a way its caller can tell apart', async () => {
+    const sink = makeSink()
+    const round = sink.beginRound({})
+
+    sink.onTurnStart()
+    sink.onTurnComplete(makeResult({ isInterrupted: true, hasMeaningfulContent: false }))
+
+    await expect(round.done).rejects.toBeInstanceOf(AppChatTurnInterrupted)
+  })
+
+  it('adds no ending to a finished answer, nor to one the person stopped', () => {
+    const sink = makeSink()
+    const onReply = vi.fn()
+    sink.beginRound({ onReply })
+    sink.onTurnStart()
+    feedText(sink, 'complete answer')
+    sink.onTurnComplete(makeResult())
+
+    sink.beginRound({ onReply })
+    sink.onTurnStart()
+    feedText(sink, 'stopped halfway')
+    sink.onTurnComplete(makeResult({ wasAborted: true, isInterrupted: true }))
+
+    expect(onReply.mock.calls).toEqual([['complete answer'], ['stopped halfway']])
+  })
+
+  it('notes the step limit on a turn the digital human started itself', () => {
+    const sink = makeSink()
+    sink.onTurnStart()
+    feedText(sink, 'background follow-up')
+    sink.onTurnComplete(makeResult({ reachedMaxTurns: true, maxTurnsLimit: 3 }))
+
+    expect(pushToChat).toHaveBeenCalledTimes(1)
+    const pushed = (pushToChat.mock.calls[0] as unknown[])[1] as string
+    expect(pushed).toBe('background follow-up\n\n（已达到单次最多 3 步的上限，回复“继续”可接着做）')
+  })
+  it('answers a message that joined the turn with the same single reply, never a second push', async () => {
+    const sink = makeSink()
+    const askerReply = vi.fn()
+    const joinedReply = vi.fn()
+    const round = sink.beginRound({ onReply: askerReply })
+    sink.onTurnStart()
+    const joined = sink.observeLiveTurn({ onReply: joinedReply })
+    feedText(sink, 'one answer')
+    sink.onTurnComplete(makeResult())
+    await round.done
+    await joined.done
+    expect(askerReply).toHaveBeenCalledTimes(1)
+    expect(joinedReply).not.toHaveBeenCalled()
+    expect(pushToChat).not.toHaveBeenCalled()
+  })
+
+  it('tells every joined message the answer even when its delivery is withheld', async () => {
+    const sink = makeSink()
+    const askerResult = vi.fn()
+    const joinedReply = vi.fn()
+    const joinedResult = vi.fn()
+    const round = sink.beginRound({ onReply: vi.fn(), onResult: askerResult })
+    sink.onTurnStart()
+    const joined = sink.observeLiveTurn({ onReply: joinedReply, onResult: joinedResult })
+    feedText(sink, 'one answer')
+    sink.onTurnComplete(makeResult())
+    await round.done
+    await joined.done
+    expect(joinedReply).not.toHaveBeenCalled()
+    expect(joinedResult).toHaveBeenCalledWith('one answer')
+    expect(askerResult).toHaveBeenCalledWith('one answer')
+    expect(pushToChat).not.toHaveBeenCalled()
+  })
+
+  it('settles an addition a stop took back unread without the reply of the turn it never reached', async () => {
+    const sink = makeSink()
+    const askerReply = vi.fn()
+    const joinedReply = vi.fn()
+    const joinedResult = vi.fn()
+    const round = sink.beginRound({ onReply: askerReply })
+    sink.onTurnStart()
+    const joined = sink.observeLiveTurn({ onReply: joinedReply, onResult: joinedResult, onProgress: vi.fn() })
+    joined.cancel()
+    await expect(joined.done).resolves.toBeUndefined()
+    feedText(sink, 'partial answer to the first message')
+    sink.onTurnComplete(makeResult({ wasAborted: true }))
+    await round.done
+    expect(askerReply.mock.calls[0]?.[0]).toBe('partial answer to the first message')
+    expect(joinedReply).not.toHaveBeenCalled()
+    expect(joinedResult).not.toHaveBeenCalled()
+    expect(sink.hasActiveRound()).toBe(false)
+  })
+
+  it('lets one joined message deliver the reply of a turn nobody asked for', async () => {
+    const sink = makeSink()
+    const first = vi.fn()
+    const second = vi.fn()
+    sink.onTurnStart()
+    const a = sink.observeLiveTurn({ onReply: first })
+    const b = sink.observeLiveTurn({ onReply: second })
+    feedText(sink, 'one answer')
+    sink.onTurnComplete(makeResult())
+    await Promise.all([a.done, b.done])
+    expect(first).toHaveBeenCalledTimes(1)
+    expect(second).not.toHaveBeenCalled()
+    expect(pushToChat).not.toHaveBeenCalled()
+  })
+})
+
+/**
+ * The settlement guarantees above all depend on the session *reporting*
+ * something. A session that simply never produces a turn — a resume against a
+ * transcript a crashed process left broken, an engine that failed to launch —
+ * reports nothing at all, and the caller was left awaiting a reply that could
+ * no longer arrive. To the user that is a message sent into silence: no answer,
+ * no error, nothing to act on.
+ */
+describe('app-chat sink undelivered messages', () => {
+  beforeEach(() => {
+    disposeAppChatSink(IM_KEY)
+    vi.useFakeTimers()
+  })
+
+  afterEach(() => {
+    vi.useRealTimers()
+  })
+
+  it('gives up waiting on a message no turn ever claims', async () => {
+    const sink = makeSink()
+    const round = sink.beginRound({})
+
+    await vi.advanceTimersByTimeAsync(90_000)
+
+    await expect(round.done).rejects.toThrow(/stopped waiting/i)
+  })
+
+  it('bounds a continuation observer added after the preceding turn already completed', async () => {
+    const sink = makeSink()
+    const round = sink.beginRound({})
+    sink.onTurnStart()
+    sink.onTurnComplete(makeResult())
+    await round.done
+    const continuation = sink.observeLiveTurn({})
+    expect(sink.hasActiveRound()).toBe(true)
+    await vi.advanceTimersByTimeAsync(90_000)
+    await expect(continuation.done).rejects.toThrow(/stopped waiting/i)
+    expect(sink.hasActiveRound()).toBe(false)
+  })
+
+  it('announces every moment the conversation can stop awaiting an answer', async () => {
+    // Waiters (a person's addition, IM messages buffered behind the turn) are
+    // woken by these and nothing else: a moment left out is a wait that never ends.
+    const changes: string[] = []
+    const unsubscribe = onAppChatRoundChange((conversationId) => changes.push(conversationId))
+    const sink = makeSink()
+    const count = () => changes.length
+
+    sink.beginRound({}).cancel()
+    expect(count()).toBe(1)
+
+    const answered = sink.beginRound({})
+    sink.onTurnStart()
+    expect(count()).toBe(2)
+    sink.onTurnComplete(makeResult())
+    expect(count()).toBe(3)
+    await answered.done
+
+    const failed = sink.beginRound({})
+    sink.onTurnStart()
+    sink.onTurnError(new Error('model overloaded'))
+    expect(count()).toBe(5)
+    await expect(failed.done).rejects.toThrow('model overloaded')
+
+    const unclaimed = sink.beginRound({})
+    await vi.advanceTimersByTimeAsync(90_000)
+    expect(count()).toBe(6)
+    await expect(unclaimed.done).rejects.toThrow(/stopped waiting/i)
+
+    const dropped = sink.beginRound({})
+    sink.onConsumerStopped()
+    expect(count()).toBe(7)
+    await expect(dropped.done).rejects.toThrow(/session ended/i)
+
+    unsubscribe()
+    expect(new Set(changes)).toEqual(new Set([IM_KEY]))
+  })
+
+  it('leaves a message alone while a turn is running', async () => {
+    const sink = makeSink()
+    const round = sink.beginRound({})
+    sink.onTurnStart()
+
+    // A turn legitimately working for far longer than the deadline is not late.
+    await vi.advanceTimersByTimeAsync(300_000)
+    feedText(sink, 'took a while')
+    sink.onTurnComplete(makeResult())
+
+    await expect(round.done).resolves.toBeUndefined()
+  })
+
+  // Only idle time counts: a queued message is waiting on the turn ahead of it,
+  // not on a dead session, and must not be failed for the queue's own depth.
+  it('does not fail a queued message waiting behind a long turn', async () => {
+    const sink = makeSink()
+    const first = sink.beginRound({})
+    const second = sink.beginRound({})
+
+    sink.onTurnStart()
+    await vi.advanceTimersByTimeAsync(300_000)
+    sink.onTurnComplete(makeResult({ finalContent: 'first answer' }))
+
+    sink.onTurnStart()
+    sink.onTurnComplete(makeResult({ finalContent: 'second answer' }))
+
+    await expect(first.done).resolves.toBeUndefined()
+    await expect(second.done).resolves.toBeUndefined()
+  })
+
+  // A turn the digital human started on its own claims no round, so the sink
+  // has no round to point at while it runs — but the engine is plainly alive,
+  // and a message sent during it is queued behind real work, not lost.
+  it('does not fail a message sent during a turn the digital human started itself', async () => {
+    const sink = makeSink()
+    sink.onTurnStart()                    // autonomous: nothing queued yet
+
+    const round = sink.beginRound({})
+    await vi.advanceTimersByTimeAsync(300_000)
+
+    feedText(sink, 'background work finished')
+    sink.onTurnComplete(makeResult())
+
+    sink.onTurnStart()                    // the turn this message caused
+    feedText(sink, 'your answer')
+    sink.onTurnComplete(makeResult())
+
+    await expect(round.done).resolves.toBeUndefined()
+  })
+
+  it('starts the clock again for the next message once a turn ends', async () => {
+    const sink = makeSink()
+    const first = sink.beginRound({})
+    sink.onTurnStart()
+    sink.onTurnComplete(makeResult({ finalContent: 'answered' }))
+    await expect(first.done).resolves.toBeUndefined()
+
+    const second = sink.beginRound({})
+    await vi.advanceTimersByTimeAsync(90_000)
+
+    await expect(second.done).rejects.toThrow(/stopped waiting/i)
+  })
+
+  // Giving up the wait must not give up the message's place in line. The turn
+  // it was dispatched for may still be coming, and ownership here is decided by
+  // order — so dropping it out of the queue would hand its answer to whatever
+  // was sent next, which is the very defect this module exists to prevent.
+  it('does not hand a late reply to the next message', async () => {
+    const sink = makeSink()
+    const first = sink.beginRound({})
+    await vi.advanceTimersByTimeAsync(90_000)
+    await expect(first.done).rejects.toThrow(/stopped waiting/i)
+
+    const secondReply = vi.fn()
+    const second = sink.beginRound({ onReply: secondReply })
+
+    // The abandoned message's turn finally arrives.
+    sink.onTurnStart()
+    feedText(sink, 'answer to the first message')
+    sink.onTurnComplete(makeResult())
+    expect(secondReply).not.toHaveBeenCalled()
+
+    sink.onTurnStart()
+    feedText(sink, 'answer to the second message')
+    sink.onTurnComplete(makeResult())
+
+    await expect(second.done).resolves.toBeUndefined()
+    expect(secondReply).toHaveBeenCalledWith('answer to the second message')
+  })
+
+  // The kept slot must not read as live work: every later message would be
+  // buffered as a supplement to a turn nobody is waiting for.
+  it('does not leave the conversation looking busy after giving up', async () => {
+    const sink = makeSink()
+    const round = sink.beginRound({})
+    expect(hasActiveAppChatRound(IM_KEY)).toBe(true)
+
+    await vi.advanceTimersByTimeAsync(90_000)
+    await expect(round.done).rejects.toThrow(/stopped waiting/i)
+
+    expect(hasActiveAppChatRound(IM_KEY)).toBe(false)
+  })
+
+  it('does not fail a message the caller already withdrew', async () => {
+    const sink = makeSink()
+    const round = sink.beginRound({})
+    round.cancel()
+
+    await vi.advanceTimersByTimeAsync(90_000)
+
+    await expect(round.done).resolves.toBeUndefined()
+  })
+})
+
+// ============================================
+// Ending a turn that asked the user a question
+// ============================================
+
+describe('app-chat sink escalation cut', () => {
+  beforeEach(() => {
+    disposeAppChatSink(IM_KEY)
+    stopGeneration.mockClear()
+  })
+
+  /** One tool call and its result, as the SDK delivers them. */
+  function feedToolCall(sink: ReturnType<typeof makeSink>, id: string) {
+    sink.onRawMessage({ type: 'assistant', message: { content: [{ type: 'tool_use', id, name: 'mcp__halo-report__report_to_user' }] } })
+  }
+  function feedToolResult(sink: ReturnType<typeof makeSink>, id: string) {
+    sink.onRawMessage({ type: 'user', message: { content: [{ type: 'tool_result', tool_use_id: id }] } })
+  }
+
+  it('ends the turn once the question it asked has its tool result', () => {
+    const sink = makeSink()
+    sink.onTurnStart()
+    feedToolCall(sink, 'call-1')
+    sink.noteAskedUser()
+
+    expect(stopGeneration).not.toHaveBeenCalled()
+
+    feedToolResult(sink, 'call-1')
+
+    expect(stopGeneration).toHaveBeenCalledWith(IM_KEY, { reason: 'internal' })
+  })
+
+  it('leaves a turn that asked nothing alone', () => {
+    const sink = makeSink()
+    sink.onTurnStart()
+    feedToolCall(sink, 'call-1')
+    feedToolResult(sink, 'call-1')
+    feedText(sink, 'carrying on')
+
+    expect(stopGeneration).not.toHaveBeenCalled()
+  })
+
+  it('ends the turn once, however many messages follow', () => {
+    const sink = makeSink()
+    sink.onTurnStart()
+    feedToolCall(sink, 'call-1')
+    sink.noteAskedUser()
+    feedToolResult(sink, 'call-1')
+    feedText(sink, 'still talking')
+    feedToolCall(sink, 'call-2')
+    feedToolResult(sink, 'call-2')
+
+    expect(stopGeneration).toHaveBeenCalledTimes(1)
+  })
+
+  it('does not carry the question over into the next turn', () => {
+    const sink = makeSink()
+    sink.onTurnStart()
+    feedToolCall(sink, 'call-1')
+    sink.noteAskedUser()
+    feedToolResult(sink, 'call-1')
+    sink.onTurnComplete(makeResult({ wasAborted: true }))
+    stopGeneration.mockClear()
+
+    sink.onTurnStart()
+    feedToolCall(sink, 'call-2')
+    feedToolResult(sink, 'call-2')
+
+    expect(stopGeneration).not.toHaveBeenCalled()
+  })
+})
+
+describe('idle sink release', () => {
+  it('releases only idle sinks without a round and without a resident session', () => {
+    const idle = makeSink('app-chat:app-1:wecom-bot:group:idle')
+    const resident = makeSink('app-chat:app-1:wecom-bot:group:resident')
+    const later = Date.now() + SINK_IDLE_RELEASE_MS + 1
+
+    expect(sweepIdleAppChatSinks((id) => id.endsWith(':resident'), Date.now())).toBe(0)
+    expect(sweepIdleAppChatSinks((id) => id.endsWith(':resident'), later)).toBeGreaterThanOrEqual(1)
+
+    // The resident one is kept; the idle one is rebuilt fresh on next use.
+    expect(makeSink('app-chat:app-1:wecom-bot:group:resident')).toBe(resident)
+    expect(makeSink('app-chat:app-1:wecom-bot:group:idle')).not.toBe(idle)
+    disposeAppChatSink('app-chat:app-1:wecom-bot:group:idle')
+    disposeAppChatSink('app-chat:app-1:wecom-bot:group:resident')
+  })
+})
+
+
+describe('app-chat sink live-input envelope', () => {
+  beforeEach(() => disposeAppChatSink(IM_KEY))
+
+  it('uses captured preparation and refuses it after configuration changes', () => {
+    const sink = makeSink()
+    let current = true
+    const prepare = vi.fn((text: string) => ({ text: `prepared ${text}` }))
+    sink.setTurnIdentity('owner', () => current, prepare)
+    expect(sink.prepareLiveInput('new message')).toEqual({ text: 'prepared new message' })
+    current = false
+    expect(sink.getTurnIdentity()).toBeUndefined()
+    expect(sink.prepareLiveInput('later message')).toBe(false)
+    expect(prepare).toHaveBeenCalledTimes(1)
+  })
+
+  it('clears captured preparation when the session ends or its sink is disposed', () => {
+    const sink = makeSink()
+    const prepare = vi.fn((text: string) => ({ text }))
+    sink.setTurnIdentity('owner', () => true, prepare)
+    sink.onConsumerStopped()
+    expect(sink.prepareLiveInput('ended')).toBe(false)
+    sink.setTurnIdentity('owner', () => true, prepare)
+    sink.dispose()
+    expect(sink.prepareLiveInput('disposed')).toBe(false)
+    expect(prepare).not.toHaveBeenCalled()
   })
 })

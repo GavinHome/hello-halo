@@ -27,33 +27,85 @@
    ============================================ */
 
 :root {
-  /* Dark theme (default) */
-  --background: 0 0% 4%;
-  --foreground: 0 0% 98%;
-  --card: 0 0% 7%;
-  --card-foreground: 0 0% 98%;
-  --popover: 0 0% 7%;
-  --popover-foreground: 0 0% 98%;
+  /* Dark theme (default). Neutrals carry a cool tint (H~220). Each surface
+     steps ~3–5 L* above the one below; fills are
+     reserved for raised or interactive elements so the canvas does not read
+     as a gray wash. */
+  --background: 220 14% 11%;
+  /* Browser gutters match Chromium's default page surface in either theme. */
+  --browser-background: 0 0% 100%;
+  /* Blocking portals cover resource sheets and the search overlay (100/101). */
+  --layer-workspace-trigger: 60;
+  --layer-workspace-sheet: 70;
+  --layer-global-modal: 120;
+  --foreground: 223 17% 92%;
+  --card: 220 12% 15%;
+  --card-foreground: 223 17% 92%;
+  --popover: 220 12% 15%;
+  --popover-foreground: 223 17% 92%;
   --primary: 217 91% 60%;
+  /* `text-primary` and links read this (tailwind.config textColor): lighter
+     than the fill so it clears 4.5 on background, card/popover and secondary. */
+  --primary-text: 217 91% 66%;
   --primary-foreground: 0 0% 100%;
-  --secondary: 0 0% 15%;
-  --secondary-foreground: 0 0% 98%;
-  --muted: 0 0% 15%;
-  --muted-foreground: 0 0% 64%;
+  --primary-hover: 221 83% 53%;
+  --secondary: 220 12% 19%;
+  --secondary-foreground: 223 17% 92%;
+  --muted: 220 12% 19%;
+  --muted-foreground: 217 12% 75%;
+  /* Tertiary text, used on 10–13px labels. Clears WCAG AA 4.5 on every
+     surface it sits on, hovered rows (--surface-hover) included. */
+  --subtle-foreground: 220 9% 68%;
+  /* Low-frequency icon controls only (never text): recedes until hovered.
+     Kept at the 3:1 floor for interactive graphics, including on the
+     secondary-tinted toolbars and hovered rows it sits on. */
+  --faint-foreground: 220 8% 57%;
   --accent: 217 91% 60%;
   --accent-foreground: 0 0% 100%;
+  --accent-on-dark: 212 96% 78%;
+  --surface-hover: 220 11% 22%;
   --destructive: 0 62% 50%;
   --destructive-foreground: 0 0% 98%;
-  --border: 0 0% 20%;
-  --input: 0 0% 15%;
+  --border: 220 10% 26%;
+  /* Soft and faint dividers. Solid here: an alpha border on a dark canvas
+     all but vanishes. The light theme defines them as alphas of --border
+     instead. */
+  --border-soft: hsl(220 10% 22%);
+  --border-faint: hsl(220 10% 19%);
+  --input: 220 12% 14%;
   --ring: 217 91% 60%;
   --radius: 0.75rem;
+  /* Chat transcript and composer column. Fixed, not fluid: on wide screens a
+     fluid column makes lines too long to read comfortably. */
+  --chat-reading-width: 800px;
+
+  --shadow-soft: 0 12px 32px -12px rgba(0, 0, 0, .55);
+  --shadow-pop: 0 20px 48px -16px rgba(0, 0, 0, .7);
+  --dur-fast: 120ms;
+  --dur: 160ms;
+  --dur-slow: 240ms;
+  --ease: cubic-bezier(.2, .6, .2, 1);
 
   /* Halo brand colors */
   --halo-glow: 217 91% 60%;
   --halo-success: 142 71% 45%;
   --halo-warning: 38 92% 50%;
+  /* `text-halo-success` / `text-halo-warning` read these (tailwind.config textColor). */
+  --halo-success-text: var(--halo-success);
+  --halo-warning-text: var(--halo-warning);
   --halo-error: 0 62% 50%;
+
+  /* Diff text (+N / −N, status letters) and, at low alpha, line and word
+     backgrounds. Separate from the brand colors because small text on the
+     card surface must clear 4.5:1 in both themes. */
+  --diff-add: 142 71% 45%;
+  --diff-del: 0 72% 63%;
+  --diff-mod: 38 92% 50%;
+  /* Diff-only syntax, contrasted against layered line and word tints. */
+  --diff-syntax-keyword: 277 45% 80%;
+  --diff-syntax-function: 213 65% 80%;
+  --diff-syntax-string: 146 40% 76%;
+  --diff-syntax-number: 32 50% 78%;
 
   /* App type accent colors (skill = cyan, mcp = amber). Brightened for the
      dark default; .light carries the source values. */
@@ -65,33 +117,64 @@
   --hero-to: 262 83% 64%;
 }
 
-/* Light theme */
+/* Light theme. White-canvas ladder: --background is pure white (the content
+   canvas) and every other surface steps DOWN from it — card 98% (subtle, for
+   chrome panels), muted/input 94%, hover 92%, border 89% — so hierarchy reads
+   from lightness, not from outlines. Keep muted ≥5 points below the canvas and
+   border ≥9, or fills and dividers wash out (the v2 prototype's mistake). */
 .light {
   --background: 0 0% 100%;
-  --foreground: 0 0% 9%;
-  --card: 0 0% 98%;
-  --card-foreground: 0 0% 9%;
+  --foreground: 222 16% 11%;
+  --card: 220 14% 98%;
+  --card-foreground: 222 16% 11%;
   --popover: 0 0% 100%;
-  --popover-foreground: 0 0% 9%;
+  --popover-foreground: 222 16% 11%;
   --primary: 217 91% 55%;
+  --primary-text: var(--primary);
   --primary-foreground: 0 0% 100%;
-  --secondary: 0 0% 94%;
-  --secondary-foreground: 0 0% 20%;
-  --muted: 0 0% 94%;
-  --muted-foreground: 0 0% 45%;
+  --primary-hover: 221 83% 48%;
+  --secondary: 220 14% 94%;
+  --secondary-foreground: 222 16% 11%;
+  --muted: 220 14% 94%;
+  --muted-foreground: 218 9% 39%;
+  /* Darkened from the prototype's 58%, which scores only 2.98 on light
+     surfaces — see the dark-theme note above. 46% clears 4.5. */
+  --subtle-foreground: 221 10% 46%;
+  --faint-foreground: 220 9% 52%;
   --accent: 217 91% 55%;
   --accent-foreground: 0 0% 100%;
+  /* Falls back to --primary in light mode, matching the prototype's
+     `[data-theme="light"]` override of the same on-dark-only accent text. */
+  --accent-on-dark: 217 91% 55%;
+  --surface-hover: 220 14% 92%;
   --destructive: 0 72% 51%;
   --destructive-foreground: 0 0% 100%;
-  --border: 0 0% 90%;
-  --input: 0 0% 94%;
+  --border: 220 12% 89%;
+  --border-soft: hsl(var(--border) / 0.6);
+  --border-faint: hsl(var(--border) / 0.5);
+  --input: 220 14% 94%;
   --ring: 217 91% 55%;
+
+  --shadow-soft: 0 12px 32px -14px rgba(20, 24, 40, .14);
+  --shadow-pop: 0 20px 48px -18px rgba(20, 24, 40, .22);
 
   /* Halo brand colors (adjusted for light) */
   --halo-glow: 217 91% 55%;
   --halo-success: 142 71% 40%;
   --halo-warning: 38 92% 45%;
+  /* Text needs a darker shade than fills: these clear 4.5 on white, card,
+     secondary, hovered rows and the tinted status chips. */
+  --halo-success-text: 142 71% 25%;
+  --halo-warning-text: 38 92% 27%;
   --halo-error: 0 72% 51%;
+
+  --diff-add: 142 72% 29%;
+  --diff-del: 0 72% 45%;
+  --diff-mod: 32 100% 32%;
+  --diff-syntax-keyword: 277 55% 32%;
+  --diff-syntax-function: 213 70% 30%;
+  --diff-syntax-string: 146 20% 28%;
+  --diff-syntax-number: 32 50% 28%;
 
   /* App type accent colors — light values (skill #0d9488, mcp #b26a00) */
   --app-skill: 175 84% 32%;
@@ -100,6 +183,11 @@
 
 * {
   border-color: hsl(var(--border));
+}
+
+/* Tailwind's preflight gives buttons a pointer but not selects. */
+select:not(:disabled) {
+  cursor: pointer;
 }
 
 html {
@@ -113,7 +201,7 @@ html.light {
 body {
   background-color: hsl(var(--background));
   color: hsl(var(--foreground));
-  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', 'PingFang SC', 'Microsoft YaHei', Arial, sans-serif;
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
   overflow: hidden;
@@ -122,10 +210,12 @@ body {
 }
 
 /* Safe area inset variables.
- * On Android 15+ (edge-to-edge enforced), env(safe-area-inset-*) returns 0px in WebView.
- * Capacitor 8's built-in SystemBars plugin injects --safe-area-inset-* CSS custom properties
- * with the correct pixel values. We use those as primary source, falling back to env() for
- * iOS Safari and other platforms where env() works natively. */
+ * In the Android app's WebView env(safe-area-inset-*) can report 0px, so the
+ * --safe-area-inset-* custom properties carry the real values: Capacitor 8's
+ * built-in SystemBars plugin writes them from Android 15 on, the app's own
+ * SafeArea plugin writes the top one below that (see api/safe-area.ts). We use
+ * those as primary source, falling back to env() for iOS Safari and other
+ * platforms where env() works natively. */
 :root {
   --sat: var(--safe-area-inset-top, env(safe-area-inset-top, 0px));
   --sar: var(--safe-area-inset-right, env(safe-area-inset-right, 0px));
@@ -177,6 +267,43 @@ body {
   }
 }
 
+/* The phone app keeps clear of the system bars at any width: a phone turned
+ * sideways or a tablet is wider than the mobile breakpoint above. */
+html.platform-capacitor,
+html.platform-capacitor body {
+  position: fixed;
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
+}
+
+html.platform-capacitor #root {
+  position: fixed;
+  top: var(--sat);
+  right: var(--sar);
+  bottom: var(--sab);
+  left: var(--sal);
+  width: auto;
+  height: auto;
+  overflow: hidden;
+}
+
+/* Desktop window edge.
+ * The line between window and desktop is normally the OS's own drop shadow,
+ * which remote-desktop/VDI sessions drop to save bandwidth — leaving the
+ * window with no visible edge at all. Drawing it here keeps the boundary
+ * under any session. Sits above app chrome (NavRail/Header paint to the
+ * window edge and would otherwise cover it) and never takes input, so it
+ * can't interfere with clicks or the title-bar drag region. */
+html.platform-desktop body::after {
+  content: '';
+  position: fixed;
+  inset: 0;
+  z-index: 10000;
+  pointer-events: none;
+  box-shadow: inset 0 0 0 1px hsl(var(--border));
+}
+
 /* For Portal modals rendered outside #root */
 .overlay-safe {
   padding: var(--sat) var(--sar) var(--sab) var(--sal);
@@ -189,6 +316,12 @@ body {
 }
 
 ::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+/* Where both scrollbars meet. Left unstyled it falls back to the UA's opaque
+   square, which reads as a stray light dot on any dark surface. */
+::-webkit-scrollbar-corner {
   background: transparent;
 }
 
@@ -283,6 +416,22 @@ body {
 
 .scrollbar-overlay::-webkit-scrollbar-thumb:hover {
   background: hsl(var(--muted-foreground) / 0.4);
+}
+
+/* Every scrollbar stays hidden until the pointer is over its scroller, or for a
+   moment after the user scrolls it (`data-scrolling`, set by
+   lib/scrollbar-reveal.ts — hover alone misses wheel scrolling under a still
+   pointer). The thumb goes transparent rather than away, so its space never
+   shifts content. More specific than the variants above, so it wins. The two
+   variants that set `scrollbar-color` need their own rule — Chromium ignores
+   ::-webkit-scrollbar styles on elements that set it. */
+:not(:hover):not([data-scrolling])::-webkit-scrollbar-thumb {
+  background: transparent;
+}
+
+.scrollbar-thin:not(:hover):not([data-scrolling]),
+.scrollbar-overlay:not(:hover):not([data-scrolling]) {
+  scrollbar-color: transparent transparent;
 }
 
 /* Light mode: Shiki themes are ['github-dark', 'github-light'].
@@ -435,6 +584,25 @@ body {
   animation: slide-down 0.2s ease-out;
 }
 
+/* Prototype `fadeUp` (`.empty`/`.thread`/`.task-panel`, all opacity 0→1 +
+   translateY 8px→0) — a subtler, shorter entrance than the slide-in-* set
+   above, meant for content that should feel like it settles into place
+   rather than travels in from an edge. */
+@keyframes fade-up {
+  from {
+    opacity: 0;
+    transform: translateY(8px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.animate-fade-up {
+  animation: fade-up 0.2s ease-out;
+}
+
 @keyframes slide-in-top {
   from {
     opacity: 0;
@@ -506,6 +674,74 @@ body {
 
 .animate-scale-in {
   animation: scale-in 0.2s ease-out;
+}
+
+/* Popover entrance — prototype's `.pop`: fade + slight drop, not a scale.
+   Kept separate from scale-in above so this doesn't change that shared
+   modal animation's other consumers. */
+@keyframes pop-in {
+  from {
+    opacity: 0;
+    transform: translateY(-6px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.animate-pop-in {
+  animation: pop-in var(--dur) var(--ease);
+}
+
+/* Composer "+" panel: rises from the composer's top edge, the mirror of pop-in. */
+@keyframes composer-rise {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.animate-composer-rise {
+  animation: composer-rise var(--dur) var(--ease);
+}
+
+/* A row the AI asked the user to look at: one soft wash that fades out. */
+@keyframes composer-attention {
+  0%, 30% {
+    background-color: hsl(var(--primary) / 0.14);
+  }
+  100% {
+    background-color: transparent;
+  }
+}
+
+.animate-composer-attention {
+  animation: composer-attention 2.4s var(--ease);
+}
+
+/* Pulse "seen" item grace-period countdown (PulseList) — the bar drains
+   over the 60s removal window, the label pulses to signal "about to go". */
+@keyframes countdown {
+  from { width: 100%; }
+  to { width: 0; }
+}
+
+.animate-countdown {
+  animation: countdown 60s linear forwards;
+}
+
+@keyframes fadehint {
+  0%, 100% { opacity: 0.5; }
+  50% { opacity: 1; }
+}
+
+.animate-fadehint {
+  animation: fadehint 1.8s var(--ease) infinite;
 }
 
 /* Progress bar animation */
@@ -724,6 +960,27 @@ body {
   animation: tab-appear 0.2s cubic-bezier(0.16, 1, 0.3, 1) forwards;
 }
 
+/* Users who ask the OS to reduce motion get transitions and entrance animations
+ * collapsed to near-zero. Spinners are exempted below: they are the only signal
+ * that work is in progress, so they keep rotating at a slower rate rather than
+ * freezing on an arbitrary frame. */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+
+  .animate-spin,
+  .halo-spin {
+    animation-duration: 2.5s !important;
+    animation-iteration-count: infinite !important;
+  }
+}
+
 /* ============================================
    Tool Card States
    ============================================ */
@@ -794,13 +1051,26 @@ body {
    ============================================ */
 
 .message-user {
-  background: linear-gradient(135deg, hsl(var(--primary) / 0.2), hsl(var(--primary) / 0.1));
-  border: 1px solid hsl(var(--primary) / 0.3);
+  background: hsl(var(--secondary));
 }
 
 .message-assistant {
   background: hsl(var(--card));
-  border: 1px solid hsl(var(--border));
+  border: 1px solid hsl(var(--border) / 0.5);
+}
+
+/* Dark: replies sit on the canvas; a filled card per reply washes the whole
+   transcript gray. With no box, side padding would indent the text past the
+   sender label above it. */
+.theme-dark .message-assistant {
+  background: transparent;
+  border-color: transparent;
+  padding-left: 0;
+  padding-right: 0;
+}
+
+.theme-dark .message-working::before {
+  display: none;
 }
 
 /* Streaming message style */
@@ -902,18 +1172,9 @@ body {
   background: hsl(var(--background));
   border: 1px solid hsl(var(--border));
   border-radius: var(--radius);
-  font-family: 'SF Mono', 'Fira Code', monospace;
+  font-family: 'SF Mono', 'Fira Code', ui-monospace, Consolas, monospace;
   font-size: 0.875rem;
   line-height: 1.5;
-}
-
-/* Artifact card hover effect - subtle, no movement to avoid jitter */
-.artifact-card {
-  transition: background-color 0.15s ease, box-shadow 0.15s ease;
-}
-
-.artifact-card:hover {
-  box-shadow: 0 2px 8px hsl(var(--foreground) / 0.08);
 }
 
 /* Input focus styles */
@@ -1033,12 +1294,75 @@ body {
   animation: search-highlight-pulse 2s ease-out forwards;
 }
 
+/* The pulse's glow extends past the message; transcript rows clip paint to
+   themselves, so lift that for the row being highlighted. */
+[data-transcript-index]:has(.search-highlight) {
+  content-visibility: visible;
+}
+
 .search-term-highlight {
   background-color: hsl(48 96% 53% / 0.3) !important;
   font-weight: 600 !important;
   padding: 2px 4px;
   border-radius: 2px;
   margin: 0 2px;
+}
+
+/* Unified references in rendered text (CSS Custom Highlight API, so the page's
+   DOM is never rewritten): passages waiting in the composer, and the place a
+   card went back to, lit until the highlight is removed (not an animation, so
+   reduced motion still shows it). */
+::highlight(halo-ref) {
+  background-color: hsl(var(--primary) / 0.2);
+}
+
+::highlight(halo-reveal) {
+  background-color: hsl(var(--halo-warning) / 0.32);
+}
+
+/* A file mention in a reply that names a file of the space. Styled like the
+   reply's web links (colour, underline on hover only) and in the inline code's
+   own box, so nothing moves when it turns into a link after the existence check. */
+.markdown-content :is(code, span)[data-file-link] {
+  color: hsl(var(--primary-text));
+  text-underline-offset: 2px;
+  cursor: pointer;
+}
+
+.markdown-content :is(code, span)[data-file-link]:hover {
+  text-decoration: underline;
+}
+
+.markdown-content :is(code, span)[data-file-link]:focus-visible {
+  outline: 2px solid hsl(var(--primary) / 0.5);
+  outline-offset: 1px;
+}
+
+/* A reference chip's count after a reference joined it. The colour carries it when motion is reduced. */
+@keyframes chip-bump {
+  0% {
+    transform: scale(1);
+    color: hsl(var(--primary-text));
+  }
+  35% {
+    transform: scale(1.14);
+  }
+  100% {
+    transform: scale(1);
+  }
+}
+
+.animate-chip-bump {
+  display: inline-block;
+  animation: chip-bump 420ms var(--ease);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  @keyframes chip-bump {
+    0%, 60% {
+      color: hsl(var(--primary-text));
+    }
+  }
 }
 
 /* Drag-over state for input area */
@@ -1078,21 +1402,23 @@ body {
   opacity: 1;
 }
 
+/* Code editor in edit mode (prototype: `.canvas.editing .cc-code`) — tints
+   the editor to signal it's now writable. CodeMirror's own theme paints
+   `.cm-editor`'s background opaque, so it must be overridden here (higher
+   specificity than CodeMirror's single-class rule) for the wrapper's tint
+   to show through. */
+.codemirror-container.is-editing {
+  background-color: hsl(var(--primary) / 0.12);
+  box-shadow: inset 0 0 0 2px hsl(var(--primary) / 0.18);
+}
+
+.codemirror-container.is-editing .cm-editor {
+  background-color: transparent;
+}
+
 /* ============================================
    Pulse - Task Status Indicators
    ============================================ */
-
-/* Pulse dot breathe animation */
-@keyframes pulse-dot-breathe {
-  0%, 100% {
-    opacity: 0.6;
-    transform: scale(1);
-  }
-  50% {
-    opacity: 1;
-    transform: scale(1.3);
-  }
-}
 
 /* Pulse dot pop-in */
 @keyframes pulse-dot-appear {
@@ -1116,12 +1442,10 @@ body {
 
 .pulse-dot-generating {
   background-color: hsl(var(--primary));
-  animation: pulse-dot-breathe 2s ease-in-out infinite;
 }
 
 .pulse-dot-waiting {
   background-color: hsl(var(--halo-warning));
-  animation: pulse-dot-breathe 1.5s ease-in-out infinite;
 }
 
 .pulse-dot-completed {
@@ -1203,7 +1527,125 @@ body {
   background: linear-gradient(
     to bottom,
     hsl(var(--border) / 0.6),
-    hsl(var(--border) / 0.2)
+    hsl(var(--border) / 0.25)
   );
 }
 
+/* ============================================
+   Team office cartoon skin (workstation)
+   ============================================ */
+
+@keyframes ws-bob {
+  0%, 100% { transform: translateY(0); }
+  50% { transform: translateY(-2px); }
+}
+
+@keyframes ws-blink {
+  0%, 49% { opacity: 1; }
+  50%, 100% { opacity: 0.15; }
+}
+
+@keyframes ws-steam {
+  0% { opacity: 0; transform: translateY(2px); }
+  40% { opacity: 0.65; }
+  100% { opacity: 0; transform: translateY(-6px); }
+}
+
+/* Head bob while typing. */
+.ws-bob {
+  transform-box: fill-box;
+  transform-origin: center;
+  animation: ws-bob 2.4s ease-in-out infinite;
+}
+
+/* Blinking screen caret. */
+.ws-blink {
+  animation: ws-blink 1s steps(1) infinite;
+}
+
+/* Rising coffee steam (two offset wisps). */
+.ws-steam,
+.ws-steam-2 {
+  transform-box: fill-box;
+  animation: ws-steam 2.6s ease-in-out infinite;
+}
+.ws-steam-2 {
+  animation-delay: 1s;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .ws-bob,
+  .ws-blink,
+  .ws-steam,
+  .ws-steam-2 {
+    animation: none;
+  }
+}
+
+/* Digital-human avatar that glances and blinks, same rhythm as the animated
+   brand mark (halo-mark-animated.svg). Targets the face group of the
+   boring-avatars "beam" SVG (svg > g[mask] > g > mouth + two eyes); only its
+   children move, since the group's own transform places the face. */
+@keyframes avatar-look { 0%, 100% { translate: -0.8px 0 } 50% { translate: 0.8px 0 } }
+@keyframes avatar-blink { 0%, 44%, 52%, 100% { scale: 1 1 } 48% { scale: 1 .15 } }
+.avatar-alive > svg > g > g > * {
+  animation: avatar-look 2.4s ease-in-out infinite;
+}
+.avatar-alive > svg > g > g > rect {
+  transform-box: fill-box;
+  transform-origin: center;
+  animation: avatar-look 2.4s ease-in-out infinite, avatar-blink 2.4s ease-in-out infinite;
+}
+/* Same motion, only while its own host (e.g. a digital-human card) is
+   hovered or holds focus; a dedicated class so an outer hover never starts it. */
+.avatar-alive-host:hover .avatar-alive-on-hover > svg > g > g > *,
+.avatar-alive-host:focus-within .avatar-alive-on-hover > svg > g > g > * {
+  animation: avatar-look 2.4s ease-in-out infinite;
+}
+.avatar-alive-host:hover .avatar-alive-on-hover > svg > g > g > rect,
+.avatar-alive-host:focus-within .avatar-alive-on-hover > svg > g > g > rect {
+  transform-box: fill-box;
+  transform-origin: center;
+  animation: avatar-look 2.4s ease-in-out infinite, avatar-blink 2.4s ease-in-out infinite;
+}
+/* Lists `rect` too: those rules outrank a bare `*`. */
+@media (prefers-reduced-motion: reduce) {
+  .avatar-alive > svg > g > g > *,
+  .avatar-alive > svg > g > g > rect,
+  .avatar-alive-host:hover .avatar-alive-on-hover > svg > g > g > *,
+  .avatar-alive-host:hover .avatar-alive-on-hover > svg > g > g > rect,
+  .avatar-alive-host:focus-within .avatar-alive-on-hover > svg > g > g > *,
+  .avatar-alive-host:focus-within .avatar-alive-on-hover > svg > g > g > rect { animation: none; }
+}
+
+/* Thinking level slider (ThinkingLevelControl): a thick rounded track filled up
+   to the thumb. `--fill` is the filled share, set inline from the value. */
+.thinking-slider {
+  -webkit-appearance: none;
+  appearance: none;
+  height: 16px;
+  border-radius: 9999px;
+  background: linear-gradient(
+    to right,
+    hsl(var(--primary)) 0 var(--fill, 0%),
+    hsl(var(--secondary)) var(--fill, 0%) 100%
+  );
+  outline: none;
+}
+.thinking-slider::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 22px;
+  height: 22px;
+  border-radius: 9999px;
+  background: hsl(var(--background));
+  border: 1px solid hsl(var(--border));
+  box-shadow: 0 1px 3px rgba(0, 0, 0, .18);
+  transition: transform var(--dur-fast) var(--ease);
+}
+.thinking-slider:active::-webkit-slider-thumb {
+  transform: scale(1.1);
+}
+.thinking-slider:focus-visible {
+  box-shadow: 0 0 0 3px hsl(var(--primary) / .25);
+}

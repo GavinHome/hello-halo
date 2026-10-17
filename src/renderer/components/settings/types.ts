@@ -4,6 +4,7 @@
  */
 
 import type { LucideIcon } from 'lucide-react'
+import type { ChildLocalConnectionInfo } from '../../../shared/types/health'
 
 /**
  * Navigation item for settings sidebar
@@ -63,6 +64,7 @@ export interface HealthCheckResult {
   services: {
     openaiRouter: { port: number | null; responsive: boolean; responseTime?: number; error?: string }
     httpServer: { port: number | null; responsive: boolean; responseTime?: number; error?: string }
+    childLocalConnection?: ChildLocalConnectionInfo
   }
   issues: string[]
   healthy: boolean
@@ -110,7 +112,15 @@ export interface HealthReport {
  * 'downloading' covers the window between finding an update and it being
  * ready to apply, so the row never looks idle while work is in flight.
  */
-export type UpdateCheckPhase = 'idle' | 'checking' | 'downloading' | 'ready' | 'up-to-date' | 'failed'
+export type UpdateCheckPhase =
+  | 'idle'
+  | 'checking'
+  | 'downloading'
+  /** Unpacking beside the running version; no percentage to report. */
+  | 'staging'
+  | 'ready'
+  | 'up-to-date'
+  | 'failed'
 
 /**
  * Update status state

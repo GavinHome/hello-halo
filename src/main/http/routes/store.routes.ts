@@ -9,17 +9,16 @@ import {
   rejectIfRemoteMcpForbiddenAsync,
   storeController,
   storeSlugIsMcp,
+  validateFilePath,
 } from './_shared'
 import {
   applyUpgrade,
+  previewUpgrade,
   checkUpgradesNow,
   publish,
   getPublishPreview,
   findAppByPublishSlug,
-  unpackDhpkg,
 } from '../../store'
-import { getAppManager } from '../../apps/manager'
-import { getAppRuntime } from '../../apps/runtime'
 import type { AppType } from '../../../shared/apps/spec-types'
 
 export function registerStoreRoutes(app: Express): void {
@@ -31,7 +30,7 @@ export function registerStoreRoutes(app: Express): void {
       const { search, type, category, page, pageSize, locale } = req.body as Record<string, unknown>
       const result = await storeController.queryStoreApps({
         search: typeof search === 'string' ? search : undefined,
-        type: typeof type === 'string' ? type : undefined,
+        type: typeof type === 'string' ? (type as AppType) : undefined,
         category: typeof category === 'string' ? category : undefined,
         page: typeof page === 'number' ? page : undefined,
         pageSize: typeof pageSize === 'number' ? pageSize : undefined,
@@ -329,6 +328,15 @@ export function registerStoreRoutes(app: Express): void {
     }
   })
 
+  // GET /api/store/updates/:appId/preview — what the available update would keep at the user's version
+  app.get('/api/store/updates/:appId/preview', async (req: Request, res: Response) => {
+    try {
+      res.json({ success: true, data: await previewUpgrade(req.params.appId) })
+    } catch (error) {
+      res.json({ success: false, error: (error as Error).message })
+    }
+  })
+
   // POST /api/store/publish/preview — preview publish metadata
   app.post('/api/store/publish/preview', async (req: Request, res: Response) => {
     try {
@@ -390,35 +398,26 @@ export function registerStoreRoutes(app: Express): void {
   app.post('/api/store/import-dhpkg', async (req: Request, res: Response) => {
     try {
       const { filePath, spaceId } = req.body as { filePath?: string; spaceId?: string | null }
-      if (!filePath) {
-        res.status(400).json({ success: false, error: 'Missing filePath' })
+      // Remote callers may only import from inside a space directory — an
+      // unchecked path here would read any file the app can reach.
+      const validatedPath = validateFilePath(res, filePath)
+      if (!validatedPath) return
+
+      const buf = await readFile(validatedPath)
+      const result = await storeController.importDhpkg(buf, spaceId)
+      if (!result.success) {
+        // The raw message may embed the resolved filesystem path; only the
+        // fixed not-ready message is safe to pass through.
+        res.json({ success: false, error: result.error === storeController.APP_MANAGER_NOT_READY ? result.error : 'Failed to import package' })
         return
       }
 
-      const buf = await readFile(filePath)
-      const { spec } = await unpackDhpkg(buf)
-
-      const manager = getAppManager()
-      if (!manager) {
-        res.json({ success: false, error: 'App Manager not ready' })
-        return
-      }
-
-      const appId = await manager.install(spaceId ?? null, spec, {})
-      const runtime = getAppRuntime()
-      if (runtime) {
-        try {
-          await runtime.activate(appId)
-        } catch (err) {
-          console.warn(
-            `[HTTP] POST /api/store/import-dhpkg activate failed (non-fatal): ${(err as Error).message}`
-          )
-        }
-      }
-
-      res.json({ success: true, data: { appId } })
+      res.json(result)
     } catch (error) {
-      res.json({ success: false, error: (error as Error).message })
+      const err = error as Error
+      console.error('[HTTP] POST /api/store/import-dhpkg failed:', err.stack || err.message)
+      // Echoing the raw message would leak the resolved filesystem path.
+      res.json({ success: false, error: 'Failed to import package' })
     }
   })
 

@@ -12,9 +12,13 @@ export const spaceRpc = {
   getSpace: rawRpcMethod('space:get'),
   openSpaceFolder: rawRpcMethod('space:open-folder'),
   updateSpace: rawRpcMethod('space:update'),
+  setSpaceWorkingDir: rawRpcMethod('space:set-working-dir'),
   getDefaultSpacePath: rawRpcMethod('space:get-default-path'),
   selectFolder: rawRpcMethod('dialog:select-folder'),
   updateSpacePreferences: rawRpcMethod('space:update-preferences'),
   getSpacePreferences: rawRpcMethod('space:get-preferences'),
+  getSpaceMemoryStatus: rawRpcMethod('space:memory-status'),
+  consolidateSpaceMemory: rawRpcMethod('space:memory-consolidate'),
   reorderSpaces: rawRpcMethod('space:reorder'),
+  forgetSpace: rawRpcMethod('space:forget'),
 }

@@ -263,6 +263,9 @@ buffer (`replay` RPC) so it can reproduce colors/cursor faithfully.
 - IPC/HTTP request ops: `ipc/terminal.ts` (+ `terminalRpc` contract) and
   `http/routes/terminal.routes.ts`. Events `terminal:data` / `terminal:lifecycle`
   are forwarded from the global event bus to the renderer and WS clients.
+  `terminal:lifecycle` carries `created` / `exited` / `title` / `ai-activity` /
+  `touched` / `removed` (§11.6) — one channel, so a new kind costs no transport
+  wiring.
 - Remote keyboard/resize use dedicated WS inbound messages
   (`terminal-input` / `terminal-resize` in `http/websocket.ts`) for low-latency
   takeover, with an HTTP fallback. Flow control adds `terminal-attach` /
@@ -292,6 +295,18 @@ buffer (`replay` RPC) so it can reproduce colors/cursor faithfully.
    Bash tool. The tool description constrains reading during credential entry.
 5. The pty-host worker is forked lazily on first terminal use — never during
    startup phases.
+6. **Every removal is announced; nothing downstream re-derives retention.** A
+   session leaves main's registry on worker eviction or a kill of an
+   already-exited session, and each path emits a `removed` lifecycle event
+   (`TerminalContext.dropSession`) after its `exited`. The worker's bound is
+   *not* reproducible upstream: `pruneExitedSessions(keepId)` exempts the
+   session that just exited, and orders the rest by `lastActivityAt`, which
+   `onExit` does not refresh — so a terminal that idled for hours before dying
+   is at once the one the worker keeps and the "oldest" one any copied rule
+   evicts first. A mirror bounding itself by that rule drops precisely the entry
+   the user is watching, and a viewer re-deriving liveness from the missing
+   entry re-opens its keyboard onto a dead pty (hence the latch in
+   `lib/terminal-liveness.ts`).
 
 ## 12) aiTouched & the tab-close policy
 
@@ -317,20 +332,20 @@ Two surfaces key off it, replacing the old `owner === 'ai'` checks:
     session prompts keep-in-background vs terminate (killing a pty is
     irreversible, so keep is the safe default).
   - `disposeOnBulkClose` — non-interactive bulk teardown (`closeAll`, and
-    `enterSpace` → `closeAll` on space switch): **no prompt**; terminate the
-    user's own terminals (the tab was their only handle), keep `aiTouched` ones
-    running (they remain in the tray). This holds the invariant *every live pty
-    is reachable via a tab or the tray* on every tab-removal path.
+    `forgetSpace` when a space is deleted or removed from the list): **no
+    prompt**; terminate the user's own terminals (the tab was their only
+    handle), keep `aiTouched` ones running (they remain in the tray). This
+    holds the invariant *every live pty is reachable via a tab or the tray* on
+    every tab-removal path. A space switch removes no tab: the space's tabs are
+    parked with it, terminals running, and come back on return.
 - **Live-sessions tray** (`useLiveSessions`): shows every running `aiTouched`
   terminal **scoped to the current space** (`spaceId === currentSpaceId`), so a
   user terminal the AI drove stays perceivable and stoppable after its tab is
   closed, without leaking another space's sessions into this one (it reappears on
-  return). The AI browser is a single active view destroyed on space switch, so
-  it needs no such filter.
+  return). AI browser pages are listed the same way.
 
-Contrast with the AI browser (`services/ai-browser`): its WebContents is
-**tab-bound** (the canvas tab's `browserViewId` *is* the AI's `activeViewId`), so
-closing the tab / `closeAll` / space switch destroys it — a page is cheap to
-re-open. A pty's running process and state are not recreatable, so the terminal
-deliberately decouples and keeps `aiTouched` work alive with the tray as the
-reclaim path.
+Contrast with the AI browser (`services/ai-browser`): a canvas tab only borrows
+an AI page (its `browserViewId` is the page's view), so closing the tab hides
+the page and its conversation keeps it. A pty's running process and state are
+not recreatable either, so the terminal decouples the same way and keeps
+`aiTouched` work alive with the tray as the reclaim path.

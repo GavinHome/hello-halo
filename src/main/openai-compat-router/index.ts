@@ -39,8 +39,10 @@ export {
   stopOpenAICompatRouter,
   getRouterInfo,
   isRouterRunning,
-  createApp
+  createApp,
+  setRequestCredentialResolver
 } from './server'
+export type { RequestCredentials, RequestCredentialResolver } from './server'
 
 // ============================================================================
 // Converters
@@ -94,7 +96,11 @@ export {
   generateToolCallId,
   // JSON helpers
   safeJsonParse,
-  deepClone
+  deepClone,
+  // Claude Code identity on outgoing Anthropic requests
+  CLAUDE_CODE_USER_AGENT,
+  buildAttributionLine,
+  extractFirstUserMessageText
 } from './utils'
 
 // ============================================================================

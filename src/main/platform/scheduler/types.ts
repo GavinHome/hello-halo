@@ -99,6 +99,14 @@ export interface SchedulerJob {
    */
   metadata?: Record<string, unknown>
 
+  /**
+   * Discriminator selecting which registered handler executes this job.
+   * Defaults to 'app'. The scheduler routes due jobs by this value so multiple
+   * domains (e.g. apps, teams) can each own a handler without depending on one
+   * another. Persisted; existing rows default to 'app'.
+   */
+  kind?: string
+
   // -- Scheduler-managed runtime state --
 
   /**
@@ -256,10 +264,12 @@ export interface SchedulerService {
   // -- Execution --
 
   /**
-   * Register the callback invoked when a job is due.
-   * Only one handler is supported; subsequent calls replace the previous handler.
+   * Register the callback invoked when a job of the given `kind` is due.
+   * Each kind has its own handler; registering the same kind again replaces it.
+   * Jobs with no explicit kind default to 'app'. A due job whose kind has no
+   * registered handler is recorded as an error (never silently dropped).
    */
-  onJobDue(handler: JobDueHandler): void
+  onJobDue(kind: string, handler: JobDueHandler): void
 
   /** Start the timer loop. Call after registering the handler. */
   start(): void
@@ -274,4 +284,12 @@ export interface SchedulerService {
 
   /** Get aggregated run statistics for a job since a given timestamp. */
   getRunStats(jobId: string, since?: number): RunStats
+
+  /**
+   * How many times the job's schedule came due in (afterMs, untilMs] — for
+   * instance while another run of the same app held it back. Computed from
+   * the schedule alone, from the job's creation at the earliest; 0 for a
+   * missing, paused or disabled job. Counting stops at `limit` (default 1000).
+   */
+  countDueTimes(jobId: string, afterMs: number, untilMs: number, limit?: number): number
 }

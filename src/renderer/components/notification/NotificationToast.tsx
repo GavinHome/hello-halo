@@ -2,12 +2,11 @@
  * NotificationToast — Unified in-app toast notification overlay
  *
  * Renders a stack of floating toasts in the bottom-right corner.
- * Visual style matches the original UpdateNotification component
- * (zinc-800 background, rounded-lg, slide-in animation).
  *
  * Each toast auto-dismisses after its `duration` (0 = sticky). A toast marked
  * `dismissible: false` drops the close button and outlives its own action.
- * Toasts are ordered oldest-first (newest at the bottom of the stack).
+ * Toasts are ordered oldest-first (newest at the bottom of the stack). Screen
+ * readers hear each toast once, through ToastAnnouncer.
  *
  * Mount once in App.tsx — it reads from useNotificationStore.
  */
@@ -15,6 +14,7 @@
 import { useEffect, useRef, useCallback, lazy, Suspense } from 'react'
 import { X, Bell, CheckCircle2, AlertTriangle, AlertCircle } from 'lucide-react'
 import { useNotificationStore, type ToastItem, type ToastVariant } from '../../stores/notification.store'
+import { useTranslation } from '../../i18n'
 
 // This component is mounted at the app root, so a static import would pull the
 // markdown parser into the entry chunk for a surface most sessions never show
@@ -24,38 +24,39 @@ const RichText = lazy(() => import('../ui/RichText').then(m => ({ default: m.Ric
 
 // ── Variant config ──────────────────────────────────────
 
+// The variant tints the icon and its halo only. The action button stays
+// `primary` across all four: a tinted button would have to carry white text at
+// `text-xs` on amber or green, which is unreadable, and the variant is already
+// carried by the glyph, the halo and the title.
 interface VariantStyle {
   icon: React.ReactNode
+  /** Icon halo behind the glyph */
   bg: string
-  text: string
 }
 
 const variantStyles: Record<ToastVariant, VariantStyle> = {
   default: {
-    icon: <Bell className="w-5 h-5 text-blue-400" />,
-    bg: 'bg-blue-500/20',
-    text: 'text-blue-400',
+    icon: <Bell className="w-5 h-5 text-primary" />,
+    bg: 'bg-primary/10',
   },
   success: {
-    icon: <CheckCircle2 className="w-5 h-5 text-emerald-400" />,
-    bg: 'bg-emerald-500/20',
-    text: 'text-emerald-400',
+    icon: <CheckCircle2 className="w-5 h-5 text-halo-success" />,
+    bg: 'bg-halo-success/10',
   },
   warning: {
-    icon: <AlertTriangle className="w-5 h-5 text-amber-400" />,
-    bg: 'bg-amber-500/20',
-    text: 'text-amber-400',
+    icon: <AlertTriangle className="w-5 h-5 text-halo-warning" />,
+    bg: 'bg-halo-warning/10',
   },
   error: {
-    icon: <AlertCircle className="w-5 h-5 text-red-400" />,
-    bg: 'bg-red-500/20',
-    text: 'text-red-400',
+    icon: <AlertCircle className="w-5 h-5 text-halo-error" />,
+    bg: 'bg-halo-error/10',
   },
 }
 
 // ── Single Toast ────────────────────────────────────────
 
 function Toast({ toast }: { toast: ToastItem }) {
+  const { t } = useTranslation()
   const dismiss = useNotificationStore((s) => s.dismiss)
   const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const dismissible = toast.dismissible !== false
@@ -81,7 +82,7 @@ function Toast({ toast }: { toast: ToastItem }) {
 
   return (
     <div className="animate-in slide-in-from-bottom-4 fade-in duration-300 pointer-events-auto">
-      <div className={`bg-zinc-800 border border-zinc-700 rounded-lg shadow-xl p-4 w-full sm:w-auto ${isRich ? 'sm:max-w-md' : 'sm:max-w-sm'}`}>
+      <div className={`bg-popover text-popover-foreground border border-border rounded-lg shadow-xl p-4 w-full sm:w-auto ${isRich ? 'sm:max-w-md' : 'sm:max-w-sm'}`}>
         <div className="flex items-start gap-3">
           {/* Icon */}
           <div className={`flex-shrink-0 w-10 h-10 ${style.bg} rounded-full flex items-center justify-center`}>
@@ -90,16 +91,20 @@ function Toast({ toast }: { toast: ToastItem }) {
 
           {/* Content */}
           <div className="flex-1 min-w-0">
-            <h4 className="text-sm font-medium text-zinc-100">{toast.title}</h4>
+            <h4 className="text-sm font-medium">{toast.title}</h4>
             {toast.body && (
-              <div className="mt-1 max-h-32 overflow-y-auto text-xs text-zinc-400">
+              // overflow-x-hidden is load-bearing: `overflow-y: auto` promotes
+              // the cross axis from `visible` to `auto` per spec, so without it
+              // an unbreakable token (a tool name, a URL) would add a
+              // horizontal scrollbar and its corner square to a card this small.
+              <div className="mt-1 max-h-32 overflow-y-auto overflow-x-hidden scrollbar-thin text-xs text-muted-foreground">
                 {isRich
                   ? (
-                    <Suspense fallback={<p className="whitespace-pre-line">{toast.body}</p>}>
+                    <Suspense fallback={<p className="whitespace-pre-line break-words">{toast.body}</p>}>
                       <RichText content={toast.body} />
                     </Suspense>
                   )
-                  : <p className="whitespace-pre-line">{toast.body}</p>}
+                  : <p className="whitespace-pre-line break-words">{toast.body}</p>}
               </div>
             )}
 
@@ -109,15 +114,7 @@ function Toast({ toast }: { toast: ToastItem }) {
                 {toast.action && (
                   <button
                     onClick={() => { toast.action!.onClick(); if (dismissible) handleDismiss() }}
-                    className={`flex items-center gap-1.5 px-3 py-1.5 ${
-                      toast.variant === 'error'
-                        ? 'bg-red-600 hover:bg-red-500'
-                        : toast.variant === 'warning'
-                          ? 'bg-amber-600 hover:bg-amber-500'
-                          : toast.variant === 'success'
-                            ? 'bg-emerald-600 hover:bg-emerald-500'
-                            : 'bg-blue-600 hover:bg-blue-500'
-                    } text-white text-xs font-medium rounded-md transition-colors`}
+                    className="flex items-center gap-1.5 px-3 py-1.5 bg-primary text-primary-foreground hover:bg-primary/90 text-xs font-medium rounded-md transition-colors"
                   >
                     {toast.action.label}
                   </button>
@@ -125,7 +122,7 @@ function Toast({ toast }: { toast: ToastItem }) {
                 {toast.secondaryAction && (
                   <button
                     onClick={() => { toast.secondaryAction!.onClick(); handleDismiss() }}
-                    className="px-3 py-1.5 text-zinc-400 hover:text-zinc-200 text-xs transition-colors"
+                    className="px-3 py-1.5 text-muted-foreground hover:text-foreground text-xs transition-colors"
                   >
                     {toast.secondaryAction.label}
                   </button>
@@ -138,7 +135,8 @@ function Toast({ toast }: { toast: ToastItem }) {
           {dismissible && (
             <button
               onClick={handleDismiss}
-              className="flex-shrink-0 text-zinc-500 hover:text-zinc-300 transition-colors"
+              aria-label={t('Dismiss')}
+              className="flex-shrink-0 text-muted-foreground hover:text-foreground transition-colors"
             >
               <X className="w-4 h-4" />
             </button>
@@ -149,18 +147,53 @@ function Toast({ toast }: { toast: ToastItem }) {
   )
 }
 
+// ── Screen reader announcements ─────────────────────────
+
+/**
+ * What a screen reader hears, one line per toast shown: errors in an alert
+ * region, everything else in a polite status region. Both regions stay
+ * mounted — a region inserted together with its text is not announced by
+ * every reader — and the cards themselves carry no live role, so nothing is
+ * read twice. `aria-atomic="false"` overrides both roles' implicit `true`: a
+ * new toast reads only its own line, not the ones still showing, and a
+ * re-render changes no text and reads nothing. Showing an id again is a new
+ * event (a new `createdAt`) and is read again. Markdown bodies are long,
+ * server-authored copy, so only their title is read.
+ */
+function ToastAnnouncer({ toasts }: { toasts: ToastItem[] }) {
+  const line = (toast: ToastItem) => (
+    <div key={`${toast.id}:${toast.createdAt}`}>
+      <span>{toast.title}</span>
+      {toast.body && toast.bodyFormat !== 'markdown' && <span> {toast.body}</span>}
+    </div>
+  )
+  return (
+    <>
+      <div role="status" aria-live="polite" aria-atomic="false" className="sr-only">
+        {toasts.filter((toast) => toast.variant !== 'error').map(line)}
+      </div>
+      <div role="alert" aria-live="assertive" aria-atomic="false" className="sr-only">
+        {toasts.filter((toast) => toast.variant === 'error').map(line)}
+      </div>
+    </>
+  )
+}
+
 // ── Container ───────────────────────────────────────────
 
 export function NotificationToast() {
   const toasts = useNotificationStore((s) => s.toasts)
 
-  if (toasts.length === 0) return null
-
   return (
-    <div className="fixed bottom-4 inset-x-4 sm:inset-x-auto sm:right-4 z-50 flex flex-col items-stretch sm:items-end gap-2 pointer-events-none">
-      {toasts.map((toast) => (
-        <Toast key={toast.id} toast={toast} />
-      ))}
-    </div>
+    <>
+      <ToastAnnouncer toasts={toasts} />
+      {toasts.length > 0 && (
+        <div className="fixed bottom-4 inset-x-4 sm:inset-x-auto sm:right-4 z-50 flex flex-col items-stretch sm:items-end gap-2 pointer-events-none">
+          {toasts.map((toast) => (
+            <Toast key={toast.id} toast={toast} />
+          ))}
+        </div>
+      )}
+    </>
   )
 }

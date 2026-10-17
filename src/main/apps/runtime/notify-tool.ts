@@ -28,7 +28,9 @@ import { getConfig } from '../../foundation/config.service'
 import { getActiveImChannelManager } from './im-channels'
 import { FileExportGate, FileExportDeniedError } from './file-export-gate'
 import { getPendingRelayStore, type RelaySubject } from './pending-relays'
-import { buildImSessionKey } from '../../../shared/apps/im-keys'
+import { recordChatPush } from './chat-push'
+import { getImSessionRegistry } from './im-session-registry'
+import { resolveImPushConversation } from './im-team-session'
 import type { NotificationChannelType } from '../../../shared/types/notification-channels'
 import type { ImSessionRecord } from '../../../shared/types/im-channel'
 import { getImSessionDisplayName } from '../../../shared/types/im-channel'
@@ -56,6 +58,8 @@ export interface RelaySourceContext {
   subject?: RelaySubject
   /** Whether the source run is owner-context (gates transcript exposure) */
   isOwner: boolean
+  /** Read from the running turn; the reusable tool server must not retain a previous caller's authority. */
+  permissionIdentity?: () => string | undefined
   /** Source-context snapshot captured by the runtime (e.g. the triggering message) */
   quote?: string
 }
@@ -240,6 +244,7 @@ function buildNotifyBotTool(context: NotifyToolContext) {
     },
     async (input) => {
       const runTag = context.runId.slice(0, 8)
+      const sourceIdentity = context.relay.permissionIdentity?.()
       console.log(
         `[Runtime][${runTag}] notify_bot called: to="${input.to}", ` +
         `hasMessage=${!!input.message}, hasFile=${!!input.file}`
@@ -262,11 +267,22 @@ function buildNotifyBotTool(context: NotifyToolContext) {
       const instanceId = input.to.slice(0, colonIndex)
       const chatId = input.to.slice(colonIndex + 1)
 
-      // Find the matching session to get chatType
-      const session = context.imSessions!.find(
+      // The chat this turn answers gets the turn's reply anyway; a push there
+      // arrives as a second copy of it.
+      if (context.relay.contact && input.to === context.relay.contact) {
+        return textResult(
+          'Not sent: this is the chat you are answering right now, and your reply — the text you ' +
+          'end this turn with — is delivered to it. Write the message as your reply instead; ' +
+          'to send a file here, use send_file_to_chat.',
+          true
+        )
+      }
+
+      const listedSession = context.imSessions!.find(
         s => s.instanceId === instanceId && s.chatId === chatId
       )
-      if (!session) {
+      if (!listedSession) {
+        console.warn(`[Runtime][${runTag}] notify_bot refused: target=${input.to}, reason=contact not in directory`)
         return textResult(
           `Contact not found: "${input.to}". The contact may have been removed. ` +
           'Check the available contacts in the tool description.',
@@ -274,14 +290,31 @@ function buildNotifyBotTool(context: NotifyToolContext) {
         )
       }
 
-      // Get the IM channel instance
-      const manager = getActiveImChannelManager()
-      if (!manager) {
-        return textResult('IM channel manager is not available.', true)
+      // The directory belongs to the tool's creation, not to this delivery.
+      const registry = getImSessionRegistry()
+      if (!registry) {
+        console.warn(`[Runtime][${runTag}] notify_bot refused: target=${input.to}, reason=session registry unavailable`)
+        return textResult('IM session registry is not available.', true)
+      }
+      const session = registry.findSession(listedSession.appId, listedSession.channel, listedSession.chatId)
+      if (!session || session.instanceId !== instanceId) {
+        console.warn(`[Runtime][${runTag}] notify_bot refused: target=${input.to}, appId=${listedSession.appId}, reason=${session ? 'session instance changed' : 'session removed'}`)
+        return textResult(`Contact "${input.to}" is no longer registered to this Bot. Nothing was sent.`, true)
       }
 
+      const manager = getActiveImChannelManager()
+      if (!manager) {
+        console.warn(`[Runtime][${runTag}] notify_bot refused: target=${input.to}, reason=IM channel manager unavailable`)
+        return textResult('IM channel manager is not available.', true)
+      }
+      const config = manager.getInstanceConfig(instanceId)
+      if (!config) {
+        console.warn(`[Runtime][${runTag}] notify_bot refused: target=${input.to}, reason=instance configuration removed`)
+        return textResult(`IM channel configuration "${instanceId}" is no longer available. Nothing was sent.`, true)
+      }
       const instance = manager.getInstance(instanceId)
       if (!instance) {
+        console.warn(`[Runtime][${runTag}] notify_bot refused: target=${input.to}, reason=IM channel instance unavailable`)
         return textResult(
           `IM channel instance "${instanceId}" not found. The Bot may have been reconfigured.`,
           true
@@ -289,31 +322,63 @@ function buildNotifyBotTool(context: NotifyToolContext) {
       }
 
       if (!instance.isConnected()) {
+        console.warn(`[Runtime][${runTag}] notify_bot refused: target=${input.to}, reason=IM channel disconnected`)
         return textResult(
           `IM channel "${instanceId}" is currently disconnected. The message cannot be delivered.`,
           true
         )
       }
+      const destination = resolveImPushConversation(session, config)
+      if (!destination) {
+        return textResult(`The conversation for "${input.to}" is no longer available under this Bot's current binding. Nothing was sent.`, true)
+      }
 
+      const sessionRevision = registry.getSessionRevision(session.appId, session.channel, session.chatId)
+      const authorizationRevision = manager.getAuthorizationRevision(instanceId)
       const results: string[] = []
       let sentMessage = false
       let sentFile: { name: string } | undefined
 
-      // Record delivered content into the pending-relay spool so the target
-      // session's AI learns about this push on its next inbound message.
-      // Skipped when pushing to the invoking session itself — there the push
-      // already lives in this run's tool history. Must never fail the tool:
-      // the push succeeded regardless of spool state.
-      const recordRelay = () => {
+      // What was delivered is kept twice: in the chat's record, which its owner
+      // reads in Halo (chat-push), and in the pending-relay spool, so the target
+      // session's AI learns about this push on its next inbound message. The
+      // spool skips the invoking session itself — there the push already lives
+      // in this run's tool history. Neither may fail the tool: the push
+      // succeeded regardless.
+      const recordDelivery = () => {
         if (!sentMessage && !sentFile) return
+        const stillCurrent = sessionRevision !== undefined && authorizationRevision !== undefined &&
+          getImSessionRegistry()?.getSessionRevision(session.appId, session.channel, session.chatId) === sessionRevision &&
+          getActiveImChannelManager()?.getAuthorizationRevision(instanceId) === authorizationRevision
+        if (stillCurrent) {
+          registry.setTeamContext(session.appId, session.channel, session.chatId, destination.teamContext ?? undefined)
+        }
+        recordChatPush({
+          appId: session.appId,
+          channel: session.channel,
+          chatType: session.chatType,
+          chatId: session.chatId,
+          text: [sentMessage ? input.message : '', sentFile ? `📎 ${sentFile.name}` : ''].filter(Boolean).join('\n\n'),
+          via: 'message',
+          pushedBy: context.appId,
+          teamContext: destination.teamContext,
+          ...(!stillCurrent ? { sessionRevision: null } : {}),
+        })
+        if (!stillCurrent) {
+          console.warn(`[Runtime][${runTag}] notify_bot delivered without relay context: target=${destination.conversationId}, reason=chat or authorization changed during delivery`)
+          return
+        }
         try {
-          const targetKey = buildImSessionKey(
-            session.appId, session.channel, session.chatType, session.chatId
-          )
-          if (targetKey === context.relay.sessionKey) return
-          getPendingRelayStore()?.append(targetKey, {
+          if (destination.conversationId === context.relay.sessionKey) return
+          const spool = getPendingRelayStore()
+          if (!spool) {
+            console.warn(`[Runtime][${runTag}] notify_bot delivered without relay context: target=${destination.conversationId}, reason=relay spool unavailable`)
+            return
+          }
+          const relayId = randomUUID()
+          spool.append(destination.conversationId, {
             kind: 'push',
-            id: randomUUID(),
+            id: relayId,
             at: Date.now(),
             source: {
               key: context.relay.sessionKey,
@@ -328,8 +393,11 @@ function buildNotifyBotTool(context: NotifyToolContext) {
             file: sentFile,
             quote: context.relay.quote,
           })
-        } catch (err) {
-          console.error(`[Runtime][${runTag}] Failed to record relay event:`, err)
+          void import('./pending-relay-delivery')
+            .then(({ offerPendingRelaysToLiveTurn }) => offerPendingRelaysToLiveTurn(destination.conversationId, session, { id: relayId, identity: sourceIdentity }))
+            .catch(error => console.warn(`[Runtime][${runTag}] Live relay unavailable; context retained: target=${destination.conversationId}`, error))
+        } catch {
+          console.error(`[Runtime][${runTag}] notify_bot delivered without relay context: target=${destination.conversationId}, reason=relay recording failed`)
         }
       }
 
@@ -337,7 +405,7 @@ function buildNotifyBotTool(context: NotifyToolContext) {
       // When message was already sent but file fails, the AI must know
       // the message went through to avoid duplicate sends on retry.
       const errorWithContext = (errorMsg: string) => {
-        recordRelay()
+        recordDelivery()
         if (results.length > 0) {
           return textResult(`${results.join(' ')} However, ${errorMsg}`, true)
         }
@@ -374,8 +442,10 @@ function buildNotifyBotTool(context: NotifyToolContext) {
           if (err instanceof FileExportDeniedError) {
             console.warn(`[Runtime][${runTag}] File export denied: "${input.file}"`)
             return errorWithContext(
-              `file export denied: "${input.file}" is outside the allowed directory. ` +
-              'Only files within the app workspace or temp directory can be sent.'
+              err.reason
+                ? `file export denied: "${input.file}". ${err.reason}`
+                : `file export denied: "${input.file}" is outside the allowed directory. ` +
+                  'Only files within the app workspace or temp directory can be sent.'
             )
           }
           // File not found or other sanction error
@@ -413,7 +483,7 @@ function buildNotifyBotTool(context: NotifyToolContext) {
         }
       }
 
-      recordRelay()
+      recordDelivery()
       return textResult(results.join(' '))
     }
   )

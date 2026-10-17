@@ -80,6 +80,7 @@ Key concepts:
 - "Canvas" = The panel showing AI-generated content
 - "MCP" = Model Context Protocol, a way to extend AI capabilities
 - "Deep Thinking" = Extended reasoning mode for complex tasks
+- "Memory" = What the AI remembers across runs (NOT hardware RAM); "System Memory" = The machine's RAM, shown only in diagnostics
 
 Features:
 - AI Agent like claude code
@@ -128,6 +129,17 @@ function detectApiFormat(apiUrl) {
   }
   // Default to OpenAI format for other providers (OpenAI, DeepSeek, Moonshot, etc.)
   return 'openai'
+}
+
+// Resolve the request URL. If apiUrl already points to the full endpoint
+// (e.g. GLM's ".../paas/v4/chat/completions"), use it as-is; otherwise append
+// the conventional path so bare-base configs keep working.
+function resolveEndpoint(apiUrl, apiFormat) {
+  const base = apiUrl.trim().replace(/\/+$/, '')
+  if (apiFormat === 'anthropic') {
+    return base.endsWith('/messages') ? base : `${base}/v1/messages`
+  }
+  return base.endsWith('/chat/completions') ? base : `${base}/v1/chat/completions`
 }
 
 // Call LLM API for translation (supports both Anthropic and OpenAI formats)
@@ -191,10 +203,12 @@ ${JSON.stringify(texts, null, 2)}
 \`\`\`
 `
 
+  const endpoint = resolveEndpoint(apiUrl, apiFormat)
+
   let response
   if (apiFormat === 'anthropic') {
     // Anthropic Messages API
-    response = await fetch(`${apiUrl}/v1/messages`, {
+    response = await fetch(endpoint, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
@@ -209,7 +223,7 @@ ${JSON.stringify(texts, null, 2)}
     })
   } else {
     // OpenAI Chat Completions API (compatible with OpenAI, DeepSeek, Moonshot, etc.)
-    response = await fetch(`${apiUrl}/v1/chat/completions`, {
+    response = await fetch(endpoint, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',

@@ -78,7 +78,7 @@ function FeaturedCard({ entry, onSelect }: { entry: RegistryEntry; onSelect: () 
       tabIndex={0}
       onClick={onSelect}
       onKeyDown={e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onSelect() } }}
-      className="flex flex-col gap-2.5 w-full p-4 rounded-[10px] border border-border/60 bg-background text-left cursor-pointer transition-all hover:border-border hover:shadow-sm focus:outline-none focus:ring-1 focus:ring-primary"
+      className="flex flex-col gap-2.5 w-full p-4 rounded-[10px] border border-border-soft bg-card text-left cursor-pointer transition-all hover:border-border hover:shadow-sm focus:outline-none focus:ring-1 focus:ring-primary"
     >
       <div className="flex items-center gap-2.5 min-w-0">
         <AppTypeIcon type={entry.type} icon={entry.icon} name={name} size="sm" />
@@ -109,7 +109,7 @@ function CollectionCard({ collection }: { collection: ResolvedCollection }) {
     <>
       <button
         onClick={() => setOpen(true)}
-        className="flex flex-col gap-2.5 p-4 rounded-[10px] border border-border/60 bg-background text-left transition-all hover:border-border hover:shadow-sm"
+        className="flex flex-col gap-2.5 p-4 rounded-[10px] border border-border-soft bg-card text-left transition-all hover:border-border hover:shadow-sm"
       >
         <div>
           {collection.label && (
@@ -162,10 +162,10 @@ function CollectionDialog({
       onMouseDown={onClose}
     >
       <div
-        className="relative w-full max-w-lg bg-background border border-border/60 rounded-xl shadow-xl flex flex-col max-h-[80vh] overflow-hidden"
+        className="relative w-full max-w-lg bg-background border border-border-soft rounded-xl shadow-xl flex flex-col max-h-[80vh] overflow-hidden"
         onMouseDown={e => e.stopPropagation()}
       >
-        <div className="flex items-start justify-between gap-3 px-5 pt-5 pb-3 border-b border-border/60 flex-shrink-0">
+        <div className="flex items-start justify-between gap-3 px-5 pt-5 pb-3 border-b border-border-soft flex-shrink-0">
           <div className="min-w-0">
             {collection.label && (
               <span className="inline-block mb-1.5 px-1.5 py-px rounded text-[10.5px] leading-4 bg-primary/10 text-primary">
@@ -179,7 +179,7 @@ function CollectionDialog({
           </div>
           <button
             onClick={onClose}
-            className="flex h-7 w-7 flex-shrink-0 items-center justify-center rounded-md border border-border/60 bg-background text-muted-foreground hover:text-foreground hover:border-border transition-colors"
+            className="flex h-7 w-7 flex-shrink-0 items-center justify-center rounded-md border border-border-soft bg-background text-muted-foreground hover:text-foreground hover:border-border transition-colors"
             aria-label={t('Close')}
           >
             <X className="w-3.5 h-3.5" />
@@ -219,7 +219,7 @@ function SectionBody({ node, padded }: { node: ResolvedDiscoverNode; padded?: bo
   }, [isCatalog, node.entries, node.hasMore, seedStoreApps])
 
   const wrap = (content: ReactNode) =>
-    padded ? <section className="px-4 pt-4">{content}</section> : <>{content}</>
+    padded ? <section className="px-6 sm:px-10 pt-4">{content}</section> : <>{content}</>
 
   if (node.type === 'catalog') {
     return wrap(
@@ -272,7 +272,7 @@ function DiscoverRow({ node }: { node: ResolvedDiscoverNode }) {
   const children = node.children ?? []
   if (children.length === 0) return null
   return (
-    <section className="px-4 pt-4">
+    <section className="px-6 sm:px-10 pt-4">
       {title && <SectionLabel sub={subtitle}>{title}</SectionLabel>}
       <div className={`grid ${cols} gap-4`}>
         {children.map((child, i) => <SectionBody key={i} node={child} />)}
@@ -289,7 +289,7 @@ export function StoreDiscover() {
   if (!page) {
     return (
       <div className="flex flex-col pb-8">
-        <section className="px-4 pt-4">
+        <section className="px-6 sm:px-10 pt-4">
           <SectionLabel>{t('All Apps')}</SectionLabel>
           <StoreGrid embedded />
         </section>

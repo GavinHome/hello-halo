@@ -5,12 +5,18 @@
  * Covers config loading, saving, validation, and defaults.
  */
 
-import { describe, it, expect, beforeEach, vi } from 'vitest'
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import fs from 'fs'
 import path from 'path'
+import type { AISourcesConfig } from '../../../src/shared/types/ai-sources'
 
 vi.mock('../../../src/main/foundation/credential-safety', () => ({
   isCredentialAtRestSafe: vi.fn(() => false),
+}))
+
+vi.mock('../../../src/main/foundation/product-config', async original => ({
+  ...await original<typeof import('../../../src/main/foundation/product-config')>(),
+  getProductFederationGatewayUrl: vi.fn(),
 }))
 
 // Import after mocks are set up
@@ -21,9 +27,12 @@ import {
   getConfigPath,
   initializeApp,
   getCredentialsGeneration,
+  onApiConfigChange,
   migrateCredentialEncryption,
-  getCredentialDecodeFailures
+  getCredentialDecodeFailures,
+  getFederationGatewayUrl
 } from '../../../src/main/foundation/config.service'
+import { getProductFederationGatewayUrl } from '../../../src/main/foundation/product-config'
 import { isCredentialAtRestSafe } from '../../../src/main/foundation/credential-safety'
 import {
   decodeFromStorage,
@@ -164,13 +173,69 @@ describe('Config Service', () => {
     })
   })
 
+  describe('federation gateway defaults', () => {
+    const productUrl = 'https://relay.example.test/'
+
+    beforeEach(() => {
+      vi.mocked(getProductFederationGatewayUrl).mockReturnValue(productUrl)
+    })
+
+    afterEach(() => {
+      vi.mocked(getProductFederationGatewayUrl).mockReset()
+    })
+
+    it('uses the build gateway on first launch without creating user settings', () => {
+      expect(getFederationGatewayUrl()).toBe(productUrl)
+      expect(getConfig().federation).toBeUndefined()
+      expect(fs.existsSync(getConfigPath())).toBe(false)
+    })
+
+    it.each([undefined, '', '   '])('inherits the build default for an existing override of %s without rewriting it', gatewayUrl => {
+      const saved = JSON.stringify({ federation: { gatewayUrl }, appearance: { theme: 'light' } })
+      fs.writeFileSync(getConfigPath(), saved)
+
+      expect(getFederationGatewayUrl()).toBe(productUrl)
+      expect(fs.readFileSync(getConfigPath(), 'utf8')).toBe(saved)
+      expect(getConfig().federation?.gatewayUrl).toBe(gatewayUrl)
+    })
+
+    it('preserves and prioritizes a custom gateway', () => {
+      const saved = JSON.stringify({ federation: { gatewayUrl: ' https://custom.example.test/ ' } })
+      fs.writeFileSync(getConfigPath(), saved)
+
+      expect(getFederationGatewayUrl()).toBe('https://custom.example.test/')
+      expect(fs.readFileSync(getConfigPath(), 'utf8')).toBe(saved)
+    })
+
+    it.each([undefined, '', '   '])('keeps LAN-only behavior without a non-empty build default of %s', gatewayUrl => {
+      vi.mocked(getProductFederationGatewayUrl).mockReturnValue(gatewayUrl)
+      expect(getFederationGatewayUrl()).toBeNull()
+    })
+
+    it('trims the build default without persisting it on an unrelated save', () => {
+      vi.mocked(getProductFederationGatewayUrl).mockReturnValue(` ${productUrl} `)
+      saveConfig({ appearance: { theme: 'light' } })
+
+      expect(getFederationGatewayUrl()).toBe(productUrl)
+      expect(JSON.parse(fs.readFileSync(getConfigPath(), 'utf8')).federation).toBeUndefined()
+    })
+
+    it('restores the build default when an override is cleared through a JSON patch', () => {
+      saveConfig({ federation: { gatewayUrl: 'https://custom.example.test/' } })
+      saveConfig(JSON.parse(JSON.stringify({ federation: { gatewayUrl: '' } })))
+
+      expect(getFederationGatewayUrl()).toBe(productUrl)
+      expect(getConfig().federation?.gatewayUrl).toBe('')
+    })
+  })
+
   // Guards the session-rebuild signal: anything baked into the CC subprocess at
   // startup (API key, model, modelOverrides) must influence the signature so
   // ModelConfigPanel edits take effect without an app restart.
   describe('credentials generation invalidation', () => {
     const sourceId = '11111111-1111-1111-1111-111111111111'
 
-    function makeApiKeySource(extra: Record<string, unknown> = {}) {
+    function makeApiKeySource(extra: Record<string, unknown> = {}): AISourcesConfig {
       return {
         version: 2 as const,
         currentId: sourceId,
@@ -198,20 +263,22 @@ describe('Config Service', () => {
       saveConfig({ aiSources: makeApiKeySource() } as any)
     })
 
-    it('increments generation when model id changes', () => {
-      const before = getCredentialsGeneration()
+    it('changes only the source generation when the default model changes', () => {
+      const global = getCredentialsGeneration()
+      const before = getCredentialsGeneration(sourceId)
       saveConfig({ aiSources: makeApiKeySource({ model: 'deepseek-chat' }) } as any)
-      expect(getCredentialsGeneration()).toBe(before + 1)
+      expect(getCredentialsGeneration(sourceId)).not.toBe(before)
+      expect(getCredentialsGeneration()).toBe(global)
     })
 
     it('increments generation when modelOverrides is first added', () => {
-      const before = getCredentialsGeneration()
+      const before = getCredentialsGeneration(sourceId)
       saveConfig({
         aiSources: makeApiKeySource({
           modelOverrides: { 'deepseek-v4-flash': { contextWindow: 500_000 } }
         })
       } as any)
-      expect(getCredentialsGeneration()).toBe(before + 1)
+      expect(getCredentialsGeneration(sourceId)).not.toBe(before)
     })
 
     it('increments generation when modelOverrides value changes', () => {
@@ -220,7 +287,7 @@ describe('Config Service', () => {
           modelOverrides: { 'deepseek-v4-flash': { contextWindow: 200_000 } }
         })
       } as any)
-      const before = getCredentialsGeneration()
+      const before = getCredentialsGeneration(sourceId)
       saveConfig({
         aiSources: makeApiKeySource({
           modelOverrides: { 'deepseek-v4-flash': { contextWindow: 500_000 } }
@@ -228,7 +295,7 @@ describe('Config Service', () => {
       } as any)
       // 500K crosses the [1m] unlock threshold (200K) — sessions MUST rebuild
       // so the next CC subprocess is spawned with the suffixed sdkModel.
-      expect(getCredentialsGeneration()).toBe(before + 1)
+      expect(getCredentialsGeneration(sourceId)).not.toBe(before)
     })
 
     it('increments generation when maxOutputTokens override changes', () => {
@@ -237,7 +304,7 @@ describe('Config Service', () => {
           modelOverrides: { 'deepseek-v4-flash': { maxOutputTokens: 32_000 } }
         })
       } as any)
-      const before = getCredentialsGeneration()
+      const before = getCredentialsGeneration(sourceId)
       saveConfig({
         aiSources: makeApiKeySource({
           modelOverrides: { 'deepseek-v4-flash': { maxOutputTokens: 64_000 } }
@@ -245,7 +312,7 @@ describe('Config Service', () => {
       } as any)
       // CLAUDE_CODE_MAX_OUTPUT_TOKENS is injected at subprocess startup; the
       // session-rebuild signal is the only way the new cap reaches CC.
-      expect(getCredentialsGeneration()).toBe(before + 1)
+      expect(getCredentialsGeneration(sourceId)).not.toBe(before)
     })
 
     it('does NOT increment when modelOverrides is saved unchanged', () => {
@@ -260,7 +327,7 @@ describe('Config Service', () => {
           }
         })
       } as any)
-      const before = getCredentialsGeneration()
+      const before = getCredentialsGeneration(sourceId)
       saveConfig({
         aiSources: makeApiKeySource({
           modelOverrides: {
@@ -270,13 +337,13 @@ describe('Config Service', () => {
           }
         })
       } as any)
-      expect(getCredentialsGeneration()).toBe(before)
+      expect(getCredentialsGeneration(sourceId)).toBe(before)
     })
 
     it('does NOT increment when an unrelated field changes', () => {
-      const before = getCredentialsGeneration()
+      const before = getCredentialsGeneration(sourceId)
       saveConfig({ isFirstLaunch: false })
-      expect(getCredentialsGeneration()).toBe(before)
+      expect(getCredentialsGeneration(sourceId)).toBe(before)
     })
 
     it('increments generation when the active model\'s catalog capability changes', () => {
@@ -294,7 +361,7 @@ describe('Config Service', () => {
           }]
         })
       } as any)
-      const before = getCredentialsGeneration()
+      const before = getCredentialsGeneration(sourceId)
       saveConfig({
         aiSources: makeApiKeySource({
           availableModels: [{
@@ -304,10 +371,10 @@ describe('Config Service', () => {
           }]
         })
       } as any)
-      expect(getCredentialsGeneration()).toBe(before + 1)
+      expect(getCredentialsGeneration(sourceId)).not.toBe(before)
     })
 
-    it('does NOT increment when a non-active model\'s capability changes', () => {
+    it('changes the source generation for a non-default model capability because conversations can pin it', () => {
       saveConfig({
         aiSources: makeApiKeySource({
           availableModels: [
@@ -316,7 +383,7 @@ describe('Config Service', () => {
           ]
         })
       } as any)
-      const before = getCredentialsGeneration()
+      const before = getCredentialsGeneration(sourceId)
       saveConfig({
         aiSources: makeApiKeySource({
           availableModels: [
@@ -325,7 +392,144 @@ describe('Config Service', () => {
           ]
         })
       } as any)
-      expect(getCredentialsGeneration()).toBe(before)
+      expect(getCredentialsGeneration(sourceId)).not.toBe(before)
+    })
+
+    afterEach(() => {
+      vi.useRealTimers()
+    })
+
+    it('keeps every epoch and emits nothing when only an OAuth token rotates', () => {
+      vi.useFakeTimers()
+      const config = makeApiKeySource()
+      const other = { ...config.sources[0], id: 'rotating-account', authType: 'oauth' as const, provider: 'chatgpt', accessToken: 'test-token' }
+      saveConfig({ aiSources: { ...config, sources: [...config.sources, other] } })
+      vi.runOnlyPendingTimers()
+      const handler = vi.fn()
+      const unsubscribe = onApiConfigChange(handler)
+      try {
+        const before = getCredentialsGeneration(other.id)
+        saveConfig({ aiSources: { ...config, sources: [...config.sources, {
+          ...other, accessToken: 'test-rotated-token', refreshToken: 'test-rotated-refresh', tokenExpires: 42
+        }] } })
+        vi.runOnlyPendingTimers()
+        expect(getCredentialsGeneration(other.id)).toBe(before)
+        expect(handler).not.toHaveBeenCalled()
+      } finally {
+        unsubscribe()
+      }
+    })
+
+    it('emits only affected account ids and leaves other source and global epochs unchanged', () => {
+      vi.useFakeTimers()
+      const config = makeApiKeySource()
+      const other = { ...config.sources[0], id: 'other-account', authType: 'oauth' as const, provider: 'chatgpt', accessToken: 'test-token' }
+      saveConfig({ aiSources: { ...config, sources: [...config.sources, other] } })
+      vi.runOnlyPendingTimers()
+      const handler = vi.fn()
+      const unsubscribe = onApiConfigChange(handler)
+      try {
+        const global = getCredentialsGeneration()
+        const first = getCredentialsGeneration(sourceId)
+        const second = getCredentialsGeneration(other.id)
+        saveConfig({ aiSources: { ...config, sources: [...config.sources, { ...other, accountId: 'test-other-workspace' }] } })
+        expect(getCredentialsGeneration()).toBe(global)
+        expect(getCredentialsGeneration(sourceId)).toBe(first)
+        expect(getCredentialsGeneration(other.id)).not.toBe(second)
+        expect(handler).not.toHaveBeenCalled()
+        vi.runOnlyPendingTimers()
+        expect(handler).toHaveBeenCalledTimes(1)
+        expect(handler).toHaveBeenCalledWith({ sourceIds: [other.id], selectionChanged: false })
+      } finally {
+        unsubscribe()
+      }
+    })
+
+    it('selection-only changes report the new seed without changing any epochs', () => {
+      vi.useFakeTimers()
+      const config = makeApiKeySource()
+      const sources = [...config.sources, { ...config.sources[0], id: 'other-account' }]
+      saveConfig({ aiSources: { ...config, sources } })
+      vi.runOnlyPendingTimers()
+      const before = [getCredentialsGeneration(), ...sources.map(source => getCredentialsGeneration(source.id))]
+      const handler = vi.fn()
+      const unsubscribe = onApiConfigChange(handler)
+      try {
+        saveConfig({ aiSources: { ...config, sources, currentId: 'other-account' } })
+        expect([getCredentialsGeneration(), ...sources.map(source => getCredentialsGeneration(source.id))]).toEqual(before)
+        vi.runOnlyPendingTimers()
+        expect(handler).toHaveBeenCalledTimes(1)
+        expect(handler).toHaveBeenCalledWith({ sourceIds: [], selectionChanged: true })
+      } finally {
+        unsubscribe()
+      }
+    })
+
+    it('legacy partial API no-ops do not invalidate; real legacy changes increment only the global epoch', () => {
+      vi.useFakeTimers()
+      const handler = vi.fn()
+      const unsubscribe = onApiConfigChange(handler)
+      try {
+        const before = getCredentialsGeneration()
+        saveConfig({ api: { apiKey: getConfig().api.apiKey } })
+        vi.runOnlyPendingTimers()
+        expect(getCredentialsGeneration()).toBe(before)
+        expect(handler).not.toHaveBeenCalled()
+        saveConfig({ api: { model: 'legacy-model' } })
+        expect(getCredentialsGeneration()).toBe(before + 1)
+        vi.runOnlyPendingTimers()
+        expect(handler).toHaveBeenCalledTimes(1)
+        expect(handler).toHaveBeenCalledWith(undefined)
+      } finally {
+        unsubscribe()
+      }
+    })
+
+    it('prunes deleted epochs and re-adding the same id cannot reuse its old version', () => {
+      const before = getCredentialsGeneration(sourceId)
+      saveConfig({ aiSources: { version: 2, currentId: null, sources: [] } })
+      const deleted = getCredentialsGeneration(sourceId)
+      expect(deleted).not.toBe(before)
+      saveConfig({ aiSources: makeApiKeySource() })
+      const recreated = getCredentialsGeneration(sourceId)
+      expect(recreated).not.toBe(before)
+      expect(recreated).not.toBe(deleted)
+    })
+
+    it('includes the source id even when both sources have no stored epoch', () => {
+      expect(getCredentialsGeneration('missing-a')).not.toBe(getCredentialsGeneration('missing-b'))
+    })
+
+    it('ignores display metadata, source ordering and catalog timestamps', () => {
+      const config = makeApiKeySource({
+        modelCatalogCache: {
+          provider: 'chatgpt', version: 1, fetchedAt: '2026-01-01T00:00:00Z',
+          entries: [{ slug: 'model', supports_reasoning_summary_parameter: true, use_responses_lite: false }]
+        }
+      })
+      saveConfig({ aiSources: config })
+      const before = getCredentialsGeneration(sourceId)
+      const source = config.sources[0]
+      saveConfig({ aiSources: { ...config, sources: [{ ...source, name: 'Renamed', updatedAt: '2026-02-01', modelCatalogCache: {
+        ...source.modelCatalogCache, fetchedAt: '2026-02-01T00:00:00Z'
+      } }] } } as any)
+      expect(getCredentialsGeneration(sourceId)).toBe(before)
+    })
+
+    it.each([
+      { user: { uid: 'another-account', name: 'Account' } },
+      { accountId: 'test-workspace' },
+      { profileArn: 'test-profile' },
+      { apiType: 'responses' },
+      { modelOverrides: { 'deepseek-v4-flash': { vision: false } } },
+      { availableModels: [{ id: 'deepseek-v4-flash', name: 'DeepSeek', supportsVision: false }] },
+      { modelCatalogCache: { provider: 'chatgpt', version: 1, fetchedAt: '2026-01-01', entries: [{ slug: 'model', use_responses_lite: true }] } },
+    ])('tracks source account-routing and capability changes: %j', (updates) => {
+      const before = getCredentialsGeneration(sourceId)
+      const global = getCredentialsGeneration()
+      saveConfig({ aiSources: makeApiKeySource(updates) } as any)
+      expect(getCredentialsGeneration(sourceId)).not.toBe(before)
+      expect(getCredentialsGeneration()).toBe(global)
     })
   })
 })

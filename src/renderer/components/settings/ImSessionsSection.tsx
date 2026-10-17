@@ -25,6 +25,7 @@ import { useTranslation } from '../../i18n'
 import { api } from '../../api'
 import type { ImSessionRecord } from '../../../shared/types/im-channel'
 import { getImSessionDisplayName } from '../../../shared/types/im-channel'
+import { getImChannelDisplay } from '../apps/im-channel-labels'
 
 // ============================================
 // Types
@@ -36,21 +37,6 @@ interface ImSessionsSectionProps {
   appName?: string
   /** When true, render without the section wrapper/title — for embedding inside other components */
   compact?: boolean
-}
-
-// ============================================
-// Channel Display Config
-// ============================================
-
-const CHANNEL_DISPLAY: Record<string, { label: string; color: string }> = {
-  'wecom-bot': { label: 'WeCom', color: 'text-green-500' },
-  'feishu-bot': { label: 'Feishu', color: 'text-blue-500' },
-  'dingtalk-bot': { label: 'DingTalk', color: 'text-indigo-500' },
-  'weixin-ilink-bot': { label: 'WeChat iLink', color: 'text-green-600' },
-}
-
-function getChannelDisplay(channel: string) {
-  return CHANNEL_DISPLAY[channel] ?? { label: channel, color: 'text-muted-foreground' }
 }
 
 function formatTime(ts: number): string {
@@ -88,11 +74,15 @@ export function ImSessionsSection({ appId, appName, compact }: ImSessionsSection
     try {
       const result = await api.imSessionsList(appId) as { success: boolean; data?: ImSessionRecord[] }
       if (result.success && result.data) {
-        setSessions(result.data)
+        // 'native' records exist only so the main conversation board can read
+        // a message-activity summary for the app's own default chat — they
+        // are not an external session and don't belong in this management view.
+        const filtered = result.data.filter(s => s.source !== 'native')
+        setSessions(filtered)
 
         // In global mode, fetch app names for display
-        if (isGlobalMode && result.data.length > 0) {
-          const uniqueAppIds = [...new Set(result.data.map(s => s.appId))]
+        if (isGlobalMode && filtered.length > 0) {
+          const uniqueAppIds = [...new Set(filtered.map(s => s.appId))]
           const names: Record<string, string> = {}
           await Promise.all(
             uniqueAppIds.map(async (id) => {
@@ -201,7 +191,7 @@ export function ImSessionsSection({ appId, appName, compact }: ImSessionsSection
       ) : (
         <div className="space-y-2">
           {sessions.map((session) => {
-            const channelInfo = getChannelDisplay(session.channel)
+            const channelInfo = getImChannelDisplay(session.channel)
             const key = `${session.appId}:${session.channel}:${session.chatId}`
             const resolvedAppName = isGlobalMode ? (appNames[session.appId] || session.appId.slice(0, 8)) : null
 
@@ -311,7 +301,7 @@ export function ImSessionsSection({ appId, appName, compact }: ImSessionsSection
   }
 
   return (
-    <section id="im-sessions" className="bg-card rounded-xl border border-border p-6">
+    <section id="im-sessions" className="bg-card rounded-xl border border-border-faint p-6">
       <div className="mb-4">
         <div className="flex items-center gap-3">
           <Radio className="w-5 h-5 text-muted-foreground" />

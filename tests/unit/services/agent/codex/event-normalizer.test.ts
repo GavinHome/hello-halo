@@ -14,11 +14,10 @@ function createNormalizer(opts: { includePartialMessages?: boolean } = {}): Code
     sessionId: 'session-1',
     model: 'test-model',
     mcpServers: {},
-    // Default the existing-suite path to the "aggregate-only" mode that
-    // matches eeb6f08's original contract — those tests were written when
-    // the normalizer always emitted aggregate text/thinking envelopes.
-    // The live-UI mode (true) is exercised by a dedicated describe block
-    // further down that asserts aggregate text/thinking are suppressed.
+    // Default the existing-suite path to the aggregate-only mode that these
+    // tests assert on. The live-UI mode (true) is exercised by a dedicated
+    // describe block further down that asserts aggregate text/thinking are
+    // suppressed.
     includePartialMessages: opts.includePartialMessages ?? false,
   })
 }
@@ -89,11 +88,10 @@ describe('CodexEventNormalizer (app-server protocol)', () => {
       { type: 'content_block_delta', index: 0, delta: { type: 'input_json_delta', partial_json: '{"command":"pwd"}' } },
       { type: 'content_block_stop', index: 0 },
     ])
-    // ItemCompleted yields:
-    //   1. Aggregate `assistant` envelope with the tool_use block (Claude SDK
-    //      protocol parity — must precede tool_result for id-based linking
-    //      during JSONL replay). See `aggregateBlock` rationale.
-    //   2. `user` envelope with the tool_result.
+    // ItemCompleted yields an aggregate `assistant` envelope with the tool_use
+    // block (Claude SDK protocol parity — must precede tool_result for
+    // id-based linking during JSONL replay; see `aggregateBlock`), followed
+    // by a `user` envelope with the tool_result.
     expect(completed).toEqual([
       {
         type: 'assistant',
@@ -204,8 +202,8 @@ describe('CodexEventNormalizer (app-server protocol)', () => {
     // item.started + item.completed for the agentMessage with the full
     // text in `text`. The normalizer MUST surface that text — earlier
     // versions matched snake_case 'agent_message' and silently fell into
-    // the orphan-tool path, surfacing as "工具调用 - agentMessage" with
-    // empty content.
+    // the orphan-tool path, surfacing as a "tool call - agentMessage" entry
+    // with empty content.
     const n = createNormalizer()
     n.handle(ServerNotifications.TurnStarted, { threadId: 't', turnId: 'r1' })
     n.handle(ServerNotifications.ItemStarted, {
@@ -217,7 +215,6 @@ describe('CodexEventNormalizer (app-server protocol)', () => {
       item: { id: 'msg-1', type: 'agentMessage', text: '你好！我是 Codex。' },
     })
     const events = streamEvents(completed)
-    // Should emit: text_delta (full text) + content_block_stop.
     expect(events.find((e) => e.type === 'content_block_delta')?.delta).toEqual({
       type: 'text_delta', text: '你好！我是 Codex。',
     })
@@ -239,6 +236,18 @@ describe('CodexEventNormalizer (app-server protocol)', () => {
     expect(completed).toEqual([])
   })
 
+  it('keeps a recoverable native error inside the active turn until its actual result', () => {
+    const n = createNormalizer()
+    n.handle(ServerNotifications.TurnStarted, { threadId: 't', turn: { id: 'r1' } })
+    expect(n.handle(ServerNotifications.Error, { threadId: 't', turnId: 'r1', error: { message: 'upstream unavailable' }, willRetry: true })).toEqual([])
+    expect(n.isTerminal()).toBe(false)
+    const item = { id: 'after-retry', type: 'agentMessage', text: 'Recovered and read the update.' }
+    n.handle(ServerNotifications.ItemStarted, { threadId: 't', turnId: 'r1', item })
+    n.handle(ServerNotifications.ItemCompleted, { threadId: 't', turnId: 'r1', item })
+    const final = n.handle(ServerNotifications.TurnCompleted, { threadId: 't', turn: { id: 'r1', status: 'completed' } })
+    expect(final.at(-1)).toMatchObject({ type: 'result', is_error: false, result: item.text })
+  })
+
   it('drops notifications after terminal to prevent duplicate result(success) trailing an error', () => {
     const n = createNormalizer()
     n.handle(ServerNotifications.TurnStarted, { threadId: 't', turnId: 'r1' })
@@ -247,7 +256,6 @@ describe('CodexEventNormalizer (app-server protocol)', () => {
     expect(n.isTerminal()).toBe(true)
     expect(errMessages[errMessages.length - 1]).toMatchObject({ type: 'result', is_error: true })
 
-    // A late turn/completed must NOT emit a second result(success).
     const after = n.handle(ServerNotifications.TurnCompleted, {
       threadId: 't', turnId: 'r1',
       usage: { input_tokens: 0, output_tokens: 0 },
@@ -300,7 +308,6 @@ describe('CodexEventNormalizer (app-server protocol)', () => {
       threadId: 't', turnId: 'r1', itemId: 'msg',
       item: { id: 'msg', type: 'agentMessage' },
     })
-    // Delta streamed the full text once.
     n.handle(ServerNotifications.AgentMessageDelta, {
       threadId: 't', turnId: 'r1', itemId: 'msg', delta: '\n你好！有什么我可以帮助你的吗？',
     })
@@ -340,8 +347,8 @@ describe('CodexEventNormalizer (app-server protocol)', () => {
     // Codex's app-server emits `thread/started` immediately after a
     // successful `thread/start`, BEFORE any user message. If our handler
     // emits `system:init` in response, Halo's stream-processor flips
-    // chat.store into streaming state and the UI freezes in "思考中…"
-    // forever (no turn → no result → no exit). The handler MUST stay
+    // chat.store into streaming state and the UI freezes in the "Thinking…"
+    // state forever (no turn → no result → no exit). The handler MUST stay
     // silent; lazy init in handleTurnStarted/handleItemStarted is the
     // sole entry point for system:init.
     const n = createNormalizer()
@@ -400,7 +407,7 @@ describe('CodexEventNormalizer (app-server protocol)', () => {
   })
 
   it('emits an aggregate `tool_use` envelope BEFORE the user.tool_result so JSONL replay can link them by id', () => {
-    // Order matters: session-store.convertEventsToMessages builds toolUseMap
+    // Order matters: session-transcript.convertEventsToMessages builds toolUseMap
     // lazily as `assistant` messages arrive. If the user.tool_result is seen
     // before the corresponding tool_use, the link is silently dropped.
     const n = createNormalizer()
@@ -435,6 +442,38 @@ describe('CodexEventNormalizer (app-server protocol)', () => {
     })
   })
 
+  it('tags every aggregate of a turn with the id its message_start carried', () => {
+    // Usage accounting keys a call by that id, and a new id counts as a new call.
+    const n = createNormalizer()
+    const frames = [
+      ...n.handle(ServerNotifications.TurnStarted, { threadId: 't', turnId: 'r1' }),
+      ...n.handle(ServerNotifications.ItemStarted, { threadId: 't', turnId: 'r1', itemId: 'rs', item: { id: 'rs', type: 'reasoning' } }),
+      ...n.handle(ServerNotifications.ReasoningTextDelta, { threadId: 't', turnId: 'r1', itemId: 'rs', delta: 'Plan' }),
+      ...n.handle(ServerNotifications.ItemCompleted, { threadId: 't', turnId: 'r1', itemId: 'rs', item: { id: 'rs', type: 'reasoning', content: ['Plan'] } }),
+      ...n.handle(ServerNotifications.ItemStarted, { threadId: 't', turnId: 'r1', itemId: 'msg', item: { id: 'msg', type: 'agentMessage' } }),
+      ...n.handle(ServerNotifications.AgentMessageDelta, { threadId: 't', turnId: 'r1', itemId: 'msg', delta: 'Done' }),
+      ...n.handle(ServerNotifications.ItemCompleted, { threadId: 't', turnId: 'r1', itemId: 'msg', item: { id: 'msg', type: 'agentMessage', text: 'Done' } }),
+      ...n.handle(ServerNotifications.ItemStarted, { threadId: 't', turnId: 'r1', itemId: 'cmd', item: { id: 'cmd', type: 'commandExecution', command: 'ls' } }),
+      ...n.handle(ServerNotifications.ItemCompleted, { threadId: 't', turnId: 'r1', itemId: 'cmd', item: { id: 'cmd', type: 'commandExecution', command: 'ls', aggregatedOutput: '', status: 'completed' } }),
+    ]
+
+    const startId = streamEvents(frames).find((e) => e.type === 'message_start').message.id
+    const aggregateIds = frames.filter((m) => m?.type === 'assistant').map((m) => m.message.id)
+    expect(aggregateIds).toHaveLength(3)
+    expect(new Set(aggregateIds)).toEqual(new Set([startId]))
+  })
+
+  it('tags a terminal error aggregate with the id of the message it closes', () => {
+    const n = createNormalizer()
+    const frames = [
+      ...n.handle(ServerNotifications.TurnStarted, { threadId: 't', turnId: 'r1' }),
+      ...n.handle(ServerNotifications.TurnFailed, { threadId: 't', turnId: 'r1', error: { message: 'quota' } }),
+    ]
+
+    const startId = streamEvents(frames).find((e) => e.type === 'message_start').message.id
+    expect(frames.find((m) => m?.type === 'assistant').message.id).toBe(startId)
+  })
+
   it('does not emit an empty aggregate for a text block that streamed no content', () => {
     // Defensive: a placeholder text block with no deltas and no item.text
     // should not surface a degenerate `assistant` envelope.
@@ -455,14 +494,14 @@ describe('CodexEventNormalizer (app-server protocol)', () => {
   // includePartialMessages = true (live-UI mode)
   // ──────────────────────────────────────────────────────────────────────
   //
-  // Production regression (chat showed "你好" + "你好" stacked): in the
+  // Production regression (chat showed the reply text stacked twice): in the
   // default app-chat / interactive chat path Halo passes
   // `includePartialMessages: true` to the SDK adapter. With Codex this
   // previously meant stream-processor's `lastTextContent` was written TWICE
   // — once from the stream_event content_block_stop, then again from the
   // aggregate `type:'assistant'` text thought — producing a doubled
   // bubble. Claude SDK avoids this by emitting text in EITHER stream_event
-  // OR aggregate, never both. These tests lock the same二选一 in Codex.
+  // OR aggregate, never both. These tests lock the same either/or in Codex.
 
   it('suppresses aggregate text content when includePartialMessages=true (stream_event is the live source)', () => {
     const n = createNormalizer({ includePartialMessages: true })
@@ -502,7 +541,7 @@ describe('CodexEventNormalizer (app-server protocol)', () => {
 
   it('still emits aggregate tool_use envelope when includePartialMessages=true (ordering for JSONL linking is mandatory)', () => {
     // tool_use aggregate is independent of the text/thinking split because
-    // session-store.convertEventsToMessages links tool_use ↔ tool_result by
+    // session-transcript.convertEventsToMessages links tool_use ↔ tool_result by
     // id during JSONL replay, and the user.tool_result envelope MUST be
     // preceded by its tool_use `assistant` aggregate.
     const n = createNormalizer({ includePartialMessages: true })
@@ -524,7 +563,7 @@ describe('CodexEventNormalizer (app-server protocol)', () => {
     // Halo's stream-processor reads `system:init` (and message_start, etc.)
     // as "a turn started" and flips chat.store.isStreaming=true. If anything
     // turn-shaped reaches the stream during warmup — before the user has
-    // sent a message — the UI freezes in "思考中…", the user reasonably
+    // sent a message — the UI freezes in the "Thinking…" state, the user reasonably
     // hits Stop, the consumer enters silent-drain, and the next real
     // message goes black. This invariant locks the contract: the
     // normalizer MUST NOT emit anything spontaneously. It only reacts to

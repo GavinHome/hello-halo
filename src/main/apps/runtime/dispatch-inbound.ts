@@ -17,27 +17,34 @@
  * - No direct dependency on any specific adapter
  */
 
-import { tmpdir } from 'os'
 import type { InboundMessage, ReplyHandle, ProgressEvent } from '../../../shared/types/inbound-message'
+import type { TranscriptMessage } from '../../../shared/types/transcript'
+import { buildTeamSessionKey } from '../../../shared/apps/team-types'
+import { buildTeamChatKey } from '../../../shared/apps/im-keys'
 import { getAppManager } from '../manager'
+import { getActiveTeamRuntime } from './team'
+import { resolveTeamBacking, type TeamBacking } from './im-team-session'
 import {
   sendAppChatMessage,
   buildImSessionKey,
   clearImSession,
   isAppChatConversationGenerating,
+  abortAppChatTurn,
+  onAppChatConversationChange,
 } from './app-chat'
 import type { ImSessionContext } from './im-channels/im-prompt'
 import { getImSessionRegistry } from './im-session-registry'
 import { getActiveImChannelManager } from './im-channels'
 import { sendToRenderer } from '../../foundation/window.service'
 import { broadcastToAll } from '../../http/websocket'
-import { stopGeneration } from '../../services/agent/control'
-import { setImPermissionContext, clearImPermissionContext } from './im-permission-registry'
-import { setImStreamHandle } from './im-stream-registry'
+import { setImPermissionContext, clearImPermissionContext, type ImPermissionContext } from './im-permission-registry'
+import { isOwnerUnbound, receivesImQuestions, replyScopeCovers, resolveImPermission } from './im-sender-standing'
+import { setImStreamHandle, getImStreamHandle, clearImStreamHandle } from './im-stream-registry'
 import { analytics } from '../../services/analytics/analytics.service'
 import { AnalyticsEvents } from '../../services/analytics/types'
-import { FileExportGate } from './file-export-gate'
 import { truncateUtf16Safe } from './text-truncate'
+import { withTurnEndingNote, type AppChatTurnEnding } from './turn-ending'
+import { imErrorReply } from './im-error-reply'
 import { getSpace, getSpaceDir } from '../../services/space.service'
 import {
   getPendingRelayStore,
@@ -46,18 +53,20 @@ import {
   buildQuoteFromMessage,
 } from './pending-relays'
 import { resolveTranscriptPath } from './session-store'
+import { resolveImFileSend } from './im-channels/file-send-resolve'
 import { maybeClaimOwner } from './im-channels/owner-claim'
 import { resolveInboundIdentity } from './im-channels/identity-resolve'
 import { getImChannelsPermissionDefaults } from '../../foundation/product-config'
+import { hasOpenImQuestion, prepareRelayActions, RelayActionUnauthorizedError } from './relay-actions'
+import { beginAppChatTurnStart, appChatMessageIdentity, getAppChatTurnIdentity, injectIntoAppChatBatch, keepStoppedInputs } from './app-chat-live-turn'
+import { createTurnGate } from '../../platform/turn-gate'
+import { onAgentEvent } from '../../services/agent'
 
 // ============================================
 // Constants
 // ============================================
 
 const LOG_TAG = '[Dispatch]'
-
-/** Maximum reply length (platform-safe limit for most IM channels) */
-const MAX_REPLY_LENGTH = 4000
 
 /**
  * Shown when the model produced no usable answer (only the whitespace
@@ -71,7 +80,22 @@ const EMPTY_RESPONSE_NOTICE = 'The model returned an empty response. Please send
  * separate message later. Hardcoded Chinese like buildSupplementAck because
  * the backend does not have renderer i18n loaded.
  */
-const PROCESSING_ACK = '✅ 已收到，正在处理…'
+const PROCESSING_ACK = '已收到，正在处理…'
+
+/** How long a one-shot reply may take before the sender is told their message is being worked on. */
+const PROCESSING_NOTICE_DELAY_MS = 5_000
+
+/**
+ * The processing notice each conversation has waiting, so a stop or a clear can
+ * take it back: arriving after "Generation stopped." it would read as the work
+ * starting again.
+ */
+const pendingProcessingNotices = new Map<string, () => void>()
+
+/** Take back the processing notice the conversation has waiting, if any; a stop or a clear makes it untrue. */
+export function withdrawProcessingNotice(conversationId: string): void {
+  pendingProcessingNotices.get(conversationId)?.()
+}
 
 /**
  * Commands that abort the current generation.
@@ -88,34 +112,32 @@ const SUPPLEMENT_PREVIEW_MAX = 20
 /** Beyond this count the ack switches to "last 3 + more" truncated form. */
 const SUPPLEMENT_ACK_TRUNCATE_THRESHOLD = 5
 
-/** Check whether a message is a stop command (case-insensitive, trimmed). */
-function isStopCommand(body: string): boolean {
-  return STOP_COMMANDS.has(body.trim().toLowerCase())
+/**
+ * Whether a message is one of `commands` (case-insensitive, trimmed).
+ *
+ * A group delivers the bot only messages that mention it, so a command there
+ * arrives as "@Halo AI Team /stop" — and where a bot name ends cannot be told
+ * from the text, since it may contain spaces. So in a group a command also
+ * counts when it ends a message that starts with a mention. The mentions are
+ * never stripped from the text itself: who else a message addresses is part
+ * of what the digital human should read.
+ */
+function isCommand(body: string, chatType: 'direct' | 'group', commands: Set<string>): boolean {
+  const text = body.trim().toLowerCase()
+  if (commands.has(text)) return true
+  if (chatType !== 'group' || !text.startsWith('@')) return false
+  const last = text.split(/\s+/).pop() ?? ''
+  return last.length < text.length && commands.has(last)
 }
 
-/** Check whether a message is a clear-context command (case-insensitive, trimmed). */
-function isClearCommand(body: string): boolean {
-  return CLEAR_COMMANDS.has(body.trim().toLowerCase())
+/** Check whether a message is a stop command. */
+function isStopCommand(body: string, chatType: 'direct' | 'group'): boolean {
+  return isCommand(body, chatType, STOP_COMMANDS)
 }
 
-/**
- * Leading @mention(s) in group bodies. WeCom (and similar IM platforms) deliver
- * a group message to the bot only when the bot is mentioned, so any leading
- * mention necessarily targets this bot — no identity matching needed. Mentions
- * elsewhere in the body are kept: they can point at other members and carry
- * semantic meaning for the model.
- */
-const LEADING_GROUP_MENTION = /^(?:@\S+\s+)+/
-
-/**
- * Strip leading @mention prefix from group bodies. Direct chats pass through
- * unchanged (mention prefixes never occur there). Applied once here, before
- * every downstream consumer (session preview, commands, identity injection,
- * relay quote), so command matching survives "@bot /stop".
- */
-function normalizeInboundBody(body: string, chatType: 'direct' | 'group'): string {
-  if (chatType !== 'group') return body
-  return body.replace(LEADING_GROUP_MENTION, '')
+/** Check whether a message is a clear-context command. */
+function isClearCommand(body: string, chatType: 'direct' | 'group'): boolean {
+  return isCommand(body, chatType, CLEAR_COMMANDS)
 }
 
 /**
@@ -192,45 +214,24 @@ function shouldSendNoOwnerGuide(instanceId: string, chatId: string): boolean {
   return true
 }
 
-// ============================================
-// Helpers
-// ============================================
-
-/**
- * Look up the fileCapability for a channel instance and return a pre-bound
- * send function for the given conversation.
- *
- * The returned closure integrates `FileExportGate` — it validates the file
- * path against the space sandbox before delegating to the channel adapter.
- * This ensures all AI-initiated file sends pass through path validation.
- *
- * Returns undefined when:
- *   - The ImChannelManager is not initialized
- *   - The instance does not expose fileCapability (text-only channel)
- *   - The instance is no longer registered
- *
- * @param instanceId - IM channel instance ID
- * @param chatId - Target conversation ID (bound into the closure)
- * @param chatType - Conversation type (bound into the closure)
- * @param exportGate - FileExportGate for path validation
- */
-function resolveImFileSend(
-  instanceId: string,
-  chatId: string,
-  chatType: 'direct' | 'group',
-  exportGate: FileExportGate
-): ((filePath: string, filename?: string) => Promise<boolean>) | undefined {
-  const manager = getActiveImChannelManager()
-  if (!manager) return undefined
-  const instance = manager.getInstance(instanceId)
-  if (!instance?.fileCapability) return undefined
-  return (filePath: string, filename?: string) => {
-    const sanctioned = exportGate.sanction(filePath)
-    // Override displayName if caller provided an explicit filename
-    const file = filename
-      ? { ...sanctioned, displayName: filename }
-      : sanctioned
-    return instance.fileCapability!.sendFile(chatId, file, chatType)
+// Grants outlive the turn; retain identifiers, not its message, attachments or app configuration.
+function relayOwnerValidator(
+  instanceId: string, appId: string, teamId: string | undefined,
+  channel: string, chatId: string, senderId: string, senderName: string,
+): () => boolean {
+  const authorizationRevision = getActiveImChannelManager()?.getAuthorizationRevision(instanceId)
+  const sessionRevision = getImSessionRegistry()?.getSessionRevision(appId, channel, chatId)
+  return () => {
+    const manager = getActiveImChannelManager()
+    const registry = getImSessionRegistry()
+    const current = manager?.getInstanceConfig(instanceId)
+    const session = registry?.findSession(appId, channel, chatId)
+    return authorizationRevision !== undefined && sessionRevision !== undefined &&
+      manager?.getAuthorizationRevision(instanceId) === authorizationRevision &&
+      registry?.getSessionRevision(appId, channel, chatId) === sessionRevision &&
+      !!current?.enabled && current.appId === appId && current.teamId === teamId &&
+      resolveImPermission(current, senderId, senderName).isOwner &&
+      receivesImQuestions(current, session) && (session?.contactId ?? session?.chatId) === senderId
   }
 }
 
@@ -238,18 +239,134 @@ function resolveImFileSend(
 // Supplement Buffer
 // ============================================
 //
-// When a message arrives while AI is generating, we buffer it (with ack) instead
-// of starting a concurrent generation. On completion, buffered messages are merged
-// into a single new round using the latest entry's ReplyHandle.
+// Reply handles stay with their messages until the shared mailbox accepts them.
 
 interface SupplementEntry {
   msg: InboundMessage
   reply: ReplyHandle
   appId: string
   instanceId: string
+  identity: string
+  /** Taken back after a stop: its record already stands where it first arrived. */
+  inputRecorded?: boolean
+}
+
+const STOPPED_UNREAD = 'stopped before it was read'
+
+/** The reply path of a supplement taken back after a stop: its stream was already closed. */
+function withoutStream(reply: ReplyHandle): ReplyHandle {
+  return {
+    send: text => reply.send(text),
+    ...(reply.sendTyping ? { sendTyping: () => reply.sendTyping!() } : {}),
+    channel: reply.channel,
+    chatId: reply.chatId,
+    replyTtlMs: reply.replyTtlMs,
+  }
 }
 
 const supplementBuffers = new Map<string, SupplementEntry[]>()
+const supplementDispatches = new Map<string, symbol>()
+
+function forgetSupplements(conversationId: string, entries: readonly SupplementEntry[]): void {
+  const removed = new Set(entries)
+  const remaining = supplementBuffers.get(conversationId)?.filter(entry => !removed.has(entry)) ?? []
+  if (remaining.length > 0) supplementBuffers.set(conversationId, remaining)
+  else supplementBuffers.delete(conversationId)
+}
+
+function supplementText(entry: SupplementEntry): string {
+  let text = buildMergedMessageText([entry], entry.msg.chatType)
+  if (entry.msg.attachments?.length) {
+    text += '\n\n[Attached files — use the Read tool to access their content]\n'
+      + entry.msg.attachments.map(file => `- [${file.type}] ${file.filename}: ${file.localPath}`).join('\n')
+  }
+  return text
+}
+
+const supplementGate = createTurnGate<SupplementEntry[]>({
+  isBusy: isAppChatConversationGenerating,
+  getJobIdentity: entries => entries[0]?.identity,
+  getActiveIdentity: getAppChatTurnIdentity,
+  mergeJobs: jobs => jobs.flat(),
+  deliverMidTurn: (conversationId, entries) => {
+    if (entries[0].identity !== 'owner' && entries.some(entry => entry.msg.attachments?.length)) return false
+    if (!injectIntoAppChatBatch(conversationId, entries.map(entry => ({
+      text: supplementText(entry), images: entry.msg.images, inputRecorded: entry.inputRecorded,
+      personal: entry.identity === 'owner',
+    })), indexes => returnSupplements(conversationId, indexes.map(index => entries[index]), true))) return false
+    forgetSupplements(conversationId, entries)
+    for (const entry of entries) {
+      try { entry.reply.streaming?.dispose?.() } catch (error) {
+        console.warn(`${LOG_TAG} Accepted supplement stream cleanup failed: conversation=${conversationId}`, error)
+      }
+    }
+    return true
+  },
+  dispatch: async (conversationId, entries) => {
+    forgetSupplements(conversationId, entries)
+    const generation = Symbol(conversationId)
+    supplementDispatches.set(conversationId, generation)
+    const release = () => {
+      if (supplementDispatches.get(conversationId) !== generation) return
+      supplementDispatches.delete(conversationId)
+      supplementGate.release(conversationId)
+      supplementGate.drain(conversationId)
+    }
+    void dispatchSupplementBatch(conversationId, entries, release)
+      .catch(error => console.error(`${LOG_TAG} Supplement dispatch failed before completion: conversation=${conversationId}`, error))
+      .finally(release)
+  },
+}, {
+  describeJob: entries => `IM messages=${entries.length}`,
+  onDiscard: (entries, reason) => {
+    for (const entry of entries) {
+      try { entry.reply.streaming?.dispose?.() } catch (error) {
+        console.warn(`${LOG_TAG} Cancelled supplement stream cleanup failed: reason=${reason}`, error)
+      }
+    }
+  },
+})
+
+/**
+ * A person stopped this chat: the owner's supplements still waiting are void and
+ * stay in the record, marked; a guest's wait, without waking anything, for the
+ * next turn of this chat.
+ */
+export function holdSupplementsAfterStop(conversationId: string): void {
+  const voided: SupplementEntry[] = []
+  supplementGate.discardJobs((key, entries) => {
+    if (key !== conversationId || !entries.every(entry => entry.identity === 'owner')) return false
+    voided.push(...entries)
+    return true
+  }, STOPPED_UNREAD)
+  if (voided.length) {
+    forgetSupplements(conversationId, voided)
+    keepStoppedInputs(conversationId, [], voided.map(entry => ({ content: supplementText(entry), images: entry.msg.images })))
+  }
+  supplementGate.park(conversationId)
+}
+
+/** A guest's messages taken back from a stopped turn wait for the next turn of this chat, answered by a one-shot reply. */
+function returnSupplements(conversationId: string, entries: readonly SupplementEntry[], recorded: boolean): void {
+  const returned = entries.map(entry => ({ ...entry, inputRecorded: entry.inputRecorded || recorded, reply: withoutStream(entry.reply) }))
+  supplementBuffers.set(conversationId, [...returned, ...(supplementBuffers.get(conversationId) ?? [])])
+  supplementGate.putBack(conversationId, [returned])
+}
+
+/**
+ * A person's stop held these back before the engine got them (`records`: what
+ * was written for them meanwhile): the owner's own words are void, kept in the
+ * record and marked; a guest's wait for the next turn of this chat.
+ */
+function handBackSupplements(conversationId: string, entries: readonly SupplementEntry[], records: readonly TranscriptMessage[]): void {
+  if (entries[0]?.identity !== 'owner') {
+    returnSupplements(conversationId, entries, records.length > 0)
+    return
+  }
+  keepStoppedInputs(conversationId, records, records.length ? [] : entries
+    .filter(entry => !entry.inputRecorded)
+    .map(entry => ({ content: supplementText(entry), images: entry.msg.images })))
+}
 
 function truncatePreview(body: string): string {
   const trimmed = body.trim().replace(/\s+/g, ' ')
@@ -263,7 +380,7 @@ function buildSupplementAck(buffer: SupplementEntry[]): string {
   if (count === 1) {
     return [
       '✏️ 已收到补充消息',
-      'AI 正在这一轮的回应中，你的补充会在下一轮回应时一并理解处理。',
+      '你的补充已收到，会合并理解处理。',
       '当前已收到补充：1 条',
       `• ${truncatePreview(buffer[0].msg.body)}`,
     ].join('\n')
@@ -273,7 +390,7 @@ function buildSupplementAck(buffer: SupplementEntry[]): string {
     const lines = buffer.map((e) => `• ${truncatePreview(e.msg.body)}`)
     return [
       '✏️ 又收到补充',
-      '下一轮回应时，会把这些补充合并理解、一起回复：',
+      '会把这些补充合并理解、一起回复：',
       ...lines,
     ].join('\n')
   }
@@ -281,7 +398,7 @@ function buildSupplementAck(buffer: SupplementEntry[]): string {
   const recent = buffer.slice(-3).map((e) => `• ${truncatePreview(e.msg.body)}`)
   return [
     `✏️ 又收到补充（共 ${count} 条）`,
-    '下一轮回应时合并处理。最近 3 条：',
+    '补充消息会合并处理。最近 3 条：',
     ...recent,
     '... 更多',
   ].join('\n')
@@ -306,13 +423,7 @@ export function clearSupplementBuffer(conversationId: string): SupplementEntry[]
     return []
   }
   supplementBuffers.delete(conversationId)
-  for (const e of entries) {
-    try {
-      e.reply.streaming?.dispose?.()
-    } catch (err) {
-      console.error(`${LOG_TAG} clearSupplementBuffer dispose error:`, err)
-    }
-  }
+  supplementGate.discard(key => key === conversationId, 'conversation stopped or cleared')
   return entries
 }
 
@@ -323,14 +434,6 @@ export function clearSupplementBuffersForInstance(instanceId: string): number {
     const kept: SupplementEntry[] = []
     for (const e of entries) {
       if (e.instanceId === instanceId) {
-        try {
-          e.reply.streaming?.dispose?.()
-        } catch (err) {
-          console.error(
-            `${LOG_TAG} clearSupplementBuffersForInstance dispose error:`,
-            err
-          )
-        }
         dropped++
       } else {
         kept.push(e)
@@ -342,6 +445,7 @@ export function clearSupplementBuffersForInstance(instanceId: string): number {
       supplementBuffers.set(conversationId, kept)
     }
   }
+  supplementGate.discardJobs((_key, entries) => entries.every(entry => entry.instanceId === instanceId), 'IM instance stopped')
   if (dropped > 0) {
     console.log(
       `${LOG_TAG} Dropped ${dropped} buffered supplement(s) for stopped ` +
@@ -349,6 +453,31 @@ export function clearSupplementBuffersForInstance(instanceId: string): number {
     )
   }
   return dropped
+}
+
+/**
+ * Release a chat's buffered supplements whenever it may have gone idle: its turn
+ * ended, a start failed or was stopped before reaching the engine, a team wake
+ * gave up its hold. Deferred so the engine's own end-of-turn bookkeeping has
+ * run; the flush rechecks and waits again if the chat is still busy.
+ *
+ * @returns unsubscribe
+ */
+export function releaseSupplementsWhenIdle(): () => void {
+  const stopReady = onAgentEvent(event => {
+    if (event.channel === 'agent:turn-start' && !event.relayed) supplementGate.notifyReady(event.conversationId)
+  })
+  const stopChange = onAppChatConversationChange((conversationId) => {
+    if (!supplementBuffers.has(conversationId)) return
+    setImmediate(() => {
+      try {
+        supplementGate.drain(conversationId)
+      } catch (err) {
+        console.error(`${LOG_TAG} flushSupplementBuffer failed: conv=${conversationId}`, err)
+      }
+    })
+  })
+  return () => { stopReady.dispose(); stopChange() }
 }
 
 /** Merge supplement bodies. Groups get per-entry <msg-sender> tags for attribution. */
@@ -375,27 +504,11 @@ function buildMergedMessageText(
 
 /**
  * Drain the supplement buffer and dispatch a merged round. No-op if empty.
- * Re-checks the busy lock to avoid racing with a newly-arrived message;
- * if busy, defers — the next round's finally will retry.
+ * Called on every change of the chat, including ones that leave it busy (a
+ * round queued, a turn begun): while it is busy the supplements stay queued,
+ * and the change that frees it calls again.
  */
-export function flushSupplementBuffer(conversationId: string): void {
-  const entries = supplementBuffers.get(conversationId)
-  if (!entries || entries.length === 0) {
-    supplementBuffers.delete(conversationId)
-    return
-  }
-
-  if (isAppChatConversationGenerating(conversationId)) {
-    console.log(
-      `${LOG_TAG} flushSupplementBuffer deferred: conv=${conversationId} is ` +
-      `busy (race with newly-arrived message), ${entries.length} supplement(s) ` +
-      `remain queued for the next idle window`
-    )
-    return
-  }
-
-  supplementBuffers.delete(conversationId)
-
+async function dispatchSupplementBatch(conversationId: string, entries: SupplementEntry[], onSessionRetired: () => void): Promise<void> {
   const last = entries[entries.length - 1]
 
   // Dispose all stream sessions except the last (used for the merged round)
@@ -468,14 +581,18 @@ export function flushSupplementBuffer(conversationId: string): void {
     `images=${mergedImages.length}`
   )
 
-  setImmediate(() => {
-    dispatchInboundMessage(merged, last.reply, last.appId, last.instanceId, {
-      skipBusyCheck: true,
-      preBuiltMessageText: messageText,
-      preBuiltSenderIdentity: senderIdentity,
-    }).catch((err) => {
-      console.error(`${LOG_TAG} Supplement flush dispatch failed:`, err)
-    })
+  // Dispatched in the same tick as the busy check above, which the merged round
+  // skips: the turn holds the conversation from its first synchronous step, so a
+  // message arriving in between waits behind it instead of starting beside it.
+  await dispatchInboundMessage(merged, last.reply, last.appId, last.instanceId, {
+    skipBusyCheck: true,
+    preBuiltMessageText: messageText,
+    preBuiltSenderIdentity: senderIdentity,
+    recordedMessages: entries.filter(entry => !entry.inputRecorded).map(entry => ({ content: supplementText(entry), images: entry.msg.images })),
+    onSessionRetired,
+    onHeldBack: records => handBackSupplements(conversationId, entries, records),
+  }).catch((err) => {
+    console.error(`${LOG_TAG} Supplement flush dispatch failed:`, err)
   })
 }
 
@@ -488,6 +605,10 @@ interface DispatchOptions {
   skipBusyCheck?: boolean
   preBuiltMessageText?: string
   preBuiltSenderIdentity?: { id: string; name: string }
+  recordedMessages?: import('./app-chat').AppChatRequest['recordedMessages']
+  onSessionRetired?: () => void
+  /** The pre-merged messages' own handling when a person's stop holds them back on their way. */
+  onHeldBack?: (records: readonly TranscriptMessage[]) => void
 }
 
 /**
@@ -513,6 +634,26 @@ export async function dispatchInboundMessage(
   if (!manager) {
     console.warn(`${LOG_TAG} App manager not initialized`)
     return
+  }
+
+  // Resolve the IM instance config up front — it decides whether this chat is
+  // backed by a single digital human (appId) or a digital team (teamId).
+  const channelManager = getActiveImChannelManager()
+  let instanceCfg = channelManager?.getInstanceConfig(instanceId)
+
+  // Team-backed instance: `appId` is the bound member, and it serves this chat
+  // with a long-lived conversation epoch + team tools. The member is a real
+  // digital human, so everything below (session, registry, reply, file send)
+  // works on it unchanged.
+  let teamBacking: TeamBacking | null = null
+  if (instanceCfg?.teamId) {
+    // One conversation epoch per chat: 1:1 → per person, group → per group
+    // (matches how a single digital human keys IM sessions by chatId). The key
+    // carries instanceId + chatType so the runtime can push this member's later
+    // (woken) replies back to this exact chat.
+    const chatKey = buildTeamChatKey(instanceId, msg.chatType, msg.chatId)
+    teamBacking = resolveTeamBacking(instanceCfg.teamId, appId, chatKey)
+    if (!teamBacking) return // The resolver logs the rejected chat and binding.
   }
 
   const app = manager.getApp(appId)
@@ -550,8 +691,6 @@ export async function dispatchInboundMessage(
     })
   }
 
-  const channelManager = getActiveImChannelManager()
-  let instanceCfg = channelManager?.getInstanceConfig(instanceId)
   // Default 'all': instances created before the field existed must not break.
   const replyScope = instanceCfg?.replyScope ?? 'all'
 
@@ -566,12 +705,12 @@ export async function dispatchInboundMessage(
   // initialisation, replyScope is a reply policy. A 'group'-scoped instance
   // still needs its owner bound via DM — gating DMs first would make claiming
   // impossible while the group guide keeps pointing users at DMs.
-  const ownersUnset =
-    instanceCfg?.permissionEnabled === true &&
-    (!Array.isArray(instanceCfg.owners) || instanceCfg.owners.length === 0)
-  if (ownersUnset) {
+  if (isOwnerUnbound(instanceCfg)) {
     if (msg.chatType === 'direct' && msg.from) {
-      const claimed = await maybeClaimOwner(instanceId, msg.from)
+      // A merged re-dispatch does not retry: each of its messages already did,
+      // and awaiting here would reopen the gap between the flush's busy check
+      // and the turn start. It runs as the guest a failed claim leaves.
+      const claimed = !options.skipBusyCheck && (await maybeClaimOwner(instanceId, msg.from))
       if (claimed) {
         const confirmation = replyScope === 'group' ? OWNER_CLAIMED_GROUP_ONLY_MESSAGE : OWNER_CLAIMED_MESSAGE
         try {
@@ -601,8 +740,22 @@ export async function dispatchInboundMessage(
     }
   }
 
+  const conversationId = teamBacking
+    ? buildTeamSessionKey(app.id, teamBacking.teamId, teamBacking.epochId)
+    : buildImSessionKey(app.id, msg.channel, msg.chatType, msg.chatId)
+
   // ── Reply scope check ──────────────────────────────────────────
-  if (replyScope !== 'all' && replyScope !== msg.chatType) {
+  // Stopping a private turn remains possible after its question was answered.
+  const registry = getImSessionRegistry()
+  const scopeCoversChat = replyScopeCovers(instanceCfg, msg.chatType)
+  const answersInDirectChat = !scopeCoversChat && msg.chatType === 'direct' &&
+    resolveImPermission(instanceCfg, msg.from, msg.fromName ?? msg.from).isOwner &&
+    (((isStopCommand(msg.body, msg.chatType) || isClearCommand(msg.body, msg.chatType)) &&
+      isAppChatConversationGenerating(conversationId)) ||
+      (!!instanceCfg && (instanceCfg.permissionEnabled ||
+        receivesImQuestions(instanceCfg, registry?.findSession(app.id, msg.channel, msg.chatId))) &&
+        hasOpenImQuestion(app.id, instanceCfg.teamId)))
+  if (!scopeCoversChat && !answersInDirectChat) {
     const rejectionMsg = msg.chatType === 'direct' ? DM_REJECTED_MESSAGE : GROUP_REJECTED_MESSAGE
     console.log(
       `${LOG_TAG} Blocked by replyScope: scope=${replyScope}, chatType=${msg.chatType}, ` +
@@ -620,22 +773,15 @@ export async function dispatchInboundMessage(
     reply = { ...reply, streaming: undefined }
   }
 
-  // Build isolated session key
-  const conversationId = buildImSessionKey(app.id, msg.channel, msg.chatType, msg.chatId)
-
-  // Normalize the body once at the single funnel every channel passes through.
-  // Pre-built paths (supplement flush) short-circuit identity injection below
-  // but still rely on the body for commands and previews.
-  msg.body = normalizeInboundBody(msg.body, msg.chatType)
-
   // Register session in ImSessionRegistry (idempotent — updates lastActiveAt on repeat)
-  const registry = getImSessionRegistry()
   if (registry) {
     const displayName = msg.chatName ?? msg.fromName ?? msg.chatId
     registry.register(app.id, msg.channel, msg.chatId, msg.chatType, instanceId, {
       displayName,
+      teamContext: teamBacking ? { teamId: teamBacking.teamId, epochId: teamBacking.teamContext.epochId } : undefined,
       lastSender: msg.fromName,
       lastMessage: truncateUtf16Safe(msg.body, 50),
+      ...(msg.chatType === 'direct' && msg.from ? { contactId: msg.from } : {}),
     })
 
     // Notify renderer of session update for real-time panel refresh
@@ -652,17 +798,21 @@ export async function dispatchInboundMessage(
     broadcastToAll('app:im-session-updated', sessionEvent)
   }
 
-  // ── Stop command: abort generation, silently drop buffered supplements ──
-  if (isStopCommand(msg.body)) {
-    const dropped = clearSupplementBuffer(conversationId)
+  // ── Stop command: abort generation; the owner's waiting supplements are void, a guest's wait ──
+  if (isStopCommand(msg.body, msg.chatType)) {
+    withdrawProcessingNotice(conversationId)
+    const waiting = supplementBuffers.get(conversationId)?.length ?? 0
     const isActive = isAppChatConversationGenerating(conversationId)
+    if (!isActive) holdSupplementsAfterStop(conversationId)
     if (isActive) {
       console.log(
         `${LOG_TAG} Stop command received: channel=${msg.channel}, chatId=${msg.chatId}, ` +
-        `session=${conversationId}, droppedSupplements=${dropped.length}`
+        `session=${conversationId}, waitingSupplements=${waiting}`
       )
       try {
-        await stopGeneration(conversationId)
+        // Reaches a message still on its way to the engine as well as a turn
+        // already running: both read as busy above, so both must be stoppable.
+        await abortAppChatTurn(conversationId, 'user')
         await reply.send('Generation stopped.')
       } catch (err) {
         console.error(`${LOG_TAG} Failed to stop generation: session=${conversationId}`, err)
@@ -675,14 +825,35 @@ export async function dispatchInboundMessage(
   }
 
   // ── Clear command: reset context, silently drop buffered supplements ──
-  if (isClearCommand(msg.body)) {
+  if (isClearCommand(msg.body, msg.chatType)) {
+    withdrawProcessingNotice(conversationId)
     const dropped = clearSupplementBuffer(conversationId)
     console.log(
       `${LOG_TAG} Clear command received: channel=${msg.channel}, chatId=${msg.chatId}, ` +
       `session=${conversationId}, droppedSupplements=${dropped.length}`
     )
     try {
-      await clearImSession(app.id, app.spaceId!, msg.channel, msg.chatType, msg.chatId)
+      if (teamBacking) {
+        // Team-backed: seal THIS chat's conversation epoch so the next message
+        // starts a fresh one (the team's equivalent of clearing chat context).
+        // Only this chat's epoch is affected — other chats keep their context.
+        const sessionRevision = registry?.getSessionRevision(app.id, msg.channel, msg.chatId)
+        await getActiveTeamRuntime()?.sealConversationEpoch(
+          teamBacking.teamId, teamBacking.epochId, 'cleared', 'Cleared by user'
+        )
+        // Member-session closure can yield to a successor at the same registry address.
+        if (sessionRevision !== undefined && registry?.getSessionRevision(app.id, msg.channel, msg.chatId) === sessionRevision) {
+          registry.resetActivity(app.id, msg.channel, msg.chatId)
+        } else {
+          console.warn(
+            `${LOG_TAG} Skipped stale clear activity reset: session=${conversationId}, ` +
+            `appId=${app.id}, channel=${msg.channel}, chatId=${msg.chatId}, instanceId=${instanceId}, ` +
+            'reason=session revision changed or is missing'
+          )
+        }
+      } else {
+        await clearImSession(app.id, app.spaceId!, msg.channel, msg.chatType, msg.chatId)
+      }
       clearImPermissionContext(conversationId)
       // Undelivered relay context belongs to the discarded conversation.
       getPendingRelayStore()?.clear(conversationId)
@@ -698,16 +869,29 @@ export async function dispatchInboundMessage(
   // "Busy" covers an autonomous turn too: starting a round while one is running
   // would let that turn claim this message's round and answer the wrong thing.
   if (!options.skipBusyCheck && isAppChatConversationGenerating(conversationId)) {
-    const entry: SupplementEntry = { msg, reply, appId, instanceId }
+    const permission = resolveImPermission(instanceCfg, msg.from, msg.fromName ?? msg.from)
+    const entry: SupplementEntry = { msg, reply, appId, instanceId, identity: appChatMessageIdentity(permission) }
     const buffer = supplementBuffers.get(conversationId) ?? []
     buffer.push(entry)
     supplementBuffers.set(conversationId, buffer)
+
+    let disposition: Awaited<ReturnType<typeof supplementGate.deliver>>
+    try {
+      disposition = await supplementGate.deliver(conversationId, [entry])
+    } catch (error) {
+      forgetSupplements(conversationId, [entry])
+      console.error(`${LOG_TAG} Supplement was not accepted: conversation=${conversationId}`, error)
+      await reply.send('This conversation has too many pending messages. Please try again shortly.')
+      return
+    }
 
     // Ack via proactive push (non-fatal)
     const ackInstance = channelManager?.getInstance(instanceId)
     if (ackInstance) {
       try {
-        ackInstance.pushToChat(msg.chatId, buildSupplementAck(buffer), msg.chatType)
+        ackInstance.pushToChat(msg.chatId, disposition === 'mid_turn'
+          ? '✏️ 已加入正在进行的处理'
+          : buildSupplementAck(supplementBuffers.get(conversationId) ?? [entry]), msg.chatType)
       } catch (err) {
         console.error(`${LOG_TAG} Supplement ack push failed:`, err)
       }
@@ -772,24 +956,15 @@ export async function dispatchInboundMessage(
       : body
   }
 
-  // Resolve owner status and write permission context to the registry.
-  // app-chat.ts reads this to enforce tool restrictions for guests.
-  //
-  // Three cases:
-  //   permissionEnabled=false            → everyone is owner (no restrictions, personal use default)
-  //   permissionEnabled=true, owners=[]  → everyone is guest, deny-all (no one has write access)
-  //   permissionEnabled=true, owners=[…] → only listed IDs are owners; others are guests
-  const permissionEnabled = instanceCfg?.permissionEnabled ?? false
-  const owners = permissionEnabled ? instanceCfg?.owners : undefined
-  const hasOwnerRestriction = Array.isArray(owners) && owners.length > 0
-  const isOwner = !permissionEnabled || (hasOwnerRestriction && owners!.includes(msg.from))
-  setImPermissionContext(conversationId, {
-    senderId: msg.from,
-    senderName,
-    isOwner,
-    guestPolicy: permissionEnabled ? instanceCfg?.guestPolicy : undefined,
-    ownerIds: hasOwnerRestriction ? owners! : undefined,
-  })
+  // Resolve the sender's standing. It travels with this message to app-chat,
+  // which holds the turn to it; the registry keeps it as the chat's last sender
+  // for turns that have none of their own (a team-fronted chat woken by a
+  // teammate). A team-fronted chat is held to the same rules, on the member's
+  // team session.
+  const imPermission: ImPermissionContext = resolveImPermission(instanceCfg, msg.from, senderName)
+  const { isOwner } = imPermission
+  const hasOwnerRestriction = imPermission.ownerIds !== undefined
+  setImPermissionContext(conversationId, imPermission)
 
   // Register the active round's streaming handle ONLY on the start-of-round
   // path — never on the supplement-buffer branch above (which returns early).
@@ -812,10 +987,8 @@ export async function dispatchInboundMessage(
   }
 
   // ── Cross-session relay context ───────────────────────
-  // Messages previously pushed to THIS chat via notify_bot (from other
-  // sessions) left no trace in this session's AI context — the push was pure
-  // SDK transport. Append them so they ride this inbound message into the
-  // engine's history, the only engine-agnostic route in.
+  // Only notify_bot pushes and private owner questions enter the AI's context;
+  // automatic run results remain in the record the person reads.
   //
   // Appended, never prefixed: position 0 belongs to <msg-sender> (the identity
   // rules define authority by position), and a prefix would also break slash
@@ -823,40 +996,23 @@ export async function dispatchInboundMessage(
   //
   // Events are committed only once the engine accepts the message, so any
   // failure in between re-delivers them with the next inbound message.
+  const recordedMessage = messageText
   const relayStore = getPendingRelayStore()
-  const pendingRelays = relayStore?.peek(conversationId) ?? []
+  const receivesActions = msg.chatType === 'direct' && isOwner && !!instanceCfg &&
+    receivesImQuestions(instanceCfg, registry?.findSession(app.id, msg.channel, msg.chatId))
+  const pendingRelays = (relayStore?.peek(conversationId) ?? [])
+    .filter(event => receivesActions || event.kind !== 'push' || !event.action)
   let relayIdsToCommit: string[] = []
-  if (pendingRelays.length > 0) {
-    try {
-      const spacePath = getSpace(app.spaceId!)?.path ?? ''
-      const relayContext = renderRelayContext(pendingRelays, {
-        includeOrigin: isOwner,
-        allowTranscript: hasOwnerRestriction && isOwner,
-        resolveTranscriptPath: spacePath
-          ? (e) => resolveTranscriptPath(spacePath, e.source.appId, e.source.runId)
-          : undefined,
-      })
-      messageText += `\n\n${relayContext}`
-      relayIdsToCommit = pendingRelays.map(e => e.id)
-      console.log(
-        `${LOG_TAG} Appended ${pendingRelays.length} relay event(s): session=${conversationId}, ` +
-        `origin=${isOwner}, transcript=${hasOwnerRestriction && isOwner}`
-      )
-    } catch (err) {
-      // Never let relay rendering cost the user their message; with nothing to
-      // commit the events stay queued for the next inbound message.
-      console.error(`${LOG_TAG} Relay rendering failed: session=${conversationId}`, err)
-    }
-  }
 
-  // FileExportGate roots = the space's working directory (matches the AI's
-  // cwd, where attachments and AI-produced files actually live) + tmpdir.
-  // See getSpaceDir() for why this is not the same as space.path.
-  const exportGate = new FileExportGate([getSpaceDir(app.spaceId!), tmpdir()])
-
-  // Resolve file-send capability for this instance (absent for text-only channels)
-  const chatTypeNorm: 'direct' | 'group' = msg.chatType
-  const imFileSend = resolveImFileSend(instanceId, msg.chatId, chatTypeNorm, exportGate)
+  // Resolve file-send capability for this chat (absent for text-only channels).
+  // A later runtime-woken turn of a team-backed chat must resolve this the same
+  // way — see resolveImFileSend for why a divergence is fatal, not cosmetic.
+  const imFileSend = resolveImFileSend({
+    instanceId,
+    chatId: msg.chatId,
+    chatType: msg.chatType,
+    spaceDir: getSpaceDir(app.spaceId!),
+  })
 
   // Build IM session context for system prompt injection.
   // Resolves display name with priority: customName > resolvedName > chatName > fromName > chatId.
@@ -887,27 +1043,93 @@ export async function dispatchInboundMessage(
     `sender=${msg.from}(${senderName}), isOwner=${isOwner}`
   )
 
-  // Send an immediate acknowledgment so the user sees the <think> block appear
-  // right away instead of staring at silence while session + MCP servers init.
-  // On non-streaming channels the status cannot ride an existing stream — send
-  // a one-shot notice instead, so acks also work when streaming is stripped
-  // (instance streaming off, or group quoteReply disabled in the provider).
+  // A stream shows at once that the message is being worked on, in the reply
+  // itself. A one-shot reply (streaming off, or stripped in a group without
+  // quote reply) would need a message of its own: sent only once the answer
+  // has been slow to come — a quick answer needs nothing before it — and never
+  // where the owner turned the notice off.
+  let processingNotice: ReturnType<typeof setTimeout> | undefined
   if (reply.streaming) {
     reply.streaming.update({ type: 'status', text: PROCESSING_ACK }).catch(() => {})
-  } else {
-    reply.send(PROCESSING_ACK).catch(() => {})
+  } else if (instanceCfg?.processingNotice !== false) {
+    processingNotice = setTimeout(() => { reply.send(PROCESSING_ACK).catch(() => {}) }, PROCESSING_NOTICE_DELAY_MS)
+  }
+  const settleProcessingNotice = (): void => {
+    clearTimeout(processingNotice)
+    if (pendingProcessingNotices.get(conversationId) === settleProcessingNotice) pendingProcessingNotices.delete(conversationId)
+  }
+  if (processingNotice) pendingProcessingNotices.set(conversationId, settleProcessingNotice)
+
+  // A person's stop held this message back before the engine got it.
+  const handBack = (records: readonly TranscriptMessage[]): void => {
+    if (options.onHeldBack) options.onHeldBack(records)
+    else handBackSupplements(conversationId, [{ msg, reply, appId, instanceId, identity: appChatMessageIdentity(imPermission) }], records)
   }
 
+  // Listener startup may await; the existing hold keeps supplements and stop/clear safe.
+  const turnStart = beginAppChatTurnStart(conversationId)
   try {
+    if (pendingRelays.length > 0) {
+      try {
+        const actions = receivesActions && pendingRelays.some(event => event.kind === 'push' && event.action)
+          ? await prepareRelayActions(pendingRelays, relayOwnerValidator(
+            instanceId, app.id, instanceCfg?.teamId, msg.channel, msg.chatId, msg.from, senderName,
+          ))
+          : undefined
+        const spacePath = getSpace(app.spaceId!)?.path ?? ''
+        const relayContext = renderRelayContext(pendingRelays, {
+          includeOrigin: isOwner,
+          allowTranscript: hasOwnerRestriction && isOwner,
+          resolveTranscriptPath: spacePath
+            ? (e) => resolveTranscriptPath(spacePath, e.source.appId, e.source.runId)
+            : undefined,
+          actions,
+        })
+        messageText += `\n\n${relayContext}`
+        relayIdsToCommit = pendingRelays.map(e => e.id)
+      } catch (err) {
+        if (!turnStart.cancelled) {
+          if (err instanceof RelayActionUnauthorizedError) throw err
+          throw new Error('The question context could not be prepared; pending messages are retained. Please answer in Halo.')
+        }
+      }
+    }
+    if (turnStart.cancelled) {
+      console.warn(`${LOG_TAG} Message stopped during relay preparation: session=${conversationId}`)
+      try {
+        reply.streaming?.dispose?.()
+      } catch (err) {
+        console.warn(`${LOG_TAG} Stopped reply stream could not be disposed: session=${conversationId}`, err)
+      } finally {
+        if (reply.streaming && getImStreamHandle(conversationId) === reply.streaming) clearImStreamHandle(conversationId)
+      }
+      if (turnStart.stoppedBy === 'user') handBack([])
+      return
+    }
     await sendAppChatMessage({
+      turnStart,
+      onSessionRetired: options.onSessionRetired,
+      onHeldBack: handBack,
       appId: app.id,
       spaceId: app.spaceId,
       message: messageText,
+      recorded: { content: recordedMessage },
+      recordedMessages: options.recordedMessages,
       conversationId,
       images: msg.images,
+      attachedFiles: msg.attachments?.map(a => a.localPath),
       imFileSend,
       senderIdentity,
       imSession,
+      imPermission,
+      // Team-backed chat: hand the member its team context (tools + Entry + the
+      // long-lived conversation epoch). Absent for single-human chats. A guest
+      // is someone nobody here vouched for, so their request is stamped as a
+      // guest's: whatever this turn sets in motion — a teammate it is handed to,
+      // a check, a question — stays a guest's request.
+      ...(teamBacking
+        ? { teamContext: isOwner ? teamBacking.teamContext : { ...teamBacking.teamContext, origin: 'guest' as const } }
+        : {}),
 
       // IM has no Deep Thinking toggle, so replies take the same extended
       // thinking this digital human's scheduled runs get.
@@ -941,7 +1163,8 @@ export async function dispatchInboundMessage(
         : undefined,
 
       // Use streaming.finish when available, else fall back to one-shot send
-      onReply: (finalContent: string) => {
+      onReply: (finalContent: string, ending?: AppChatTurnEnding) => {
+        settleProcessingNotice()
         void analytics.track(AnalyticsEvents.MESSAGE_SENT, {
           source: 'im-reply',
           direction: 'outbound',
@@ -955,9 +1178,12 @@ export async function dispatchInboundMessage(
         // A whitespace-only payload is the empty-response repair placeholder:
         // we must still finish the streaming session (the only normal-path
         // terminator), but surface a notice rather than a blank message.
-        const replyText = finalContent.trim()
-          ? truncateUtf16Safe(finalContent, MAX_REPLY_LENGTH)
-          : EMPTY_RESPONSE_NOTICE
+        // A turn that stopped short says so, after what it wrote or alone.
+        // Handed over whole: what one message can carry is the channel's to
+        // know, and it sends a longer answer in parts.
+        const replyText = ending
+          ? withTurnEndingNote(finalContent, ending)
+          : finalContent.trim() ? finalContent : EMPTY_RESPONSE_NOTICE
         const sendFn = reply.streaming
           ? () => reply.streaming!.finish(replyText)
           : () => reply.send(replyText)
@@ -970,6 +1196,7 @@ export async function dispatchInboundMessage(
       },
     })
   } catch (err) {
+    settleProcessingNotice()
     console.error(
       `${LOG_TAG} Execution failed: app=${app.id}, channel=${msg.channel}, chatId=${msg.chatId}`,
       err
@@ -979,7 +1206,7 @@ export async function dispatchInboundMessage(
     // separate one-shot reply — otherwise WeCom receives an unterminated stream
     // plus a duplicate message, garbling the user's chat.
     try {
-      const errorMsg = `⚠️ Error: ${(err as Error).message?.slice(0, 200) ?? 'Unknown error'}`
+      const errorMsg = imErrorReply(err)
       if (reply.streaming) {
         await reply.streaming.finish(errorMsg)
       } else {
@@ -988,5 +1215,8 @@ export async function dispatchInboundMessage(
     } catch {
       // Reply channel may be unavailable — nothing more we can do
     }
+  } finally {
+    settleProcessingNotice()
+    turnStart.end()
   }
 }

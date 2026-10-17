@@ -11,21 +11,67 @@
 import { activeSessions, v2Sessions, closeV2Session, getConsumerHandle, getRunningConsumerIds } from './session-manager'
 import { hasActiveTeamTasks } from './subagent-handler'
 import { getActivePendingQuestion, type RecoverablePendingQuestion } from './permission-handler'
+import { withdrawUnreadLiveInput } from './live-turn'
 import type { Thought } from './types'
+import type { ApiRetryState } from '../../../shared/types/api-retry'
+import { snapshotApiRetry } from './api-retry'
+import { Emitter, type Event } from '../../platform/event'
 
 // ============================================
 // Stop Generation
 // ============================================
 
 /**
+ * `user`: a person stopped the work. Live input the engine accepted but has not
+ * read is withdrawn first and never runs (its sender's `onWithdrawn` decides
+ * what becomes of it).
+ * `internal`: the system stopped the turn; unread input runs right after it.
+ */
+export type StopReason = 'user' | 'internal'
+
+export interface StopGenerationOptions {
+  reason: StopReason
+}
+
+const userStop = new Emitter<string>()
+const userStopSettled = new Emitter<string>()
+
+/**
+ * A person stopped this conversation's work (payload: conversation id). Fires
+ * synchronously inside `stopGeneration`, before its unread input is withdrawn,
+ * so a delivery gate can hold what it still buffers for that conversation.
+ */
+export const onUserStop: Event<string> = userStop.event
+
+/**
+ * A person's stop of this conversation has done its part: unread input is
+ * withdrawn and the turn was asked to end (or its process closed). When the
+ * stop withdrew a continuation nothing had started yet, no turn end follows;
+ * a turn that was running still reports its end as usual.
+ */
+export const onUserStopSettled: Event<string> = userStopSettled.event
+
+/**
  * Stop generation for a specific conversation or all conversations
  *
  * @param conversationId - Optional conversation ID. If not provided, stops all.
  */
-export async function stopGeneration(conversationId?: string): Promise<void> {
+export async function stopGeneration(conversationId: string | undefined, options: StopGenerationOptions): Promise<void> {
   // Log caller stack trace for debugging spurious abort
-  console.log(`[Agent] stopGeneration called, conversationId=${conversationId ?? 'ALL'}`, new Error('stopGeneration caller trace').stack)
+  console.log(`[Agent] stopGeneration called, conversationId=${conversationId ?? 'ALL'}, reason=${options.reason}`, new Error('stopGeneration caller trace').stack)
 
+  const stoppedByUser = options.reason !== 'user' ? []
+    : conversationId ? [conversationId] : Array.from(new Set([...v2Sessions.keys(), ...activeSessions.keys()]))
+  for (const id of stoppedByUser) userStop.fire(id)
+  await Promise.all(stoppedByUser.map(withdrawUnreadLiveInput))
+  try {
+    await endGeneration(conversationId)
+  } finally {
+    for (const id of stoppedByUser) userStopSettled.fire(id)
+  }
+}
+
+async function endGeneration(conversationId: string | undefined): Promise<void> {
   if (conversationId) {
     // Try consumer-based stop first (new REPL consumer model for chat conversations)
     const consumer = getConsumerHandle(conversationId)
@@ -193,6 +239,8 @@ export function getSessionState(conversationId: string): {
   thoughts: Thought[]
   spaceId?: string
   pendingQuestion?: RecoverablePendingQuestion
+  /** The retry the engine is waiting on, with the wait left as of now. */
+  apiRetry?: ApiRetryState
 } {
   // A pending question lets reconnecting clients rebuild the question card, and
   // marks the session active on its own: the turn is blocked on the answer even
@@ -208,7 +256,8 @@ export function getSessionState(conversationId: string): {
         isActive: true,
         thoughts: [...sessionState.thoughts],
         spaceId: sessionState.spaceId,
-        pendingQuestion
+        pendingQuestion,
+        ...(sessionState.apiRetry ? { apiRetry: snapshotApiRetry(sessionState.apiRetry) } : {})
       }
     }
   }
@@ -224,6 +273,7 @@ export function getSessionState(conversationId: string): {
     isActive: true,
     thoughts: [...session.thoughts],
     spaceId: session.spaceId,
-    pendingQuestion
+    pendingQuestion,
+    ...(session.apiRetry ? { apiRetry: snapshotApiRetry(session.apiRetry) } : {})
   }
 }

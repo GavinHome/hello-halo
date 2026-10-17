@@ -1,0 +1,90 @@
+/**
+ * Per-instance log path isolation.
+ *
+ * electron-log keys its file path on the app name, which is identical across
+ * every running instance — without intervention a dev run, per-variant builds,
+ * and every node of a local multi-node cluster all interleave into the SAME
+ * main.log, making cross-node diagnosis unreadable.
+ *
+ * Isolation rules (first match wins):
+ *   1. HALO_DATA_DIR set (cluster node / custom home) → <dataDir>/logs, so a
+ *      node's state + logs live self-contained in one folder. Note macOS
+ *      Electron does not derive its logs path from the HOME env var, so a
+ *      launcher overriding HOME alone does NOT isolate logs — this rule does.
+ *   2. Dev run or non-default product variant → a folder of its own
+ *      (`variantLogsDir`).
+ *   3. Packaged default variant → electron-log's default path, untouched.
+ *
+ * Must run in early bootstrap, before app.whenReady() and before the first
+ * file-transport write creates a log file at the default location.
+ */
+
+import { join } from 'path'
+import { homedir } from 'os'
+import type { App } from 'electron'
+import log from 'electron-log/main.js'
+import { getDataFolderName, DEFAULT_DATA_FOLDER_NAME } from '../product-config'
+import { isolateHttpLogPath } from './http-transport'
+import { isolateSdkLogPath } from './sdk-transport'
+
+export function isolateLogPath(app: App): void {
+  const customDataDir = process.env.HALO_DATA_DIR
+  if (customDataDir) {
+    // Expand ~ the same way config.service getHaloDir does (shells don't
+    // expand inside env vars).
+    const expanded = customDataDir.startsWith('~')
+      ? join(homedir(), customDataDir.slice(1))
+      : customDataDir
+    applyLogsPath(app, join(expanded, 'logs'), 'instance data dir')
+  } else {
+    const dataFolderName = getDataFolderName()
+    const logFolderName = !app.isPackaged ? `${dataFolderName}-dev` : dataFolderName
+    if (logFolderName !== DEFAULT_DATA_FOLDER_NAME) {
+      const logsDir = variantLogsDir({
+        platform: process.platform,
+        packaged: app.isPackaged,
+        logsPath: app.getPath('logs'),
+        userDataPath: app.getPath('userData'),
+        logFolderName,
+      })
+      applyLogsPath(app, logsDir, 'variant')
+    }
+  }
+
+  // Attribution banner: the first line of every log file names its instance,
+  // so even copied/concatenated logs stay attributable to a node.
+  log.info(`[Main] instance dataDir=${customDataDir ?? 'default'} pid=${process.pid}`)
+}
+
+/**
+ * Logs folder of a dev run or a non-default variant.
+ *
+ * macOS keeps logs outside userData, under one parent shared by every app, so
+ * the variant takes its own folder there. Windows and Linux keep them inside
+ * userData, which is already per variant, so a packaged variant writes to
+ * <userData>/logs; deriving a sibling from that folder put the logs in a
+ * second folder named after the variant, next to an empty logs/. A dev run
+ * shares userData with the installed copy, so it still writes beside it.
+ */
+function variantLogsDir(paths: {
+  platform: NodeJS.Platform
+  packaged: boolean
+  logsPath: string
+  userDataPath: string
+  logFolderName: string
+}): string {
+  if (paths.platform === 'darwin') return join(paths.logsPath, '..', paths.logFolderName)
+  return join(paths.userDataPath, paths.packaged ? 'logs' : paths.logFolderName)
+}
+
+function applyLogsPath(app: App, logsPath: string, reason: string): void {
+  app.setPath('logs', logsPath)
+  const resolvePathFn = (variables: { fileName?: string }) =>
+    join(logsPath, variables.fileName ?? 'main.log')
+  log.transports.file.resolvePathFn = resolvePathFn
+  // log.create() instances (http-raw.log, halo-sdk.log) don't inherit the
+  // default logger's resolvePathFn, so they need isolating explicitly too.
+  isolateHttpLogPath(resolvePathFn)
+  isolateSdkLogPath(resolvePathFn)
+  console.log(`[Main] logs isolated (${reason}): ${logsPath}`)
+}

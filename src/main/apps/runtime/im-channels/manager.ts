@@ -14,6 +14,7 @@
  * Thread safety: All mutations are synchronous (single Node.js event loop).
  */
 
+import { isDeepStrictEqual } from 'node:util'
 import type {
   ImChannelProvider,
   ImChannelInstance,
@@ -34,6 +35,8 @@ export class ImChannelManager {
   private instances = new Map<string, ImChannelInstance>()
   /** Current config snapshot (for change detection) */
   private currentConfigs: ImChannelInstanceConfig[] = []
+  /** Opaque identities retained only for currently configured instances. */
+  private authorizationRevisions = new Map<string, object>()
   /**
    * Last failure reason per instance id (invalid/undecodable config, missing
    * provider, creation error). Provider-agnostic; surfaced in status so a
@@ -42,6 +45,8 @@ export class ImChannelManager {
   private statusReasons = new Map<string, string>()
   /** Callback fired after each instance is torn down (for resource cleanup). */
   private onInstanceStop: ((instanceId: string) => void) | null = null
+
+  constructor(private readonly resolveAppName: (appId: string) => string | undefined = () => undefined) {}
 
   // ── Provider Registration ──────────────────────────────────────
 
@@ -99,6 +104,13 @@ export class ImChannelManager {
       oldConfigMap.set(c.id, c)
     }
 
+    for (const id of this.authorizationRevisions.keys()) {
+      if (!newConfigMap.has(id)) this.authorizationRevisions.delete(id)
+    }
+    for (const cfg of configs) {
+      this.updateAuthorizationRevision(oldConfigMap.get(cfg.id), cfg)
+    }
+
     // 1. Stop + remove instances that no longer exist in config. Genuine
     // removal — unlike the stop() a few lines down for config changes,
     // this instance is never coming back, so its tracked identity-
@@ -110,10 +122,29 @@ export class ImChannelManager {
       }
     }
 
-    // 2. Create or update instances
+    // 2. Refuse duplicate credentials before anything starts. Two live
+    // connections on one bot credential would duplicate or randomly split
+    // inbound traffic; binding.ts blocks this on its own write paths, but
+    // configs can also arrive here from Settings saves and older persisted
+    // state, so the manager is the final gate.
+    const refusedDuplicates = this.findRefusedDuplicates(configs)
+
+    // 3. Create or update instances
     for (const cfg of configs) {
       const oldCfg = oldConfigMap.get(cfg.id)
       const existing = this.instances.get(cfg.id)
+
+      const refusalReason = refusedDuplicates.get(cfg.id)
+      if (refusalReason) {
+        // Also stops an already-running duplicate whose config is unchanged —
+        // the configEqual skip below must never keep one alive.
+        if (existing) {
+          this.stopInstance(cfg.id)
+        }
+        this.statusReasons.set(cfg.id, refusalReason)
+        console.warn(`[ImChannelManager] Instance "${cfg.id}" refused: ${refusalReason}`)
+        continue
+      }
 
       if (existing && oldCfg && this.configEqual(oldCfg, cfg)) {
         // No change — skip
@@ -150,7 +181,7 @@ export class ImChannelManager {
     }
 
     // Save current config snapshot
-    this.currentConfigs = configs.map(c => ({ ...c, config: { ...c.config } }))
+    this.currentConfigs = configs.map(c => this.snapshotConfig(c))
 
     // Drop failure reasons for instances no longer in config.
     for (const id of Array.from(this.statusReasons.keys())) {
@@ -177,7 +208,8 @@ export class ImChannelManager {
     if (idx === -1) {
       return false
     }
-    this.currentConfigs[idx] = { ...cfg, config: { ...cfg.config } }
+    this.updateAuthorizationRevision(this.currentConfigs[idx], cfg)
+    this.currentConfigs[idx] = this.snapshotConfig(cfg)
     return true
   }
 
@@ -198,6 +230,7 @@ export class ImChannelManager {
    * Stop all instances and clear state. Called during shutdown.
    */
   stopAll(): void {
+    this.authorizationRevisions.clear()
     for (const [id] of this.instances) {
       this.stopInstance(id)
     }
@@ -248,11 +281,23 @@ export class ImChannelManager {
     return this.currentConfigs.find(c => c.id === instanceId)
   }
 
+  /** Memory-only authorization identity; restoring old config values never restores an old identity. */
+  getAuthorizationRevision(instanceId: string): object | undefined {
+    return this.authorizationRevisions.get(instanceId)
+  }
+
   /**
    * Get status of all configured instances.
    */
   getAllStatuses(): ImChannelInstanceStatus[] {
-    return this.currentConfigs.map(cfg => this.toStatus(cfg))
+    const ordinals = new Map<ImChannelType, number>()
+    const names = new Map<string, string | undefined>()
+    return this.currentConfigs.map(cfg => {
+      const ordinal = (ordinals.get(cfg.type) ?? 0) + 1
+      ordinals.set(cfg.type, ordinal)
+      if (cfg.appId && !names.has(cfg.appId)) names.set(cfg.appId, this.resolveAppName(cfg.appId))
+      return this.toStatus(cfg, ordinal, names.get(cfg.appId))
+    })
   }
 
   /**
@@ -261,7 +306,12 @@ export class ImChannelManager {
   getInstanceStatus(instanceId: string): ImChannelInstanceStatus | null {
     const cfg = this.currentConfigs.find(c => c.id === instanceId)
     if (!cfg) return null
-    return this.toStatus(cfg)
+    let ordinal = 0
+    for (const current of this.currentConfigs) {
+      if (current.type === cfg.type) ordinal++
+      if (current.id === instanceId) break
+    }
+    return this.toStatus(cfg, ordinal, cfg.appId ? this.resolveAppName(cfg.appId) : undefined)
   }
 
   /**
@@ -271,7 +321,7 @@ export class ImChannelManager {
    * 'standby'); falls back to deriving state from isConnected() for providers
    * that don't implement it. Stays provider-agnostic — no branches on type.
    */
-  private toStatus(cfg: ImChannelInstanceConfig): ImChannelInstanceStatus {
+  private toStatus(cfg: ImChannelInstanceConfig, ordinal: number, appName: string | undefined): ImChannelInstanceStatus {
     const instance = this.instances.get(cfg.id)
     const connected = instance?.isConnected() ?? false
     const state = instance?.getConnectionState?.()
@@ -285,10 +335,12 @@ export class ImChannelManager {
     return {
       id: cfg.id,
       type: cfg.type,
+      ordinal,
       enabled: cfg.enabled,
       connected,
       state,
       appId: cfg.appId,
+      appName,
       // Only meaningful while disconnected; a live instance has no failure.
       reason: connected ? undefined : this.statusReasons.get(cfg.id),
       identityResolution,
@@ -355,6 +407,52 @@ export class ImChannelManager {
         }
       }
       console.log(`[ImChannelManager] Instance stopped: id=${id}`)
+    }
+  }
+
+  /**
+   * First-wins duplicate detection over the instances that would start
+   * (enabled + bound). Keyed on the provider-declared credential identity
+   * (`credentialId`), falling back to `botId` for providers that predate it —
+   * same contract as binding.ts. Instances with no resolvable credential are
+   * never treated as duplicates. Returns refused instance id → reason.
+   */
+  private findRefusedDuplicates(configs: ImChannelInstanceConfig[]): Map<string, string> {
+    const winners = new Map<string, string>()
+    const refused = new Map<string, string>()
+    for (const cfg of configs) {
+      if (!cfg.enabled || !cfg.appId) continue
+      const provider = this.providers.get(cfg.type)
+      const viaProvider = provider?.credentialId?.(cfg.config ?? {})
+      const credential = String(viaProvider ?? cfg.config?.botId ?? '').trim()
+      if (!credential) continue
+      const key = `${cfg.type}:${credential}`
+      const winner = winners.get(key)
+      if (winner === undefined) {
+        winners.set(key, cfg.id)
+      } else {
+        refused.set(cfg.id, `Bot credential is already in use by enabled instance "${winner}"`)
+      }
+    }
+    return refused
+  }
+
+  private snapshotConfig(cfg: ImChannelInstanceConfig): ImChannelInstanceConfig {
+    return { ...cfg, owners: cfg.owners?.slice(), config: structuredClone(cfg.config) }
+  }
+
+  private updateAuthorizationRevision(oldCfg: ImChannelInstanceConfig | undefined, cfg: ImChannelInstanceConfig): void {
+    if (
+      !oldCfg ||
+      oldCfg.enabled !== cfg.enabled ||
+      oldCfg.type !== cfg.type ||
+      oldCfg.appId !== cfg.appId ||
+      oldCfg.teamId !== cfg.teamId ||
+      oldCfg.permissionEnabled !== cfg.permissionEnabled ||
+      !isDeepStrictEqual(oldCfg.owners, cfg.owners) ||
+      !isDeepStrictEqual(oldCfg.config, cfg.config)
+    ) {
+      this.authorizationRevisions.set(cfg.id, {})
     }
   }
 

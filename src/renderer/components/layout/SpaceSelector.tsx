@@ -1,27 +1,37 @@
 /**
- * SpaceSelector - Header dropdown for switching between spaces
+ * SpaceSelector - Header control for switching between spaces
  *
- * Shows current space icon + name, click to open dropdown with all spaces.
- * Bottom link navigates to HomePage for space management.
+ * Two separate controls, not one button: a "Workspace" label that links to
+ * the workspace management page (SpacesPage — rename/delete/reorder/asset
+ * overview all live there now), and the dropdown trigger next to it for
+ * switching. Splitting them matters for a11y — two different actions must
+ * not share one click target — see the workspace-management requirements
+ * the dropdown/page split of duties.
  */
 
-import { useState, useRef, useEffect, useCallback } from 'react'
-import { ChevronDown, Settings2, Unplug } from 'lucide-react'
+import { useState, useRef, useEffect, useCallback, useMemo } from 'react'
+import { ChevronDown, ChevronRight, Plus, Unplug, Search, Lightbulb, Layers } from 'lucide-react'
 import { useAppStore } from '../../stores/app.store'
 import { useSpaceStore } from '../../stores/space.store'
-import { SpaceIcon } from '../icons/ToolIcons'
-import { SortableSpaceList } from '../space/SortableSpaceList'
+import { SpaceAvatar } from '../space/SpaceAvatar'
+import { CreateSpaceDialog } from '../space/CreateSpaceDialog'
 import { useTranslation } from '../../i18n'
+import { capCount, trackHome, trackNavigate } from '../../services/home-telemetry'
 import type { Space } from '../../types'
 
 /** Minimum interval between loadSpaces calls (ms) */
 const LOAD_THROTTLE_MS = 5_000
 
+/** Below this many spaces the list is short enough to scan without search. */
+const SEARCH_MIN_SPACES = 4
+
 export function SpaceSelector() {
   const { t } = useTranslation()
-  const { setView } = useAppStore()
-  const { haloSpace, spaces, currentSpace, setCurrentSpace, refreshCurrentSpace, loadSpaces, isLoading, reorderSpaces } = useSpaceStore()
+  const { navigate } = useAppStore()
+  const { haloSpace, spaces, currentSpace, setCurrentSpace, refreshCurrentSpace, loadSpaces, isLoading } = useSpaceStore()
   const [isOpen, setIsOpen] = useState(false)
+  const [showCreateDialog, setShowCreateDialog] = useState(false)
+  const [searchQuery, setSearchQuery] = useState('')
   const dropdownRef = useRef<HTMLDivElement>(null)
   const lastLoadRef = useRef(0)
 
@@ -40,9 +50,7 @@ export function SpaceSelector() {
 
   // Refresh spaces when dropdown opens (throttled)
   useEffect(() => {
-    if (isOpen) {
-      throttledLoadSpaces()
-    }
+    if (isOpen) throttledLoadSpaces()
   }, [isOpen, throttledLoadSpaces])
 
   // Close on click outside
@@ -77,6 +85,21 @@ export function SpaceSelector() {
     return () => document.removeEventListener('keydown', handleKeyDown)
   }, [isOpen])
 
+  // Clear the search query when the dropdown closes, so reopening starts fresh
+  useEffect(() => {
+    if (!isOpen) setSearchQuery('')
+  }, [isOpen])
+
+  // External open trigger — the command palette's "Switch Space" quick
+  // action can't reach this component's local isOpen state directly (it
+  // lives on a different page/tree entirely), so it asks via this event
+  // instead, same pattern as ChatView's 'search:navigate-to-message'.
+  useEffect(() => {
+    const handleOpenRequest = () => setIsOpen(true)
+    window.addEventListener('space-selector:open', handleOpenRequest)
+    return () => window.removeEventListener('space-selector:open', handleOpenRequest)
+  }, [])
+
   const handleSelectSpace = (space: Space) => {
     if (space.isMissing) {
       setIsOpen(false)
@@ -86,15 +109,43 @@ export function SpaceSelector() {
       setIsOpen(false)
       return
     }
+    trackHome('home.space.switch', {
+      kind: 'select',
+      surface: 'header',
+      toHalo: space.id === haloSpace?.id,
+      spaceCount: capCount((haloSpace ? 1 : 0) + listedSpaces.length),
+      searched: searchQuery.trim().length > 0,
+    })
     setCurrentSpace(space)
     refreshCurrentSpace()  // Load full space data (preferences) from backend
-    setView('space')
+    navigate('space')
     setIsOpen(false)
   }
 
-  const handleManageSpaces = () => {
+  const handleSpaceCreated = (space: Space) => {
+    trackHome('home.space.switch', {
+      kind: 'create',
+      surface: 'header',
+      toHalo: false,
+      spaceCount: capCount(allSpaces.length),
+      searched: false,
+    })
+    setShowCreateDialog(false)
+    setCurrentSpace(space)
+    refreshCurrentSpace()
+    navigate('space')
+  }
+
+  const handleCreateSpace = () => {
+    trackHome('home.space.action', { action: 'create_open', surface: 'header' })
     setIsOpen(false)
-    setView('home')
+    setShowCreateDialog(true)
+  }
+
+  const handleGoToWorkspaces = () => {
+    trackNavigate('spaces', 'header', 'header')
+    setIsOpen(false)
+    navigate('spaces')
   }
 
   // Build space list: Halo Space first, then dedicated spaces
@@ -107,72 +158,161 @@ export function SpaceSelector() {
     ? storeSpaces
     : (currentSpace ? [currentSpace] : [])
 
-  const displayName = currentSpace
-    ? (currentSpace.isTemp ? t('Halo') : currentSpace.name)
-    : t('Halo')
+  // Search matches dedicated spaces by name; Halo Space stays pinned and
+  // unfiltered regardless of query, same as it already is outside search.
+  const trimmedQuery = searchQuery.trim().toLowerCase()
+  const isSearching = trimmedQuery.length > 0
+  // Most recently used first: this list is for switching, and the manual
+  // order kept on the management page is for arranging.
+  const listedSpaces = useMemo(() => {
+    const matching = isSearching ? spaces.filter(s => s.name.toLowerCase().includes(trimmedQuery)) : spaces
+    return [...matching].sort((a, b) =>
+      new Date(b.lastActiveAt || b.updatedAt).getTime() - new Date(a.lastActiveAt || a.updatedAt).getTime()
+    )
+  }, [spaces, isSearching, trimmedQuery])
 
-  const displayIcon = currentSpace?.icon || 'sparkles'
+  // Matches what the dropdown row calls the same space. "Halo" alone read as
+  // the app's own name to a first-time user, hiding that this is a space at all.
+  const displayName = currentSpace
+    ? (currentSpace.isTemp ? t('Halo Workspace') : currentSpace.name)
+    : t('Halo Workspace')
 
   return (
-    <div className="relative" ref={dropdownRef}>
+    <div className="flex items-center">
+      {/* Separate control from the dropdown trigger below — this one
+          navigates, it doesn't open anything. Two different actions can't
+          share one click target. The breadcrumb chevron and the hover
+          underline mark it as a destination. Dropped under `sm`, where the
+          header has no room and the name alone has to carry the "this is a
+          workspace" signal (SpaceAvatar + displayName in the trigger). */}
       <button
-        onClick={() => setIsOpen(!isOpen)}
-        className="flex items-center gap-1.5 px-2 py-1.5 text-sm hover:bg-secondary/80 rounded-lg transition-colors max-w-[140px] sm:max-w-[200px]"
-        title={displayName}
+        onClick={handleGoToWorkspaces}
+        className="hidden sm:flex items-center h-8 px-2 flex-shrink-0 rounded-sm text-[13px] text-muted-foreground hover:bg-secondary hover:text-foreground hover:underline underline-offset-[3px] transition-colors ease-halo"
+        title={t('Manage workspaces')}
       >
-        <SpaceIcon iconId={displayIcon} size={18} className="flex-shrink-0" />
-        <span className="font-medium truncate">{displayName}</span>
-        <ChevronDown className={`w-3.5 h-3.5 flex-shrink-0 text-muted-foreground transition-transform ${isOpen ? 'rotate-180' : ''}`} />
+        {t('Workspace')}
       </button>
+      <ChevronRight aria-hidden="true" className="hidden sm:block w-3.5 h-3.5 flex-shrink-0 text-subtle-foreground opacity-60 -mx-[3px]" />
 
-      {isOpen && (
-        <div className="absolute left-0 top-full mt-1 w-56 bg-card border border-border rounded-xl shadow-lg z-50 py-1 max-h-[50vh] overflow-y-auto">
-          {isLoading && allSpaces.length === 0 && (
-            <div className="px-3 py-2 text-xs text-muted-foreground">{t('Loading...')}</div>
+      <div className="relative" ref={dropdownRef}>
+        <button
+          onClick={() => setIsOpen(!isOpen)}
+          className="h-8 pl-1.5 pr-2 flex items-center gap-2 border border-transparent rounded-sm text-[13px] hover:bg-secondary hover:border-primary/[0.18] transition-colors ease-halo max-w-[140px] sm:max-w-[180px]"
+          title={t('Current workspace: {{name}} — click to switch', { name: displayName })}
+        >
+          <SpaceAvatar space={currentSpace ?? { id: 'halo', name: displayName, isTemp: true }} size={20} />
+          <span className="font-semibold tracking-[-0.01em] truncate">{displayName}</span>
+          <ChevronDown className="w-3 h-3 flex-shrink-0 text-subtle-foreground" />
+        </button>
+
+        {isOpen && (
+        <div className="absolute left-0 top-full mt-1 w-[288px] bg-card border border-border rounded-xl shadow-pop z-50 max-h-[50vh] flex flex-col overflow-hidden">
+          {/* Search — border-b separates it from the scrollable list below,
+              matching the prototype's `.sp-search{border-bottom:1px solid
+              var(--border)}`. flex-shrink-0 keeps it out of the scroll area
+              entirely (no more `sticky`, which only fakes staying in place
+              while still eating into the scrollable region's height). */}
+          {spaces.length >= SEARCH_MIN_SPACES && (
+            <div className="flex-shrink-0 px-3 py-2.5 border-b border-border">
+              <div className="relative">
+                <Search className="w-3.5 h-3.5 absolute left-2.5 top-1/2 -translate-y-1/2 text-subtle-foreground pointer-events-none" />
+                <input
+                  type="text"
+                  value={searchQuery}
+                  onChange={(e) => setSearchQuery(e.target.value)}
+                  placeholder={t('Search workspaces')}
+                  className="w-full h-8 pl-7 pr-2.5 text-xs bg-secondary border border-border rounded-sm outline-none focus:border-primary transition-colors ease-halo"
+                />
+              </div>
+            </div>
           )}
 
-          {/* Halo temp space — fixed at top, not draggable */}
-          {haloSpace && (
-            <SpaceDropdownRow
-              space={haloSpace}
-              isActive={haloSpace.id === currentSpace?.id}
-              onSelect={handleSelectSpace}
-            />
-          )}
+          {/* Scrollable list region — only this area scrolls; search box
+              above and tip/New Space below stay fixed regardless of list length. */}
+          <div className="flex-1 min-h-0 overflow-y-auto py-1">
+            {isLoading && allSpaces.length === 0 && (
+              <div className="px-3 py-2 text-xs text-muted-foreground">{t('Loading...')}</div>
+            )}
 
-          {/* Dedicated spaces — draggable to reorder */}
-          {spaces.length > 0 && (
-            <SortableSpaceList
-              items={spaces}
-              onReorder={(ids) => { void reorderSpaces(ids) }}
-              className="flex flex-col"
-              renderItem={(space) => (
+            {/* Prototype's `.sp-sec{padding:8px 6px 4px}` wraps the label+rows
+                group with a 6px horizontal inset — the rows' own 10px padding
+                (below) compounds to the prototype's 16px total, and the
+                hover/selected pill ends up floating with a margin from the
+                popover edge instead of running flush to it. */}
+            <div className="px-1.5">
+              {/* Halo temp space — fixed at top, not draggable, never filtered by search */}
+              {haloSpace && (
                 <SpaceDropdownRow
+                  space={haloSpace}
+                  isActive={haloSpace.id === currentSpace?.id}
+                  onSelect={handleSelectSpace}
+                />
+              )}
+
+              {listedSpaces.map(space => (
+                <SpaceDropdownRow
+                  key={space.id}
                   space={space}
                   isActive={space.id === currentSpace?.id}
                   onSelect={handleSelectSpace}
                 />
+              ))}
+              {isSearching && listedSpaces.length === 0 && (
+                <div className="px-1.5 py-4 text-xs text-muted-foreground text-center">{t('No matching results found')}</div>
               )}
-            />
-          )}
+            </div>
+          </div>
 
-          {/* Manage Spaces link */}
-          <div className="border-t border-border/50 mt-1 pt-1">
+          {/* Tip + New Space — fixed footer chrome, outside the scroll area,
+              so the create action stays reachable without scrolling no
+              matter how many spaces are in the list. */}
+          <div className="flex-shrink-0 border-t border-border px-3 py-2.5 flex gap-1.5 text-[11px] leading-relaxed text-muted-foreground bg-muted/30">
+            <Lightbulb className="w-3.5 h-3.5 flex-shrink-0 mt-0.5 text-subtle-foreground" strokeWidth={1.8} />
+            <span>
+              <b className="text-foreground">{t('A workspace')}</b>
+              {' '}
+              {t('is an isolated context for one project: its folder, conversations, knowledge base, digital humans, and installed skills. Create one per project, client, or goal to keep things separate and reusable.')}
+            </span>
+          </div>
+
+          {/* New Space — Prototype's `.sp-foot{padding:6px;border-top:1px
+              solid var(--border)}`. The management link repeats the header
+              breadcrumb's destination: this is where someone already looking
+              for "where do I rename/delete a workspace" ends up. */}
+          <div className="flex-shrink-0 border-t border-border px-1.5 py-1">
             <button
-              onClick={handleManageSpaces}
-              className="w-full px-3 py-2 text-left text-xs text-muted-foreground hover:text-foreground hover:bg-secondary/50 transition-colors flex items-center gap-2"
+              onClick={handleCreateSpace}
+              className="w-full rounded-sm px-2.5 py-2 text-left text-[13px] text-accent-on-dark hover:bg-primary/[0.12] transition-colors ease-halo flex items-center gap-2"
             >
-              <Settings2 className="w-3.5 h-3.5" />
-              {t('Manage Spaces')}
+              <Plus className="w-3.5 h-3.5" />
+              {t('New Workspace')}
+            </button>
+            <div className="my-1 border-t border-border-soft" />
+            <button
+              onClick={handleGoToWorkspaces}
+              className="w-full rounded-sm px-2.5 py-2 text-left text-[13px] text-muted-foreground hover:bg-secondary hover:text-foreground transition-colors ease-halo flex items-center gap-2"
+            >
+              <Layers className="w-3.5 h-3.5" />
+              {t('Manage workspaces')}
             </button>
           </div>
         </div>
+        )}
+      </div>
+
+      {showCreateDialog && (
+        <CreateSpaceDialog
+          onClose={() => setShowCreateDialog(false)}
+          onCreated={handleSpaceCreated}
+        />
       )}
     </div>
   )
 }
 
-/** A single space row inside the SpaceSelector dropdown. */
+/** A single space row inside the SpaceSelector dropdown — switch only, see
+ * the workspace management page (SpacesPage) for rename/delete/reorder.
+ * The path stays on the row's tooltip. */
 function SpaceDropdownRow({
   space,
   isActive,
@@ -183,25 +323,31 @@ function SpaceDropdownRow({
   onSelect: (space: Space) => void
 }) {
   const { t } = useTranslation()
-  const name = space.isTemp ? t('Halo Space') : space.name
+  const name = space.isTemp ? t('Halo Workspace') : space.name
 
   return (
-    <button
+    <div
+      role="button"
+      tabIndex={0}
+      title={space.isTemp ? undefined : (space.workingDir || space.path)}
       onClick={() => onSelect(space)}
-      className={`w-full px-3 py-2.5 text-left text-sm transition-colors flex items-center gap-2.5 ${
+      onKeyDown={(e) => {
+        if (e.key === 'Enter' || e.key === ' ') {
+          e.preventDefault()
+          onSelect(space)
+        }
+      }}
+      className={`group w-full rounded-sm px-2.5 py-[7px] text-left transition-colors ease-halo flex items-center gap-[9px] cursor-pointer ${
         space.isMissing
           ? 'text-muted-foreground cursor-not-allowed opacity-70'
-          : `hover:bg-secondary/80 ${isActive ? 'text-primary bg-primary/5' : 'text-foreground'}`
+          : `hover:bg-secondary text-foreground ${isActive ? 'bg-primary/[0.12]' : ''}`
       }`}
     >
-      <SpaceIcon iconId={space.icon || (space.isTemp ? 'sparkles' : 'folder')} size={16} className="flex-shrink-0" />
-      <span className="truncate flex-1 min-w-0">{name}</span>
+      <SpaceAvatar space={space} size={24} className={space.isMissing ? 'opacity-60' : ''} />
+      <span className="flex-1 min-w-0 truncate text-[13px] font-medium">{name}</span>
       {space.isMissing && (
         <Unplug className="w-3.5 h-3.5 flex-shrink-0" aria-label={t('Unavailable')} />
       )}
-      {isActive && !space.isMissing && (
-        <span className="ml-auto w-1.5 h-1.5 rounded-full bg-primary flex-shrink-0" />
-      )}
-    </button>
+    </div>
   )
 }

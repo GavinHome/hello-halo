@@ -8,10 +8,7 @@
 //    sees a complete set), but only the target platform's package is needed
 //    at runtime. Cleaning here avoids mutating the shared node_modules.
 //
-// 2. Swap better-sqlite3 .node binary with the correct platform-specific
-//    prebuild. The host-compiled binary (darwin-arm64 on M4 Mac) is replaced
-//    with the prebuild matching the target platform. Prebuilds are downloaded
-//    by prepare-binaries.mjs and stored in node_modules/better-sqlite3/prebuilds/.
+// 2. Keep and validate the target platform's better-sqlite3 N-API binary.
 //
 // 3. Keep only the target platform's @img/sharp-* package (plus its libvips
 //    sibling) and fail the build if its prebuilt binary is absent. Same
@@ -26,10 +23,21 @@
 // 5. macOS ad-hoc signing (prevents "damaged app" prompts on unsigned builds).
 // ============================================================================
 
-const { execSync } = require('child_process');
+const { execFileSync } = require('child_process');
 const fs = require('fs');
 const path = require('path');
-const { ENGINE_RUNTIMES, VALID_ENGINES, entryCandidates } = require('./engine-runtimes.cjs');
+const { ENGINE_RUNTIMES, VALID_ENGINES, entryCandidates, engineArtifactPaths } = require('./engine-runtimes.cjs');
+const {
+  RUNTIME_DIR,
+  RUNTIME_ENTRY,
+  EXTERNAL_PACKAGES,
+  PRIVATE_EXTERNALS,
+  TARGET_PLATFORMS,
+  allNativeCompanions,
+  nativeCompanionsFor,
+} = require('../runtimes/dsh/manifest.cjs');
+const { signLocalApp } = require('./lib/mac-local-signing.cjs');
+const { assertMacOSDeploymentTargets } = require('./lib/macho-deployment-target.cjs');
 
 // electron-builder Arch enum: 0=ia32, 1=x64, 2=armv7l, 3=arm64, 4=universal
 const ARCH_NAMES = { 0: 'ia32', 1: 'x64', 2: 'armv7l', 3: 'arm64', 4: 'universal' };
@@ -41,6 +49,16 @@ const WATCHER_TARGETS = {
   'darwin-x64':   'watcher-darwin-x64',
   'win32-x64':    'watcher-win32-x64',
   'linux-x64':    'watcher-linux-x64-glibc',
+};
+
+// Maps platform-arch to the @napi-rs/canvas platform package to KEEP. It is an
+// optional dependency of the pdf library, and npm installs only the build host's
+// variant, which is the wrong chip when packaging the other arch.
+const CANVAS_TARGETS = {
+  'darwin-arm64': 'canvas-darwin-arm64',
+  'darwin-x64':   'canvas-darwin-x64',
+  'win32-x64':    'canvas-win32-x64-msvc',
+  'linux-x64':    'canvas-linux-x64-gnu',
 };
 
 // Maps platform-arch to the node-pty prebuilds directory name to KEEP.
@@ -150,53 +168,143 @@ function cleanNonTargetWatchers(context) {
   if (removed.length > 0) {
     console.log(`[afterPack] ${key}: removed ${removed.length} non-target watcher(s): ${removed.join(', ')}`);
   }
+
+  // A host that compiled the watcher itself leaves a binary for its own chip
+  // here. The target's prebuilt package is what loads, so this fallback is dead
+  // weight and, when packaging the other arch, the wrong chip.
+  const compiledDir = path.join(parcelDir, 'watcher', 'build');
+  if (fs.existsSync(path.join(parcelDir, targetPkg)) && fs.existsSync(compiledDir)) {
+    fs.rmSync(compiledDir, { recursive: true, force: true });
+    console.log(`[afterPack] ${key}: removed host-compiled @parcel/watcher/build`);
+  }
   console.log(`[afterPack] ${key}: keeping @parcel/${targetPkg}`);
 }
 
 /**
- * Swap better-sqlite3 .node binary with the correct platform-specific prebuild.
- *
- * The binary in the unpacked output is whatever was in node_modules at pack time
- * (the host platform's binary, e.g. darwin-arm64 when building on M4 Mac).
- * This function replaces it with the prebuild matching the target platform.
- *
- * Prebuilds are stored at:
- *   {projectRoot}/node_modules/better-sqlite3/prebuilds/{platform}-{arch}/better_sqlite3.node
- *
- * Target location in unpacked output:
- *   app.asar.unpacked/node_modules/better-sqlite3/build/Release/better_sqlite3.node
+ * Remove @napi-rs/canvas platform packages other than the target's.
  */
-function swapBetterSqlite3Binary(context) {
+function cleanNonTargetCanvasPackages(context) {
+  const archStr = ARCH_NAMES[context.arch] || String(context.arch);
+  const key = `${context.electronPlatformName}-${archStr}`;
+  const targetPkg = CANVAS_TARGETS[key];
+  const napiDir = path.join(getUnpackedDir(context), 'node_modules', '@napi-rs');
+
+  if (!targetPkg || !fs.existsSync(napiDir)) return;
+
+  const removed = [];
+  for (const entry of fs.readdirSync(napiDir, { withFileTypes: true })) {
+    if (!entry.isDirectory() || !entry.name.startsWith('canvas-') || entry.name === targetPkg) continue;
+    fs.rmSync(path.join(napiDir, entry.name), { recursive: true, force: true });
+    removed.push(entry.name);
+  }
+
+  if (removed.length > 0) {
+    console.log(`[afterPack] ${key}: removed ${removed.length} non-target canvas package(s): ${removed.join(', ')}`);
+  }
+}
+
+/** Keep the target's bundled N-API binary, which is independent of Electron ABI. */
+async function cleanAndValidateBetterSqlite3Prebuilds(context) {
   const platform = context.electronPlatformName;
   const archStr = ARCH_NAMES[context.arch] || String(context.arch);
   const key = `${platform}-${archStr}`;
+  const { getBetterSqlite3PrebuildPath, validateBetterSqlite3Prebuild } = await import('./lib/better-sqlite3-prebuilds.mjs');
+  const target = { platform, arch: archStr };
+  const prebuild = getBetterSqlite3PrebuildPath(getUnpackedDir(context), target);
+  const validation = validateBetterSqlite3Prebuild(prebuild, target);
+  if (!validation.valid) {
+    throw new Error(`[afterPack] Invalid bundled better-sqlite3 N-API binary for ${key}: ${validation.reason}. Check the prebuilds asarUnpack rule.`);
+  }
+  for (const entry of fs.readdirSync(path.dirname(prebuild))) {
+    if (entry !== `${key}.node`) fs.rmSync(path.join(path.dirname(prebuild), entry), { recursive: true, force: true });
+  }
+  console.log(`[afterPack] ${key}: validated better-sqlite3 N-API binary (${(validation.size / 1024 / 1024).toFixed(1)} MB)`);
+}
 
+/**
+ * Install the dsh runtime's own node_modules into the packaged output.
+ *
+ * The tree `runtimes/dsh/build.mjs` plants beside the bundle (private
+ * externals with their dependencies, native companions for every platform)
+ * is dropped by older electron-builder versions when it sits under a `files`
+ * glob and carried whole by newer ones. Either way the artifact must end up
+ * with this target's companions alone, so it is copied from the project here
+ * and the other platforms' companions are removed from the result.
+ */
+function installDshPrivateExternals(context) {
   const projectRoot = path.resolve(__dirname, '..');
-  const prebuildSrc = path.join(
-    projectRoot, 'node_modules/better-sqlite3/prebuilds', `${platform}-${archStr}`, 'better_sqlite3.node'
-  );
+  const runtimeSegments = RUNTIME_DIR.split('/');
+  const srcModules = path.join(projectRoot, ...runtimeSegments, 'node_modules');
+  const destRuntimeDir = path.join(getUnpackedDir(context), ...runtimeSegments);
 
-  if (!fs.existsSync(prebuildSrc)) {
-    console.error(`[afterPack] Missing better-sqlite3 prebuild for ${key}: ${prebuildSrc}`);
-    console.error(`[afterPack] Run "npm run prepare:all" to download prebuilds for all platforms`);
-    throw new Error(`Missing better-sqlite3 prebuild for ${key}`);
+  if (!fs.existsSync(destRuntimeDir)) {
+    console.log('[afterPack] dsh runtime bundle not in the unpacked output, skipping its node_modules');
+    return;
+  }
+  if (!fs.existsSync(srcModules)) {
+    throw new Error(`[afterPack] dsh runtime has no node_modules at ${srcModules}. Run "npm run runtime:dsh".`);
   }
 
-  const unpackedDir = getUnpackedDir(context);
-  const targetNode = path.join(
-    unpackedDir, 'node_modules/better-sqlite3/build/Release/better_sqlite3.node'
-  );
-
-  if (!fs.existsSync(targetNode)) {
-    console.error(`[afterPack] ${key}: better_sqlite3.node not found in unpacked output`);
-    console.error(`[afterPack] Check that asarUnpack includes "node_modules/better-sqlite3/build/Release/*.node"`);
-    throw new Error(`better_sqlite3.node not found in unpacked output for ${key}`);
+  const key = `${context.electronPlatformName}-${ARCH_NAMES[context.arch] || String(context.arch)}`;
+  if (!TARGET_PLATFORMS.includes(key)) {
+    throw new Error(`[afterPack] no dsh native companion mapping for ${key} in runtimes/dsh/manifest.cjs`);
   }
+  const keep = new Set(nativeCompanionsFor(key));
+  const skip = new Set(allNativeCompanions().filter(name => !keep.has(name)));
 
-  fs.copyFileSync(prebuildSrc, targetNode);
+  const destModules = path.join(destRuntimeDir, 'node_modules');
+  fs.cpSync(srcModules, destModules, {
+    recursive: true,
+    dereference: true,
+    filter: (src) => {
+      const segments = path.relative(srcModules, src).split(path.sep);
+      const name = segments[0].startsWith('@') ? segments.slice(0, 2).join('/') : segments[0];
+      return !skip.has(name);
+    },
+  });
+  for (const name of skip) {
+    fs.rmSync(path.join(destModules, ...name.split('/')), { recursive: true, force: true });
+  }
+  console.log(
+    `[afterPack] ${key}: dsh runtime node_modules installed ` +
+    `(private: ${PRIVATE_EXTERNALS.map(e => e.name).join(', ')}; native: ${[...keep].join(', ') || 'none'})`
+  );
+}
 
-  const sizeMB = (fs.statSync(targetNode).size / 1024 / 1024).toFixed(1);
-  console.log(`[afterPack] ${key}: swapped better-sqlite3 binary (${sizeMB} MB)`);
+/**
+ * Prune the dsh runtime's private node-pty to what the target loads.
+ *
+ * The copy runtimes/dsh/build.mjs plants beside the bundle carries every
+ * platform's prebuilds plus the sources node-pty compiles itself from. It is
+ * pruned here, separately from the app's own node-pty (cleanNodePtyPrebuilds),
+ * so dsh packaging cannot change what Halo's terminal ships.
+ */
+function cleanDshRuntimeNodePty(context) {
+  const key = `${context.electronPlatformName}-${ARCH_NAMES[context.arch] || String(context.arch)}`;
+  const pkgDir = path.join(getUnpackedDir(context), ...RUNTIME_DIR.split('/'), 'node_modules', 'node-pty');
+  if (!fs.existsSync(pkgDir)) return;
+
+  const prebuildsDir = path.join(pkgDir, 'prebuilds');
+  const targetDir = NODE_PTY_PREBUILD_TARGETS[key];
+  if (fs.existsSync(prebuildsDir)) {
+    for (const entry of fs.readdirSync(prebuildsDir, { withFileTypes: true })) {
+      if (!entry.isDirectory()) continue;
+      const entryPath = path.join(prebuildsDir, entry.name);
+      if (entry.name !== targetDir) {
+        fs.rmSync(entryPath, { recursive: true });
+        continue;
+      }
+      for (const pdb of fs.readdirSync(entryPath).filter(f => f.endsWith('.pdb'))) {
+        fs.rmSync(path.join(entryPath, pdb));
+      }
+    }
+  }
+  // Sources and toolchain files node-pty needs only to compile itself; the
+  // runtime loads `prebuilds/<platform>-<arch>/`, which carries its own conpty.
+  for (const entry of ['build', 'src', 'deps', 'node-addon-api', 'third_party', 'scripts', 'typings', 'binding.gyp']) {
+    fs.rmSync(path.join(pkgDir, entry), { recursive: true, force: true });
+  }
+  console.log(`[afterPack] ${key}: dsh runtime node-pty pruned to prebuilds/${targetDir ?? '(none)'}`);
 }
 
 /**
@@ -256,6 +364,34 @@ function cleanNodePtyPrebuilds(context) {
     console.log(`[afterPack] ${key}: removed ${removed.length} non-target node-pty prebuild(s): ${removed.join(', ')}`);
   }
   console.log(`[afterPack] ${key}: keeping node-pty prebuilds/${targetDir}`);
+
+  // The ConPTY runtime ships one directory per Windows architecture; only the
+  // target's is ever loaded.
+  const conptyRoot = path.join(unpackedDir, 'node_modules', 'node-pty', 'third_party', 'conpty');
+  if (platform === 'win32' && fs.existsSync(conptyRoot)) {
+    for (const release of fs.readdirSync(conptyRoot)) {
+      const releaseDir = path.join(conptyRoot, release);
+      if (!fs.statSync(releaseDir).isDirectory()) continue;
+      for (const archDir of fs.readdirSync(releaseDir)) {
+        if (archDir === `win10-${archStr}`) continue;
+        fs.rmSync(path.join(releaseDir, archDir), { recursive: true });
+        console.log(`[afterPack] ${key}: removed non-target node-pty conpty/${release}/${archDir}`);
+      }
+    }
+  }
+
+  // build/ and bin/ hold binaries compiled for the build host. node-pty tries
+  // build/ before prebuilds/, so in a package for another platform or chip they
+  // are dead weight that fails to load before the matching prebuild is found.
+  const hostKey = `${process.platform}-${process.arch}`;
+  if (hostKey !== key) {
+    for (const dir of ['build', 'bin']) {
+      const hostBuilt = path.join(unpackedDir, 'node_modules', 'node-pty', dir);
+      if (!fs.existsSync(hostBuilt)) continue;
+      fs.rmSync(hostBuilt, { recursive: true });
+      console.log(`[afterPack] ${key}: removed node-pty/${dir} (compiled for build host ${hostKey})`);
+    }
+  }
 }
 
 /**
@@ -461,6 +597,7 @@ function cleanAnthropicVendorBinaries(context) {
  * node_modules/cloudflared/bin/ (see CLOUDFLARED_VARIANTS). The copy goes from
  * the project node_modules (source of truth) into the unpacked output, so the
  * result is deterministic regardless of which variants electron-builder packed.
+ * Returns the installed binary path, or null when the target has no variant.
  */
 function installCloudflaredBinary(context) {
   const platform = context.electronPlatformName;
@@ -470,7 +607,7 @@ function installCloudflaredBinary(context) {
 
   if (!variant) {
     console.warn(`[afterPack] No cloudflared variant mapping for ${key}, skipping`);
-    return;
+    return null;
   }
 
   const projectRoot = path.resolve(__dirname, '..');
@@ -512,6 +649,7 @@ function installCloudflaredBinary(context) {
   const sizeMB = (fs.statSync(path.join(destDir, runtimeName)).size / 1024 / 1024).toFixed(1);
   console.log(`[afterPack] ${key}: installed cloudflared as bin/${runtimeName} (${sizeMB} MB)` +
     (removed.length > 0 ? `, removed ${removed.length} variant(s): ${removed.join(', ')}` : ''));
+  return path.join(destDir, runtimeName);
 }
 
 /**
@@ -697,18 +835,20 @@ function validateEngineRuntimes(pkg) {
   const missing = [];
 
   for (const engineId of VALID_ENGINES) {
-    const { name, packageId, fix } = ENGINE_RUNTIMES[engineId];
-    const pkgDir = path.join('node_modules', ...packageId.split('/'));
-    const manifestPath = path.join(pkgDir, 'package.json');
+    const engine = ENGINE_RUNTIMES[engineId];
+    const { name, fix } = engine;
+    const { pkgDir, manifestPath, entryPaths, label } = engineArtifactPaths(engine);
 
     let reason = null;
     if (!pkg.exists(manifestPath)) {
-      reason = 'package not in the artifact';
+      reason = engine.prebuilt ? 'prebuilt runtime not in the artifact' : 'package not in the artifact';
     } else {
       const manifest = JSON.parse(pkg.read(manifestPath).toString('utf-8'));
-      const entry = entryCandidates(manifest).find(candidate => pkg.exists(path.join(pkgDir, candidate)));
+      const candidates = entryPaths
+        ?? entryCandidates(manifest).map(candidate => path.join(pkgDir, candidate));
+      const entry = candidates.find(candidate => pkg.exists(candidate));
       if (!entry) {
-        reason = 'package present but its entry file was excluded';
+        reason = 'present but its entry file was excluded';
       } else {
         console.log(`[afterPack] Engine bundled: ${name} v${manifest.version ?? 'unknown'}`);
       }
@@ -716,7 +856,7 @@ function validateEngineRuntimes(pkg) {
 
     if (!reason) continue;
     if (required.includes(engineId)) {
-      missing.push(`${name} (${packageId}): ${reason}. Fix: ${fix}`);
+      missing.push(`${name} (${label}): ${reason}. Fix: ${fix}`);
     } else {
       console.log(`[afterPack] Engine not bundled: ${name} — ${reason} (not required by this build)`);
     }
@@ -771,23 +911,177 @@ function validateProductConfig(pkg) {
     `[afterPack] product.json present (dataFolderName=${product.dataFolderName ?? 'halo'}, ` +
     `authProviders=${product.authProviders.length})`
   );
+  return product;
+}
+
+/**
+ * A staged Windows build without its helper does not fail: the runtime quietly
+ * falls back to the installer path, so nobody notices the fast path is gone.
+ * The helper arrives via win.extraResources, which copies nothing — silently —
+ * when the helper was never compiled. Mirrors getWindowsUpdateMode's rule for
+ * when staged is actually in effect.
+ */
+function validateUpdateHelper(context, product) {
+  if (context.electronPlatformName !== 'win32') return;
+  const update = product.updateConfig ?? {};
+  if (update.windowsMode !== 'staged' || !update.manifestPublicKey?.trim()) return;
+
+  const helperPath = path.join(getResourcesDir(context), 'update-helper', 'halo-update-helper.exe');
+  if (!fs.existsSync(helperPath)) {
+    throw new Error(
+      '[afterPack] product.json enables staged Windows updates but update-helper/halo-update-helper.exe ' +
+      'is missing from resources. Fix: node scripts/build-update-helper.mjs'
+    );
+  }
+  console.log('[afterPack] Windows update helper present');
+}
+
+/**
+ * Assert the dsh runtime can load in the packaged app: its entry, every
+ * external it imports (all carried beside it, never the app's), and the
+ * target's native companions.
+ */
+function validateDshRuntimeBundle(context) {
+  const runtimeDir = path.join(getUnpackedDir(context), ...RUNTIME_DIR.split('/'));
+
+  if (!fs.existsSync(runtimeDir)) {
+    console.log('[afterPack] dsh runtime bundle not in the unpacked output — skipping bundle check');
+    return;
+  }
+
+  const entry = path.join(runtimeDir, ...RUNTIME_ENTRY.split('/'));
+  if (!fs.existsSync(entry)) {
+    throw new Error(
+      `[afterPack] dsh runtime directory is present but its entry is missing: ${entry}. ` +
+      `Check that asarUnpack covers "${RUNTIME_DIR}/**/*".`
+    );
+  }
+
+  const key = `${context.electronPlatformName}-${ARCH_NAMES[context.arch] || String(context.arch)}`;
+  const missing = [...EXTERNAL_PACKAGES, ...nativeCompanionsFor(key)].filter(
+    name => !fs.existsSync(path.join(runtimeDir, 'node_modules', ...name.split('/'), 'package.json'))
+  );
+  if (missing.length > 0) {
+    throw new Error(
+      `[afterPack] ${key}: dsh runtime is missing ${missing.join(', ')} beside its bundle. ` +
+      `Run "npm run runtime:dsh" and check installDshPrivateExternals.`
+    );
+  }
+
+  const sizeMB = (fs.statSync(entry).size / 1024 / 1024).toFixed(1);
+  console.log(`[afterPack] ${key}: dsh runtime bundle present (${sizeMB} MB)`);
+}
+
+function validateWindowsConsoleBootstrap(context, pkg) {
+  if (context.electronPlatformName !== 'win32') return;
+  const cliPath = 'node_modules/@anthropic-ai/claude-code/cli.js';
+  if (!pkg.exists(cliPath)) {
+    console.log('[afterPack] Claude Code CLI not bundled — no Windows console bootstrap required');
+    return;
+  }
+  const bootstrapPath = 'node_modules/@anthropic-ai/claude-code/windows-hide.cjs';
+  if (!pkg.exists(bootstrapPath) || !pkg.read(cliPath).toString('utf-8').includes("import '../claude-code/windows-hide.cjs';")) {
+    throw new Error(
+      '[afterPack] Windows Claude Code console bootstrap is missing or not loaded. ' +
+      'Run postinstall to apply the CLI patch before packaging.'
+    );
+  }
+  console.log('[afterPack] Windows Claude Code console bootstrap present');
+}
+
+/**
+ * Halo launches the Claude Code CLI from its real file on disk (app.asar.unpacked
+ * in an archived build): the CLI runs programs found next to its own file
+ * (ripgrep behind Grep and Glob), and no OS can execute a file inside an
+ * archive. Assert that copy is complete for this target whenever the CLI ships.
+ */
+function validateClaudeCodeCliOnDisk(context, pkg) {
+  const packageDir = 'node_modules/@anthropic-ai/claude-code';
+  if (!pkg.exists(`${packageDir}/package.json`)) {
+    console.log('[afterPack] Claude Code CLI not bundled — skipping its on-disk check');
+    return;
+  }
+
+  const platform = context.electronPlatformName;
+  const target = `${ARCH_NAMES[context.arch] || String(context.arch)}-${platform}`;
+  const resourcesDir = getResourcesDir(context);
+  const diskRoot = fs.existsSync(path.join(resourcesDir, 'app.asar')) ? getUnpackedDir(context) : path.join(resourcesDir, 'app');
+  const required = [`${packageDir}/cli.js`, `${packageDir}/vendor/ripgrep/${target}/${platform === 'win32' ? 'rg.exe' : 'rg'}`];
+  const cliPath = path.join(diskRoot, packageDir, 'cli.js');
+  if (fs.existsSync(cliPath) && fs.readFileSync(cliPath, 'utf-8').includes("import '../claude-code/windows-hide.cjs';")) {
+    required.push(`${packageDir}/windows-hide.cjs`);
+  }
+
+  const missing = required.filter(rel => !fs.existsSync(path.join(diskRoot, ...rel.split('/'))));
+  if (missing.length > 0) {
+    throw new Error(
+      `[afterPack] ${target}: the Claude Code CLI ships but is not on disk in ${path.basename(diskRoot)}: ${missing.join(', ')}. ` +
+      `Check the "${packageDir}/**/*" asarUnpack rule.`
+    );
+  }
+  console.log(`[afterPack] ${target}: Claude Code CLI and its ripgrep are on disk in ${path.basename(diskRoot)}`);
+}
+
+/**
+ * The Office runtime behind the built-in document skills (`halo-node`) ships
+ * through extraResources. electron-builder 26 silently drops a node_modules
+ * folder at the root of a copied directory, so assert every library and font
+ * its manifest declares actually arrived.
+ */
+function validateOfficeRuntime(context) {
+  const runtimeDir = path.join(getResourcesDir(context), 'office-runtime');
+  const manifestPath = path.join(runtimeDir, 'manifest.json');
+  if (!fs.existsSync(manifestPath)) {
+    throw new Error(`[afterPack] Office runtime missing from resources (no ${manifestPath}). Run "npm run runtime:office".`);
+  }
+
+  const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf-8'));
+  const libraries = Object.keys(manifest.packages ?? {});
+  const fonts = manifest.fonts ?? [];
+  if (libraries.length === 0) {
+    throw new Error(`[afterPack] Office runtime manifest lists no libraries: ${manifestPath}`);
+  }
+
+  const missing = [
+    ...libraries
+      .filter(name => !fs.existsSync(path.join(runtimeDir, 'node_modules', ...name.split('/'), 'package.json')))
+      .map(name => `node_modules/${name}`),
+    ...fonts.filter(file => !fs.existsSync(path.join(runtimeDir, 'fonts', file))).map(file => `fonts/${file}`),
+  ];
+  if (missing.length > 0) {
+    throw new Error(
+      `[afterPack] Office runtime is incomplete in resources/office-runtime: ${missing.join(', ')}. ` +
+      'Check the office-runtime extraResources entries.'
+    );
+  }
+  console.log(`[afterPack] Office runtime present (${libraries.length} libraries, ${fonts.length} font files)`);
 }
 
 function validatePackagedArtifact(context) {
   console.log('[afterPack] Validating packaged artifact...');
   const pkg = createPackageReader(context);
   validateEngineRuntimes(pkg);
-  validateProductConfig(pkg);
+  validateClaudeCodeCliOnDisk(context, pkg);
+  validateOfficeRuntime(context);
+  validateWindowsConsoleBootstrap(context, pkg);
+  const product = validateProductConfig(pkg);
   validateUpdaterConfig(context);
+  validateUpdateHelper(context, product);
   console.log('[afterPack] Packaged artifact validation passed');
 }
 
 module.exports = async function(context) {
   // Clean non-target watcher packages from unpacked output
   cleanNonTargetWatchers(context);
+  cleanNonTargetCanvasPackages(context);
 
-  // Swap better-sqlite3 native binary for the target platform
-  swapBetterSqlite3Binary(context);
+  await cleanAndValidateBetterSqlite3Prebuilds(context);
+
+  // Give the dsh bundle its own node_modules and native companions for this
+  // target, then prune its private node-pty. None of this touches packages the
+  // rest of the app uses.
+  installDshPrivateExternals(context);
+  cleanDshRuntimeNodePty(context);
 
   // Clean non-target node-pty prebuild directories and strip .pdb files
   cleanNodePtyPrebuilds(context);
@@ -802,7 +1096,7 @@ module.exports = async function(context) {
   cleanAnthropicVendorBinaries(context);
 
   // Install the target cloudflared binary under its runtime name.
-  installCloudflaredBinary(context);
+  const cloudflaredBinary = installCloudflaredBinary(context);
 
   // Ensure all native binaries in unpacked output have +x permission.
   // Defends against upstream npm packages shipping broken permissions
@@ -813,12 +1107,21 @@ module.exports = async function(context) {
   // contains the engines, product config and updater metadata it needs.
   // Throwing here fails the build, which is the point — a broken package must
   // never reach a user.
+  validateDshRuntimeBundle(context);
+
   validatePackagedArtifact(context);
 
   // macOS signing (other platforms skip)
   if (context.electronPlatformName !== 'darwin') {
     return;
   }
+
+  const nativeAppPath = path.join(context.appOutDir, `${context.packager.appInfo.productFilename}.app`);
+  const { CLOUDFLARED_MINIMUM_MACOS } = await import('./lib/cloudflared.mjs');
+  const helperFloors = cloudflaredBinary ? { [cloudflaredBinary]: CLOUDFLARED_MINIMUM_MACOS } : {};
+  const nativeTargets = assertMacOSDeploymentTargets(nativeAppPath, undefined, helperFloors);
+  console.log(`[afterPack] Verified macOS 12 deployment targets for ${nativeTargets.length} native binaries` +
+    (cloudflaredBinary ? ` (cloudflared: macOS ${CLOUDFLARED_MINIMUM_MACOS})` : ''));
 
   // Developer ID mode: electron-builder performs real Developer ID signing and
   // notarization in its own later step. Ad-hoc signing here would overwrite that
@@ -831,28 +1134,23 @@ module.exports = async function(context) {
   const appPath = path.join(context.appOutDir, `${context.packager.appInfo.productFilename}.app`);
   const entitlementsPath = path.join(__dirname, '..', 'resources', 'entitlements.mac.plist');
 
-  console.warn('[afterPack] \u26a0\ufe0f AD-HOC signing (NOT notarized \u2014 will be blocked by macOS 26.5+ Gatekeeper/XProtect)');
+  console.log('[afterPack] Local ad-hoc signing (no Developer ID or notarization required for local development)');
   console.log(`[afterPack] Ad-hoc signing: ${appPath}`);
 
   try {
     // 1. Remove quarantine attribute (if exists)
     try {
-      execSync(`xattr -dr com.apple.quarantine "${appPath}"`, { stdio: 'pipe' });
-    } catch { }
+      execFileSync('/usr/bin/xattr', ['-dr', 'com.apple.quarantine', appPath], { stdio: 'pipe' });
+    } catch (error) {
+      if (!String(error.stderr).includes('No such xattr')) throw error;
+      console.log('[afterPack] No quarantine attribute to remove');
+    }
 
-    // 2. Ad-hoc sign with entitlements
-    const codesignCmd = `codesign --force --deep -s - --entitlements "${entitlementsPath}" --timestamp=none "${appPath}"`;
-    console.log(`[afterPack] Executing: ${codesignCmd}`);
-    execSync(codesignCmd, { stdio: 'inherit' });
-
-    // 3. Verify signature
-    console.log('[afterPack] Verifying signature...');
-    const verifyOutput = execSync(`codesign -dv "${appPath}" 2>&1`, { encoding: 'utf8' });
-    console.log(verifyOutput);
+    signLocalApp(appPath, entitlementsPath);
 
     console.log('[afterPack] Ad-hoc signing complete');
   } catch (error) {
     console.error('[afterPack] Signing failed:', error.message);
-    // Don't throw error, let build continue
+    throw error;
   }
 };

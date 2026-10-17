@@ -6,7 +6,61 @@
  */
 
 import { describe, it, expect } from 'vitest'
-import { resolveLocalizedText } from '../../../src/shared/types/ai-sources'
+import {
+  resolveLocalizedText, getModelDisplayName, resolveModelSelection, getSourceAccountName,
+  type AISource, type AISourcesConfig,
+} from '../../../src/shared/types/ai-sources'
+
+describe('stored model selection display', () => {
+  const source = (id: string): AISource => ({
+    id, name: id, provider: 'custom', authType: 'api-key', apiUrl: '', model: `${id}-model`,
+    availableModels: [{ id: `${id}-model`, name: `${id} model` }], createdAt: '', updatedAt: '',
+  })
+  const config: AISourcesConfig = { version: 2, currentId: 'b', sources: [source('a'), source('b')] }
+  const empty: AISourcesConfig = { version: 2, currentId: null, sources: [] }
+
+  it('shows the pinned account and model when the account exists', () => {
+    expect(getModelDisplayName(config, 'a')).toBe('a model')
+    expect(getModelDisplayName(config, 'a', 'custom-model')).toBe('custom-model')
+    expect(resolveModelSelection(config, { modelSourceId: 'a', modelId: 'custom-model' }))
+      .toEqual({ source: config.sources[0], modelId: 'custom-model', own: true })
+  })
+
+  it('shows the global selection without a pin', () => {
+    expect(getModelDisplayName(config)).toBe('b model')
+    expect(resolveModelSelection(config, null)).toEqual({ source: config.sources[1], modelId: 'b-model', own: false })
+    expect(resolveModelSelection(config, {}).own).toBe(false)
+  })
+
+  it('shows the global selection and its own model for a pin whose account was removed', () => {
+    expect(getModelDisplayName(config, 'removed', 'old-model')).toBe('b model')
+    expect(resolveModelSelection(config, { modelSourceId: 'removed', modelId: 'old-model' }))
+      .toEqual({ source: config.sources[1], modelId: 'b-model', own: false })
+    expect(config.currentId).toBe('b')
+  })
+
+  it('shows no model when there is no account to run on', () => {
+    expect(getModelDisplayName(empty, 'a')).toBe('No model')
+    expect(getModelDisplayName(empty)).toBe('No model')
+    expect(resolveModelSelection(empty, { modelSourceId: 'a' })).toEqual({ source: null, modelId: undefined, own: false })
+  })
+})
+
+describe('getSourceAccountName', () => {
+  const source = (authType: AISource['authType']): AISource => ({
+    id: authType, name: authType, provider: 'p', authType, apiUrl: '', model: 'm',
+    availableModels: [], createdAt: '', updatedAt: '', user: { name: 'me@example.com' },
+  })
+
+  it('names the signed-in account of sources that sign in, the Claude Code CLI included', () => {
+    expect(getSourceAccountName(source('oauth'))).toBe('me@example.com')
+    expect(getSourceAccountName(source('delegated'))).toBe('me@example.com')
+  })
+
+  it('names none for an API key source', () => {
+    expect(getSourceAccountName(source('api-key'))).toBeUndefined()
+  })
+})
 
 describe('resolveLocalizedText', () => {
   it('returns a plain string verbatim, ignoring the locale', () => {

@@ -12,14 +12,14 @@
  * The original standalone tools remain in their source files for future extension.
  *
  * browser_handle_dialog — Removed from registration. Native JS dialogs (alert/confirm/prompt)
- *   cannot be reliably intercepted in Electron BrowserView. Code preserved below for reference.
+ *   cannot be reliably intercepted in an embedded browser page. Code preserved below for reference.
  */
 
 import { z } from 'zod'
 import { tool } from '../../agent/resolved-sdk'
 import type { BrowserContext } from '../context'
 import { browserViewManager, type DeviceMode } from '../../browser-view.service'
-import { textResult, NAV_TIMEOUT } from './helpers'
+import { textResult, NAV_TIMEOUT, BACKGROUND_PAGE_NOTE } from './helpers'
 
 export function buildNavigationTools(ctx: BrowserContext) {
 
@@ -50,28 +50,24 @@ Use device: "h5" only when the target site is mobile-only or the user explicitly
   async (args) => {
     const timeout = (args.timeout && args.timeout > 0) ? args.timeout : NAV_TIMEOUT
     const requestedDevice: DeviceMode = args.device ?? 'pc'
-    const activeViewId = ctx.getActiveViewId()
+    // Only reuse a tab this caller still owns. Without the ownership check a
+    // stale pointer navigates someone else's page — the failure the user saw as
+    // "my page was overwritten", with nothing reported on either side.
+    const rawActiveViewId = ctx.getActiveViewId()
+    const activeViewId = rawActiveViewId && ctx.canReachView(rawActiveViewId) ? rawActiveViewId : null
     const activeState = activeViewId ? browserViewManager.getState(activeViewId) : undefined
     const shouldCreatePage = !activeViewId || (args.device !== undefined && activeState?.deviceMode !== requestedDevice)
 
     if (shouldCreatePage) {
       try {
-        const viewId = `ai-browser-${Date.now()}`
-        // Scoped (automation) contexts use the offscreen host window to isolate
-        // view lifecycle from the user's mainWindow.
-        await browserViewManager.create(viewId, args.url, {
-          offscreen: ctx.isScoped,
-          deviceMode: requestedDevice,
-        })
-        ctx.trackView(viewId)
-        ctx.setActiveViewId(viewId)
+        const { viewId, fellBack } = await ctx.openPage(args.url, requestedDevice)
 
         await ctx.waitForNavigation(timeout)
 
         const finalState = browserViewManager.getState(viewId)
         const modeLabel = requestedDevice === 'h5' ? ' [H5 mobile mode]' : ''
         return textResult(
-          `Created page${modeLabel}: ${finalState?.title || 'Untitled'} - ${finalState?.url || args.url}`
+          `Created page${modeLabel}: ${finalState?.title || 'Untitled'} - ${finalState?.url || args.url}${fellBack ? BACKGROUND_PAGE_NOTE : ''}`
         )
       } catch (error) {
         return textResult(`Failed to create page: ${(error as Error).message}`, true)
@@ -79,7 +75,11 @@ Use device: "h5" only when the target site is mobile-only or the user explicitly
     }
 
     try {
-      await browserViewManager.navigate(activeViewId, args.url)
+      const navigated = await browserViewManager.navigate(activeViewId, args.url)
+      if (!navigated) {
+        const state = browserViewManager.getState(activeViewId)
+        return textResult(state?.error || 'Navigation was cancelled or the page was closed', true)
+      }
       await ctx.waitForNavigation(timeout)
 
       const finalState = browserViewManager.getState(activeViewId)

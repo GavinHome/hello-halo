@@ -75,6 +75,12 @@ export type MemorySchema = Record<string, MemoryField>
 export interface ScheduleSourceConfig {
   every?: string
   cron?: string
+  /**
+   * Run only on mainland China working days, holidays and make-up workdays
+   * included. The schedule decides the times; the calendar decides which days
+   * count, so it should fire every day (not Monday to Friday).
+   */
+  workday_calendar?: boolean
 }
 
 export interface FileSourceConfig {
@@ -137,6 +143,11 @@ export interface SubscriptionDef {
   source: SubscriptionSource
   frequency?: FrequencyDef
   config_key?: string
+}
+
+/** Whether a subscription is a schedule limited to mainland China working days. */
+export function usesWorkdayCalendar(sub: SubscriptionDef): boolean {
+  return sub.source.type === 'schedule' && sub.source.config.workday_calendar === true
 }
 
 // ============================================
@@ -246,9 +257,12 @@ export interface StoreMetadata {
    * - 'builtin': bundled with the build itself (auto-installed at startup,
    *              protected from permanent deletion, refreshed on every launch)
    * - 'manual':  added via direct IPC/HTTP call (e.g. drag-and-drop)
+   * - 'bundled': not independently chosen — installed automatically because
+   *              another app (an automation's `requires.skills`) declared it
+   *              as a dependency and shipped its files inline
    * Older records may not carry this field; treat 'undefined' as 'store'.
    */
-  install_source?: 'store' | 'builtin' | 'manual'
+  install_source?: 'store' | 'builtin' | 'manual' | 'bundled'
 }
 
 // ============================================

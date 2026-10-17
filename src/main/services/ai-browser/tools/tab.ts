@@ -13,7 +13,7 @@ import { z } from 'zod'
 import { tool } from '../../agent/resolved-sdk'
 import type { BrowserContext } from '../context'
 import { browserViewManager, type DeviceMode } from '../../browser-view.service'
-import { textResult, NAV_TIMEOUT } from './helpers'
+import { textResult, NAV_TIMEOUT, BACKGROUND_PAGE_NOTE } from './helpers'
 
 const log = (...args: unknown[]) => console.log('[AI Browser][tab]', ...args)
 
@@ -51,7 +51,11 @@ The last remaining tab cannot be closed.`,
     )
   },
   async (args) => {
-    const states = browserViewManager.getAllStates()
+    // The tabs THIS caller owns, never every tab in the app. Enumerating the
+    // manager directly let one agent list, select and navigate another's pages
+    // (and the user's), which is how a page being worked on got overwritten
+    // with no signal to the side that lost it.
+    const states = ctx.visibleViewStates()
 
     switch (args.action) {
       case 'list': {
@@ -74,20 +78,14 @@ The last remaining tab cannot be closed.`,
         const deviceMode: DeviceMode = args.device ?? 'pc'
 
         try {
-          const viewId = `ai-browser-${Date.now()}`
-          await browserViewManager.create(viewId, args.url, {
-            offscreen: ctx.isScoped,
-            deviceMode,
-          })
-          ctx.trackView(viewId)
-          ctx.setActiveViewId(viewId)
+          const { viewId, fellBack } = await ctx.openPage(args.url, deviceMode)
           await ctx.waitForNavigation(timeout)
 
           const finalState = browserViewManager.getState(viewId)
           const modeLabel = deviceMode === 'h5' ? ' [H5 mobile mode]' : ''
           log(`new page: ${viewId}, deviceMode=${deviceMode}`)
           return textResult(
-            `Created page${modeLabel}: ${finalState?.title || 'Untitled'} - ${finalState?.url || args.url}`
+            `Created page${modeLabel}: ${finalState?.title || 'Untitled'} - ${finalState?.url || args.url}${fellBack ? BACKGROUND_PAGE_NOTE : ''}`
           )
         } catch (error) {
           return textResult(`Failed to create page: ${(error as Error).message}`, true)
@@ -128,7 +126,7 @@ The last remaining tab cannot be closed.`,
         log(`close page [${args.pageIdx}]: ${closedState.id}, wasActive=${wasActive}`)
 
         if (wasActive) {
-          const remaining = browserViewManager.getAllStates()
+          const remaining = ctx.visibleViewStates()
           if (remaining.length > 0) {
             const newIdx = Math.min(args.pageIdx, remaining.length - 1)
             ctx.setActiveViewId(remaining[newIdx].id)

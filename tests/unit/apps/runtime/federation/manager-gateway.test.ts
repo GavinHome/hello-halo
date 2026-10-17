@@ -1,0 +1,475 @@
+/**
+ * Unit tests for apps/runtime/federation -- FederationManager gateway routing.
+ *
+ * The host manager attaches to a fake gateway (real `ws` server) and the tests
+ * prove the host-side routing rules the relay adds on top of the LAN path:
+ *   - a gateway-relayed join is admitted and the grant rides back ADDRESSED
+ *     through the gateway (nodeToGateway learned from the inbound frame);
+ *   - unicast prefers a direct client mapping and falls back to the gateway;
+ *   - broadcast fans out to BOTH local clients and the gateway (to: null);
+ *   - a member-leave from a gateway node drives gw:evict.
+ */
+
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
+import { createDatabaseManager } from '../../../../../src/main/platform/store/database-manager'
+import type { DatabaseManager } from '../../../../../src/main/platform/store/types'
+import { FederationStore } from '../../../../../src/main/apps/federation/store'
+import {
+  MIGRATION_NAMESPACE as FED_NS,
+  migrations as fedMigrations,
+} from '../../../../../src/main/apps/federation/migrations'
+import { TeamStore } from '../../../../../src/main/apps/team/store'
+import {
+  MIGRATION_NAMESPACE as TEAM_NS,
+  migrations as teamMigrations,
+} from '../../../../../src/main/apps/team/migrations'
+import {
+  createFederationManager,
+  type FederationManager,
+} from '../../../../../src/main/apps/runtime/federation/manager'
+import type {
+  FederationMessage,
+  SerializedWakeRequest,
+} from '../../../../../src/main/apps/runtime/federation/types'
+import { startFakeGateway, waitFor, type FakeGateway } from './_fake-gateway'
+import { DEFAULT_OFFICE_SCOPE } from '../../../../../src/main/apps/federation/types'
+import { FeedStore } from '../../../../../src/main/apps/federation/feed-store'
+import { buildTeamSessionKey } from '../../../../../src/shared/apps/im-keys'
+import { FEDERATION_PROTOCOL_VERSION } from '../../../../../src/shared/federation/protocol-version'
+
+const OFFICE = 'office-gwm-1'
+const NODE_A = 'node-a-host'
+const NODE_B = 'node-b-relayed'
+const NODE_C = 'node-c-lan'
+const NODE_D = 'node-d-relayed'
+const C_CLIENT_ID = 'ws-client-c'
+const VALID_TOKEN = 'valid-token'
+
+function heartbeat(fromNode: string): FederationMessage {
+  return { kind: 'heartbeat', officeId: OFFICE, fromNode, ts: Date.now() } as FederationMessage
+}
+
+describe('FederationManager gateway routing (fake gateway over real ws)', () => {
+  let dbManager: DatabaseManager
+  let federationStore: FederationStore
+  let teamStore: TeamStore
+  let gateway: FakeGateway
+  let manager: FederationManager
+  let localSent: Array<{ clientId: string; frame: FederationMessage }>
+
+  beforeEach(async () => {
+    dbManager = createDatabaseManager(':memory:')
+    const db = dbManager.getAppDatabase()
+    dbManager.runMigrations(db, FED_NS, fedMigrations)
+    dbManager.runMigrations(db, TEAM_NS, teamMigrations)
+    federationStore = new FederationStore(db)
+    teamStore = new TeamStore(db)
+
+    gateway = await startFakeGateway()
+    localSent = []
+
+    manager = createFederationManager({
+      hostSend: (clientId, frame) => {
+        localSent.push({ clientId, frame })
+        return clientId === C_CLIENT_ID
+      },
+      hostListOfficeClients: () => [C_CLIENT_ID],
+      federationStore,
+      teamStore,
+      verifyCredential: (token) => (token === VALID_TOKEN ? { officeId: OFFICE, scope: DEFAULT_OFFICE_SCOPE } : null),
+      getLocalNodeId: () => NODE_A,
+      getGatewayUrl: () => gateway.url,
+      makeAuthProof: (nonce) => ({ method: 'device-key', identityId: NODE_A, challenge: nonce }),
+    })
+    manager.hostOffice(OFFICE)
+    await waitFor(() => gateway.attachCount() >= 1)
+  })
+
+  afterEach(async () => {
+    manager.stopAll()
+    await gateway.close()
+    dbManager.closeAll()
+  })
+
+  function relayJoinFromB(): void {
+    gateway.relayToHost({
+      kind: 'join-request',
+      officeId: OFFICE,
+      fromNode: NODE_B,
+      identityId: 'identity-b',
+      displayName: 'Node B',
+      credentialToken: VALID_TOKEN,
+      bringMembers: [
+        { appId: 'app-b-1', memberName: 'b-writer', role: 'Writer', spaceId: 'space-b-1' },
+      ],
+    })
+  }
+
+  it('admits a gateway-relayed join and answers with an ADDRESSED grant through the gateway', async () => {
+    relayJoinFromB()
+    await waitFor(() =>
+      gateway.hostFrames.some((f) => (f.payload as { kind?: string }).kind === 'join-grant')
+    )
+
+    const grant = gateway.hostFrames.find(
+      (f) => (f.payload as { kind?: string }).kind === 'join-grant'
+    )!
+    expect(grant.to).toBe(NODE_B)
+
+    const node = federationStore.getNode(OFFICE, NODE_B)!
+    expect(node.status).toBe('online')
+    const members = teamStore.listMembersByTeam(OFFICE)
+    expect(members).toHaveLength(1)
+    expect(members[0]).toMatchObject({ appId: 'app-b-1', origin: 'remote', ownerNodeId: NODE_B })
+  })
+
+  it('attributes a relayed frame with no payload fromNode via the gateway-stamped `from`', async () => {
+    // Admit B first so a turn-complete has a home.
+    relayJoinFromB()
+    await waitFor(() => federationStore.getNode(OFFICE, NODE_B) != null)
+
+    // turn-complete carries no fromNode; only the envelope `from` identifies it.
+    // Before the fix this was dropped ("without source node"); now it is routed.
+    gateway.relayToHost(
+      { kind: 'turn-complete', officeId: OFFICE, correlationId: 'no-corr', outcome: { kind: 'result', content: '' } },
+      NODE_B
+    )
+
+    // The node's return path is learned as gateway-reachable from the stamped
+    // origin — a subsequent unicast to it must ride the gateway, proving the
+    // frame was attributed to NODE_B rather than discarded.
+    await waitFor(() => manager.getOffice(OFFICE)!.link != null)
+    const before = gateway.hostFrames.length
+    manager.getOffice(OFFICE)!.link.send(NODE_B, heartbeat(NODE_A))
+    await waitFor(() => gateway.hostFrames.length > before)
+    expect(gateway.hostFrames.at(-1)!.to).toBe(NODE_B)
+  })
+
+  it('unicast prefers a direct client mapping and falls back to the gateway', async () => {
+    // NODE_B is known via the gateway; NODE_C via a direct WS client.
+    relayJoinFromB()
+    await waitFor(() => federationStore.getNode(OFFICE, NODE_B) != null)
+    manager.handleHostInbound({
+      clientId: C_CLIENT_ID,
+      officeId: OFFICE,
+      frame: heartbeat(NODE_C),
+    })
+
+    const link = manager.getOffice(OFFICE)!.link
+    const before = gateway.hostFrames.length
+    localSent = []
+
+    link.send(NODE_C, heartbeat(NODE_A))
+    expect(localSent).toHaveLength(1)
+    expect(localSent[0].clientId).toBe(C_CLIENT_ID)
+
+    link.send(NODE_B, heartbeat(NODE_A))
+    await waitFor(() => gateway.hostFrames.length > before)
+    const relayed = gateway.hostFrames.at(-1)!
+    expect(relayed.to).toBe(NODE_B)
+    // The gateway leg did not double-send locally.
+    expect(localSent).toHaveLength(1)
+  })
+
+  it('a direct client session supersedes the gateway path for the same node', async () => {
+    relayJoinFromB()
+    await waitFor(() => federationStore.getNode(OFFICE, NODE_B) != null)
+
+    // NODE_B's frames start arriving on a direct client — the return path flips.
+    manager.handleHostInbound({
+      clientId: 'ws-client-b-direct',
+      officeId: OFFICE,
+      frame: heartbeat(NODE_B),
+    })
+
+    localSent = []
+    manager.getOffice(OFFICE)!.link.send(NODE_B, heartbeat(NODE_A))
+    expect(localSent).toHaveLength(1)
+    expect(localSent[0].clientId).toBe('ws-client-b-direct')
+  })
+
+  it('broadcast fans out to local clients AND the gateway with to=null', async () => {
+    const before = gateway.hostFrames.length
+    localSent = []
+
+    manager.getOffice(OFFICE)!.link.broadcast(heartbeat(NODE_A))
+
+    expect(localSent).toHaveLength(1)
+    expect(localSent[0].clientId).toBe(C_CLIENT_ID)
+    await waitFor(() => gateway.hostFrames.length > before)
+    expect(gateway.hostFrames.at(-1)!.to).toBeNull()
+  })
+
+  it('sendWakeToMember reaches an owner connected via the GATEWAY (no direct client mapping)', async () => {
+    // NODE_B is admitted through the relay only — nodeToClient never learns it.
+    relayJoinFromB()
+    await waitFor(() => federationStore.getNode(OFFICE, NODE_B) != null)
+
+    const before = gateway.hostFrames.length
+    const sent = manager.sendWakeToMember({
+      officeId: OFFICE,
+      ownerNodeId: NODE_B,
+      correlationId: 'wake-corr-1',
+      request: {
+        appId: 'app-b-1',
+        spaceId: 'space-b-1',
+        message: 'run it',
+        conversationId: 'conv-1',
+        teamContext: { teamId: OFFICE } as SerializedWakeRequest['teamContext'],
+      },
+    })
+
+    // Pre-fix this returned false ("owner unreachable"): the reachability check
+    // only consulted nodeToClient, blind to the gateway path.
+    expect(sent).toBe(true)
+    await waitFor(() => gateway.hostFrames.length > before)
+    const wake = gateway.hostFrames.at(-1)!
+    expect(wake.to).toBe(NODE_B)
+    expect((wake.payload as { kind?: string }).kind).toBe('wake')
+  })
+
+  it('a member-leave from a gateway node evicts its gateway session', async () => {
+    relayJoinFromB()
+    await waitFor(() => teamStore.listMembersByTeam(OFFICE).length === 1)
+
+    gateway.relayToHost({
+      kind: 'member-leave',
+      officeId: OFFICE,
+      fromNode: NODE_B,
+      appIds: ['app-b-1'],
+    })
+
+    await waitFor(() => gateway.evictions.length >= 1)
+    expect(gateway.evictions[0]).toBe(NODE_B)
+  })
+
+  describe('a node the office refused, over the relay', () => {
+    // The relay drops a member as it relays the refusal, so anything still
+    // addressed to it after that comes back as "member unreachable" — once per
+    // retry, from every office it tries. The ctrl feed re-asks an unanswered
+    // subscription on its retransmit tick, so the ticks run fast here.
+    beforeEach(async () => {
+      manager.stopAll()
+      manager = createFederationManager({
+        hostSend: () => false,
+        hostListOfficeClients: () => [],
+        federationStore,
+        teamStore,
+        feedStore: new FeedStore(dbManager.getAppDatabase()),
+        ctrlRetransmitMs: 40,
+        verifyCredential: (token) => (token === VALID_TOKEN ? { officeId: OFFICE, scope: DEFAULT_OFFICE_SCOPE } : null),
+        getLocalNodeId: () => NODE_A,
+        getGatewayUrl: () => gateway.url,
+        makeAuthProof: (nonce) => ({ method: 'device-key', identityId: NODE_A, challenge: nonce }),
+      })
+      manager.hostOffice(OFFICE)
+      await waitFor(() => gateway.attachCount() >= 2)
+    })
+
+    const framesTo = (node: string) => gateway.hostFrames.filter((f) => f.to === node)
+    const kindsTo = (node: string) => framesTo(node).map((f) => (f.payload as { kind?: string }).kind)
+    const relayJoin = (node: string, pv: number, token = VALID_TOKEN) =>
+      gateway.relayToHost({
+        kind: 'join-request', officeId: OFFICE, fromNode: node, identityId: node, displayName: node,
+        credentialToken: token, bringMembers: [{ appId: `app-${node}`, memberName: node, role: 'Writer' }], pv,
+      })
+    const relayHeartbeat = (node: string) => gateway.relayToHost(heartbeat(node) as unknown as Record<string, unknown>, node)
+    /** Kinds addressed to `node` after the refusal it was sent. */
+    const kindsAfterRefusal = (node: string) => kindsTo(node).slice(kindsTo(node).indexOf('join-reject') + 1)
+    const severalTicks = () => new Promise((resolve) => setTimeout(resolve, 300))
+
+    it('leaves a node whose join is not decided yet wired in as before', async () => {
+      relayHeartbeat(NODE_D)
+
+      await waitFor(() => kindsTo(NODE_D).includes('feed-subscribe'))
+      expect(kindsTo(NODE_D)).toContain('feed-subscribe')
+    })
+
+    it('addresses nothing more to a node refused for its version, not even what its earlier frames set up', async () => {
+      // Its first frame arrived before its join, while undecided: it was wired in.
+      relayHeartbeat(NODE_B)
+      await waitFor(() => kindsTo(NODE_B).includes('feed-subscribe'))
+
+      relayJoin(NODE_B, FEDERATION_PROTOCOL_VERSION - 1)
+      await waitFor(() => kindsTo(NODE_B).includes('join-reject'))
+      relayHeartbeat(NODE_B)
+      await severalTicks()
+
+      expect(kindsAfterRefusal(NODE_B)).toEqual([])
+      expect(federationStore.getNode(OFFICE, NODE_B)).toBeNull()
+    })
+
+    it('treats a node refused for another reason the same way', async () => {
+      relayJoin(NODE_B, FEDERATION_PROTOCOL_VERSION, 'not-an-invite')
+      await waitFor(() => kindsTo(NODE_B).includes('join-reject'))
+      await severalTicks()
+
+      expect(kindsAfterRefusal(NODE_B)).toEqual([])
+    })
+
+    it('wires a refused node in once it is admitted on the matching version, and hears it again', async () => {
+      relayJoin(NODE_B, FEDERATION_PROTOCOL_VERSION - 1)
+      await waitFor(() => kindsTo(NODE_B).includes('join-reject'))
+
+      relayJoin(NODE_B, FEDERATION_PROTOCOL_VERSION)
+      await waitFor(() => kindsAfterRefusal(NODE_B).includes('join-grant'))
+      expect(kindsAfterRefusal(NODE_B)).toContain('feed-subscribe')
+
+      // Its frames count again: a heartbeat brings a suspect node back online.
+      federationStore.setNodeStatus(OFFICE, NODE_B, 'suspect', Date.now())
+      relayHeartbeat(NODE_B)
+      await waitFor(() => federationStore.getNode(OFFICE, NODE_B)?.status === 'online')
+      expect(federationStore.getNode(OFFICE, NODE_B)?.status).toBe('online')
+    })
+
+    it('counts what a refused node keeps sending, over either path, on the host health line', async () => {
+      // The refusal is logged once; what keeps arriving after it is a number.
+      manager.stopAll()
+      vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval'] })
+      try {
+        manager = createFederationManager({
+          hostSend: () => false,
+          hostListOfficeClients: () => [],
+          federationStore,
+          teamStore,
+          verifyCredential: (token) => (token === VALID_TOKEN ? { officeId: OFFICE, scope: DEFAULT_OFFICE_SCOPE } : null),
+          getLocalNodeId: () => NODE_A,
+          getGatewayUrl: () => gateway.url,
+          makeAuthProof: (nonce) => ({ method: 'device-key', identityId: NODE_A, challenge: nonce }),
+        })
+        manager.hostOffice(OFFICE)
+        await waitFor(() => gateway.attachCount() >= 3)
+        relayJoin(NODE_B, FEDERATION_PROTOCOL_VERSION - 1)
+        await waitFor(() => kindsTo(NODE_B).includes('join-reject'))
+
+        relayHeartbeat(NODE_B)
+        relayHeartbeat(NODE_B)
+        manager.handleHostInbound({ clientId: 'lan-b', officeId: OFFICE, frame: heartbeat(NODE_B) })
+        await new Promise((resolve) => setTimeout(resolve, 150))
+        const log = vi.spyOn(console, 'log')
+        vi.advanceTimersByTime(60_000)
+
+        const health = log.mock.calls.map((c) => String(c[0])).find((l) => l.includes(`health office=${OFFICE} role=host`))
+        expect(health).toContain(' refusedDropped=3 ')
+      } finally {
+        vi.useRealTimers()
+        vi.restoreAllMocks()
+      }
+    })
+  })
+
+  it('an office hosted BEFORE the gateway URL was configured attaches on the next hostOffice call', async () => {
+    // Fresh manager whose gateway URL starts unset (simulates: user hosts an
+    // office first, saves the gateway setting afterwards, then mints an invite).
+    let configuredUrl: string | null = null
+    const lateManager = createFederationManager({
+      hostSend: () => true,
+      hostListOfficeClients: () => [],
+      federationStore,
+      teamStore,
+      verifyCredential: (token) => (token === VALID_TOKEN ? { officeId: 'office-late-gw', scope: DEFAULT_OFFICE_SCOPE } : null),
+      getLocalNodeId: () => NODE_A,
+      getGatewayUrl: () => configuredUrl,
+      makeAuthProof: (nonce) => ({ method: 'device-key', identityId: NODE_A, challenge: nonce }),
+    })
+    try {
+      const attachesBefore = gateway.attachCount()
+      lateManager.hostOffice('office-late-gw')
+      // No URL yet → no attachment is opened.
+      await new Promise((r) => setTimeout(r, 100))
+      expect(gateway.attachCount()).toBe(attachesBefore)
+
+      // The user saves the gateway setting; minting an invite re-invokes
+      // hostOffice, which must heal the missing attachment.
+      configuredUrl = gateway.url
+      lateManager.hostOffice('office-late-gw')
+      await waitFor(() => gateway.attachCount() > attachesBefore)
+    } finally {
+      lateManager.stopAll()
+    }
+  })
+
+  it('joinOffice auth payload carries officeId (gateway sessions require it, §9.1)', async () => {
+    const joinerOffice = 'office-joined-via-gw'
+    const before = gateway.authPayloads.length
+
+    // Fire the join; the fake gateway grants auth but never a join-grant, so we
+    // only assert the handshake and let teardown reap the pending join.
+    void manager.joinOffice({
+      officeId: joinerOffice,
+      serverUrl: gateway.url,
+      credentialToken: 'opaque-invite-token',
+      selfContext: { officeId: joinerOffice, selfNodeId: NODE_A },
+      bringMembers: [{ appId: 'app-a-1', memberName: 'a-writer' }],
+    })
+
+    await waitFor(() => gateway.authPayloads.length > before)
+    const payload = gateway.authPayloads[gateway.authPayloads.length - 1]
+    expect(payload.federation).toBe(true)
+    // The regression this guards: the joiner client MUST carry officeId — a
+    // gateway cannot read it out of the (opaque) invite token like a LAN host.
+    expect(payload.officeId).toBe(joinerOffice)
+
+    manager.leaveOffice(joinerOffice)
+  })
+
+  describe('live batches relayed through the gateway', () => {
+    const sessionOf = (appId: string) => buildTeamSessionKey(appId, OFFICE, 'epoch-1')
+    const batch = (appId: string) => ({
+      kind: 'stream-frames', officeId: OFFICE, sessionKey: sessionOf(appId), baseSeq: 1, originRun: 'r',
+      frames: [
+        { seq: 1, kind: 'milestone', channel: 'agent:turn-start', spaceId: 's', payload: {} },
+        { seq: 2, kind: 'milestone', channel: 'agent:complete', spaceId: 's', payload: {} },
+      ],
+    })
+    const streamsToGateway = (to: string) =>
+      gateway.hostFrames.filter((f) => f.to === to && (f.payload as { kind?: string }).kind === 'stream-frames')
+    const streamsToLan = () => localSent.filter((s) => s.clientId === C_CLIENT_ID && s.frame.kind === 'stream-frames')
+
+    async function admitBandC(): Promise<void> {
+      relayJoinFromB()
+      await waitFor(() => federationStore.getNode(OFFICE, NODE_B) != null)
+      manager.handleHostInbound({
+        clientId: C_CLIENT_ID,
+        officeId: OFFICE,
+        frame: {
+          kind: 'join-request', officeId: OFFICE, fromNode: NODE_C, identityId: NODE_C, displayName: 'C',
+          credentialToken: VALID_TOKEN, bringMembers: [{ appId: 'app-c-1', memberName: 'c', role: 'r' }],
+        } as FederationMessage,
+      })
+    }
+
+    it('a relayed producer never gets its own batch back; others get it', async () => {
+      await admitBandC()
+      gateway.relayToHost(batch('app-b-1'), NODE_B)
+      await waitFor(() => streamsToLan().length > 0)
+      expect(streamsToGateway(NODE_B)).toEqual([])
+    })
+
+    it('a relayed batch for a member its sender does not own is dropped', async () => {
+      await admitBandC()
+      gateway.relayToHost(batch('app-c-1'), NODE_B)
+      gateway.relayToHost(heartbeat(NODE_B) as unknown as Record<string, unknown>, NODE_B)
+      await new Promise((resolve) => setTimeout(resolve, 100))
+      expect(streamsToLan()).toEqual([])
+    })
+
+    it('a relayed member confirmed offline is not sent live batches', async () => {
+      await admitBandC()
+      const node = federationStore.getNode(OFFICE, NODE_B)!
+      federationStore.upsertNode({ ...node, status: 'offline' })
+      const before = gateway.hostFrames.length
+      manager.handleHostInbound({ clientId: C_CLIENT_ID, officeId: OFFICE, frame: batch('app-c-1') as FederationMessage })
+      manager.getOffice(OFFICE)!.link.send(NODE_B, heartbeat(NODE_A))
+      await waitFor(() => gateway.hostFrames.length > before)
+      expect(streamsToGateway(NODE_B)).toEqual([])
+    })
+
+    it('a relayed batch with no stamped sender is dropped', async () => {
+      await admitBandC()
+      gateway.relayToHost(batch('app-b-1'))
+      await new Promise((resolve) => setTimeout(resolve, 100))
+      expect(streamsToLan()).toEqual([])
+    })
+  })
+})

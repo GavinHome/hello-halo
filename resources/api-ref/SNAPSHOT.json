@@ -1,17 +1,18 @@
 {
-  "totalRoutes": 181,
+  "totalRoutes": 303,
   "expose": {
-    "ai": 146,
+    "ai": 194,
     "wrapped": 11,
-    "internal": 24,
+    "internal": 98,
     "unlabeled": 0
   },
   "groups": {
     "conversation": 12,
-    "workspace": 22,
-    "digital-human": 44,
-    "knowledge-base": 21,
-    "channels": 19,
+    "workspace": 28,
+    "digital-human": 52,
+    "team": 32,
+    "knowledge-base": 22,
+    "channels": 22,
     "settings": 17,
     "store": 27,
     "terminal": 6
@@ -27,7 +28,11 @@
     "im",
     "system",
     "apps",
+    "team",
     "store",
-    "tlon"
+    "tlon",
+    "task",
+    "git",
+    "code-review"
   ]
 }

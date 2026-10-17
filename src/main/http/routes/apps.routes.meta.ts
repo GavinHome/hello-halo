@@ -3,6 +3,26 @@ import type { RouteModuleMeta } from './_meta-types'
 export const MODULE: RouteModuleMeta = {
   file: 'apps',
   routes: {
+    'GET /api/apps/states': { expose: 'internal' },
+    'GET /api/apps/pending-inbox': { expose: 'internal' },
+    'GET /api/apps/:appId/activity/:entryId': { expose: 'internal' },
+    // Whether an upgrade overrides the user's own edit is the user's call, the
+    // same way answering their decision is.
+    'POST /api/apps/:appId/activity/:entryId/adopt-author-version': { expose: 'internal' },
+    'GET /api/apps/:appId/author-spec': { expose: 'internal' },
+    'GET /api/apps/studio-summary': { expose: 'internal' },
+    'GET /api/apps/people': { expose: 'internal' },
+    'GET /api/apps/capability-inventory': { expose: 'internal' },
+    'GET /api/apps/:appId/pending-entries': { expose: 'internal' },
+    'POST /api/apps/:appId/space-preview': { expose: 'internal' },
+    'POST /api/apps/:appId/escalation/:entryId/retry': { expose: 'internal' },
+    'POST /api/apps/:appId/escalation/:entryId/deadline': { expose: 'internal' },
+    // Declining a request is the user's call about their own decision, never
+    // the AI's — an agent able to dismiss it would be answering for them.
+    'POST /api/apps/:appId/escalation/:entryId/dismiss': { expose: 'internal' },
+    'POST /api/apps/:appId/runs/:runId/close': { expose: 'internal' },
+    'POST /api/apps/:appId/runs/:runId/stop': { expose: 'internal' },
+    'POST /api/apps/:appId/runs/start': { expose: 'internal' },
     // ── Listing / reading ─────────────────────────────────────────────
     // Full InstalledApp includes userConfig (raw config_schema values — no
     // 'password' input type exists, so credential fields are plain strings)
@@ -173,6 +193,7 @@ export const MODULE: RouteModuleMeta = {
         'The transcript behind the "View process" panel — same shape as chat/messages, but for one automation run. It is the only way to see why a run did what it did rather than what it reported.',
         'Get the runId from GET /api/apps/<appId>/activity. Read this when a run went wrong; for what it concluded, its activity entry is shorter and enough.',
         '404 when the app or its space is gone. An empty array means that run left no transcript, not that the ids were wrong.',
+        'Only a person\'s newest 200 runs keep their transcript. An older run answers {success:false,code:"RUN_PROCESS_CLEARED"}; its activity entry still says what it did, and it can no longer be continued.',
       ].join('\n'),
     },
     'GET /api/apps/:appId/state': {
@@ -189,13 +210,40 @@ export const MODULE: RouteModuleMeta = {
       returns: '{success:true,data:{filesRemoved:number}}',
       impact: 'irreversible',
     },
+    'GET /api/apps/:appId/memory': {
+      expose: 'ai',
+      group: 'digital-human',
+      summary: "Read the state of a digital human's memory",
+      returns: '{success:true,data:{exists,totalBytes,topicCount,lastConsolidatedAt,lastAttempt,consolidating}}',
+    },
+    'POST /api/apps/:appId/memory/consolidate': {
+      expose: 'ai',
+      group: 'digital-human',
+      summary: "Consolidate a digital human's memory now",
+      returns: '{success:true,data:{started:boolean,reason?:"already-running"|"empty"|"not-found"}}',
+      impact: 'reversible',
+      notes: 'Returns once started; runs in the background with the digital human\'s model. Keeps a restorable snapshot.',
+    },
+    'GET /api/apps/:appId/reminders': {
+      expose: 'ai',
+      group: 'digital-human',
+      summary: 'List the reminders a digital human set in its conversations',
+      returns: '{success:true,data:[{id,conversationId,conversation:{kind,name?},message,schedule,nextAt,createdAt,setBy?}]}',
+    },
+    'DELETE /api/apps/:appId/reminders/:reminderId': {
+      expose: 'ai',
+      group: 'digital-human',
+      summary: 'Cancel a reminder a digital human set in one of its conversations',
+      returns: '{success:true} | {success:false,error:"Reminder not found"}',
+      impact: 'irreversible',
+    },
     'POST /api/apps/:appId/move-space': {
       expose: 'ai',
       group: ['digital-human', 'workspace'],
-      summary: 'Move a digital human to a different space (or make it global)',
+      summary: 'Set which space a digital human starts new work in',
       body: '{"newSpaceId": "<spaceId — a uuid from GET /api/spaces>"}',
-      returns: '{success:true,data:{activationWarning?:string}}',
-      notes: 'Send {"newSpaceId": null} to make it global (available in every space). 404 if appId does not exist; 400 if newSpaceId is an empty string.',
+      returns: '{success:true,data:{}}',
+      notes: 'Changes the default only: work already running, existing chat sessions and team work keep the environment they started in. A digital human must belong to a space, so newSpaceId is required — null is rejected. Nothing is stopped or restarted. 404 if appId does not exist; 400 if newSpaceId is an empty string.',
       impact: 'reversible',
     },
 
@@ -212,19 +260,19 @@ export const MODULE: RouteModuleMeta = {
     'PATCH /api/apps/:appId/overrides': {
       expose: 'ai',
       group: 'digital-human',
-      summary: 'Merge-patch per-installation overrides (frequency, notification level, model)',
+      summary: 'Merge-patch per-installation overrides (notification level, model)',
       body: '{"notificationLevel": "important"}',
       returns: '{success:true}',
-      notes: 'Other fields you can set the same way: frequency (object keyed by subscriptionId), modelSourceId, modelId. JSON Merge Patch semantics: send null to clear a field (e.g. {"modelSourceId":null} to fall back to the global model).',
+      notes: 'Other fields you can set the same way: modelSourceId, modelId, spaceMemoryAccess (true lets the digital human read its space\'s memory topics), chatReasoningEffort (off|minimal|low|medium|high|xhigh|max — how hard it thinks everywhere: its chats, IM replies and scheduled or manual runs; unset, the model\'s configured effort applies), memory ({enabled, autoConsolidate, cadence: "diligent"|"balanced"|"economical"} — sent as a whole object), disabledTools (MCP servers only: tool names, as the server lists them, to leave out of every session — the whole list each time; [] or null turns them all back on). JSON Merge Patch semantics: send null to clear a field (e.g. {"modelSourceId":null} to fall back to the global model). A modelSourceId naming an account that no longer exists is not rejected either: the digital human runs on the current global account until the override is changed. The run schedule is NOT set here — use POST /:appId/frequency.',
       impact: 'reversible',
     },
     'POST /api/apps/:appId/frequency': {
       expose: 'ai',
       group: 'digital-human',
-      summary: 'Change how often a digital human runs, without editing its full definition (spec)',
+      summary: 'Change how often a digital human runs, without editing the rest of its definition (spec)',
       body: '{"subscriptionId": "<subscriptionId — read app.spec.subscriptions via GET /api/apps/<appId>>", "frequency": "30m"}',
       returns: '{success:true}',
-      notes: 'frequency can also be a cron expression (e.g. "0 8 * * *"). subscriptionId must already exist — read app.spec.subscriptions via GET /:appId first. This sets a non-destructive override; it does not change the spec.',
+      notes: 'frequency can also be a cron expression (e.g. "0 8 * * *"); either one replaces the other. subscriptionId must name an existing schedule subscription — read app.spec.subscriptions via GET /:appId first. This rewrites that subscription\'s schedule in the spec, which is the only interval the scheduler reads and the one the settings panel shows; the rest of the spec is untouched.',
       impact: 'reversible',
     },
     'POST /api/apps/:appId/permissions/grant': {
@@ -295,7 +343,7 @@ export const MODULE: RouteModuleMeta = {
         'Only the "local" and "http" channels are accepted; a thread whose source is "im" is refused, because this API must not put words into a real conversation with a person. 400 with the expected form when the id is malformed, and chatId must match [A-Za-z0-9_-].',
         'Returns before the digital human has read anything. Poll GET /api/apps/<appId>/chat/status until isGenerating is false, then read the reply with GET /api/apps/<appId>/chat/messages, passing the same conversationId.',
         'Nothing here paces you: each send starts another full agent process immediately. Send one at a time and wait for the reply — never loop over this route.',
-        'Optional body fields: thinkingEnabled, images.',
+        'Optional body fields: thinkingEnabled, reasoningEffort (off|minimal|low|medium|high|xhigh|max; overrides thinkingEnabled, but the digital human\'s own chatReasoningEffort wins over it), images.',
       ].join('\n'),
     },
     'POST /api/apps/:appId/chat/stop': {
@@ -304,7 +352,11 @@ export const MODULE: RouteModuleMeta = {
       summary: "Stop a digital human's in-progress chat reply",
       body: '{"conversationId": "<conversationId — a uuid from GET /api/spaces/$HALO_SPACE_ID/conversations>"}',
       returns: '{success:true}',
-      notes: 'conversationId is optional — omit it (or send {}) to stop every session of this app',
+      notes: 'Name the session to stop. Stopping every session at once is a much bigger act, so it must be asked for explicitly: send {"all": true}. Sending neither returns 400 rather than guessing.',
+    },
+    // The chat UI adding to a running turn; not something an agent drives.
+    'POST /api/apps/:appId/chat/inject': {
+      expose: 'internal',
     },
     'GET /api/apps/:appId/chat/status': {
       expose: 'ai',
@@ -325,6 +377,13 @@ export const MODULE: RouteModuleMeta = {
         'thoughts carries the raw tool calls and results of the run; skip it unless you are diagnosing what the digital human actually did.',
       ].join('\n'),
     },
+    // Paged read for the chat UI; chat/messages stays the full read for AI callers.
+    'GET /api/apps/:appId/chat/transcript': {
+      expose: 'internal',
+    },
+    'GET /api/apps/:appId/chat/messages/:messageId/thoughts': {
+      expose: 'internal',
+    },
     // Recovery-after-refresh snapshot (thoughts, pendingQuestion) for the
     // chat UI to rebuild its view on reconnect — not a general-purpose read.
     'GET /api/apps/:appId/chat/session-state': {
@@ -339,6 +398,7 @@ export const MODULE: RouteModuleMeta = {
         '{success:true,data:[{id,role:"user"|"assistant",content,timestamp,thoughts?,thoughtsSummary?,images?}]}',
       notes: [
         'All three query params are required, 400 otherwise. spaceId must be the app\'s own — a different but valid one is accepted and reads the wrong space. Optional ?chatType=group, defaults to direct.',
+        'channel is the session\'s IM channel (wecom-bot, feishu-bot, dingtalk-bot, weixin-ilink-bot); chatId is taken as GET /api/im-sessions gives it. Any other channel, chatType or a chatId with whitespace, ":", "/", "\\" or ".." is a 400. Read "http" and "local" sessions with GET /api/apps/:appId/chat/messages?conversationId=.',
         'This is real correspondence with a person on the other end — read it only when the task needs it.',
       ].join('\n'),
     },
@@ -358,22 +418,37 @@ export const MODULE: RouteModuleMeta = {
       returns: '{success:true,data:{sessionsClosed:number}}',
       notes: 'Interrupts any in-flight turn. Conversation history is preserved.',
     },
+    'GET /api/apps/:appId/chats/clearable': {
+      expose: 'ai',
+      group: 'digital-human',
+      summary: "Count the conversations clearing all of a digital human's chats would clear",
+      returns: '{success:true,data:{total:number,im:number,teamIm:number}}',
+      notes: 'total: its default and local chats and its IM chats that have history (im of them in IM); API sessions and team chats are not counted. teamIm: IM chats with history that a team answers — a clear-all leaves them alone; /clear in each clears it.',
+    },
+    'POST /api/apps/:appId/chats/clear-all': {
+      expose: 'ai',
+      group: 'digital-human',
+      summary: "Clear the history of all of a digital human's chats at once",
+      returns: '{success:true,data:{cleared:number,failed:number}}',
+      notes: 'Each chat is cleared as /clear clears it and starts afresh with its next message; replies in progress stop. API sessions, team chats, memory and reminders are left alone. Nothing is posted into the chats.',
+      impact: 'irreversible',
+    },
     'POST /api/apps/:appId/im-chat/clear': {
       expose: 'ai',
       group: ['digital-human', 'channels'],
       summary: "Clear a digital human's chat history in a bound IM chat",
-      body: '{"spaceId": "<spaceId — the app\'s own spaceId from GET /api/apps>", "channel": "wecom", "chatType": "direct", "chatId": "<chatId — from GET /api/im-sessions>"}',
+      body: '{"spaceId": "<spaceId — the app\'s own spaceId from GET /api/apps>", "channel": "wecom-bot", "chatType": "direct", "chatId": "<chatId — from GET /api/im-sessions>"}',
       returns: '{success:true}',
-      notes: 'All four body fields are required, 400 otherwise. chatType is "direct" or "group".',
+      notes: 'All four body fields are required, 400 otherwise. channel, chatType and chatId are checked as for GET im-chat/messages; chatType is "direct" or "group".',
       impact: 'irreversible',
     },
     'POST /api/apps/:appId/im-chat/stop': {
       expose: 'ai',
       group: ['digital-human', 'channels'],
       summary: "Stop a digital human's in-progress reply in a bound IM chat (keeps history)",
-      body: '{"channel": "wecom", "chatType": "direct", "chatId": "<chatId — from GET /api/im-sessions>"}',
+      body: '{"channel": "wecom-bot", "chatType": "direct", "chatId": "<chatId — from GET /api/im-sessions>"}',
       returns: '{success:true,data:{stopped:boolean}}',
-      notes: 'chatType is "direct" or "group". Unlike im-chat/clear, this only aborts the current turn — the session and its history continue on the next inbound message.',
+      notes: 'channel, chatType and chatId are checked as for GET im-chat/messages; chatType is "direct" or "group". Unlike im-chat/clear, this only aborts the current turn — the session and its history continue on the next inbound message.',
     },
 
     // ── Native multi-session lifecycle ──────────────────────────────────
@@ -407,5 +482,10 @@ export const MODULE: RouteModuleMeta = {
       ].join('\n'),
       impact: 'irreversible',
     },
+    'GET /api/apps/overview': { expose: 'internal' },
+    'GET /api/spaces/:spaceId/available-skills': { expose: 'internal' },
+    'GET /api/spaces/:spaceId/effective-mcp-apps': { expose: 'internal' },
+    'GET /api/apps/:appId/runs': { expose: 'internal' },
+    'GET /api/apps/:appId/run-stats': { expose: 'internal' },
   },
 }

@@ -14,11 +14,10 @@
 
 import { proxyFetch } from './proxy-fetch'
 import { createSession } from './agent/resolved-sdk'
-import { app } from 'electron'
-import path from 'path'
 import { ensureOpenAICompatRouter, encodeBackendConfig, normalizeApiUrl } from '../openai-compat-router'
 import type { BackendConfig } from '../openai-compat-router'
-import { buildSdkEnv } from './agent/sdk-config'
+import { buildSdkEnv, resolveClaudeCodeCliPath } from './agent/sdk-config'
+import { getTempSpacePath } from '../foundation/config.service'
 import { DEFAULT_MODEL } from '../../shared/types/ai-sources'
 import {
   ModelFetchError,
@@ -100,9 +99,9 @@ export async function fetchModelsFromApi(params: FetchModelsParams): Promise<Fet
       throw new ModelFetchError(modelFetchFailureFromResponse(response.status, body, apiKey))
     }
 
-    const data = await response.json()
+    const data = await response.json() as { data?: unknown }
 
-    if (!data.data || !Array.isArray(data.data)) {
+    if (!Array.isArray(data.data)) {
       throw new Error('Invalid API response format')
     }
 
@@ -206,7 +205,11 @@ export async function validateApiConnection(params: ValidateApiParams): Promise<
   try {
     const sdkOptions: Record<string, unknown> = {
       model: testModel,
-      cwd: app.getPath('temp'),
+      apiCredentials: { baseUrl: normalizedUrl, apiKey, model: testModel, provider },
+      // Halo's own temp space, never the OS temp dir: on macOS the latter is the
+      // shared $TMPDIR that Chromium fills with short-lived `.<bundle-id>.XXXXXX`
+      // files, and a CLI subprocess rooted there races their deletion (ENOENT).
+      cwd: getTempSpacePath(),
       abortController,
       // Use buildSdkEnv for consistent environment setup matching the agent module.
       // This includes CLAUDE_CONFIG_DIR, proxy normalization, and all required flags.
@@ -218,11 +221,7 @@ export async function validateApiConnection(params: ValidateApiParams): Promise<
       maxTurns: 1,
       allowedTools: [],
       permissionMode: 'bypassPermissions' as const,
-      // Use the same cli.js path as the agent module (sdk-config.ts buildBaseSdkOptions)
-      // This avoids spawning a full Electron subprocess for headless node usage,
-      // which can fail on Windows when the executable path contains spaces or
-      // when the Electron binary is not recognized as a Node.js runtime.
-      pathToClaudeCodeExecutable: path.join(app.getAppPath(), 'node_modules/@anthropic-ai/claude-code/cli.js'),
+      pathToClaudeCodeExecutable: resolveClaudeCodeCliPath(),
       executable: electronPath,
       executableArgs: ['--no-warnings'],
       extraArgs: {

@@ -13,8 +13,9 @@
  */
 
 import type { AutomationSpec } from '../spec'
-import type { MemorySnapshot } from '../../platform/memory/snapshot'
-import type { EscalationResponse } from './types'
+import { renderMemorySection, MEMORY_SECTION_LIMITS, type MemorySnapshot, type TopicsTree } from '../../platform/memory'
+import type { EscalationResponse, EscalationQuestion } from './types'
+import { formatEscalationAnswer } from '../../../shared/apps/app-types'
 import type { ImSessionRecord } from '../../../shared/types/im-channel'
 import { getImSessionDisplayName } from '../../../shared/types/im-channel'
 import { buildSystemPrompt, buildSystemPromptWithAIBrowser } from '../../services/agent/system-prompt'
@@ -43,8 +44,8 @@ This is a headless background execution — there is no interactive user convers
   The user sees these reports in the Activity Thread, not your text output.
 - **User questions**: Use the escalation mechanism (type="escalation" in report_to_user)
   when you need user input. Do NOT use AskUserQuestion — it is unavailable in automation mode.
-- **Autonomy**: Execute the task to completion without asking for confirmation.
-  Only escalate when genuinely uncertain about a consequential decision.
+- **Autonomy**: Carry the task to completion on your own. Escalate only when the
+  rule in the Reporting section below applies.
 - **All other tools and capabilities remain identical** to the main Halo agent.
 
 ### Browser session
@@ -71,16 +72,23 @@ Use \`mcp__halo-report__report_to_user\` to communicate results to the user.
 2. **Important discoveries** (type="milestone") — when you find information
    of significant value to the user. Don't wait until the end to report it.
 
-3. **Uncertain decisions** (type="escalation") — when you encounter any
-   situation where you're unsure what the user would want. Do NOT make
-   assumptions. Ask first, then wait for the user's response.
+3. **Decisions that are not yours** (type="escalation") — escalate when the next
+   step is both hard to undo and open to more than one reading. Hard to undo
+   means it leaves your workspace: sent, submitted, published, paid, deleted.
+   Open to more than one reading means the instructions do not settle it, so you
+   would be choosing on the user's behalf.
+
+   Neither condition is enough alone. Hard to undo but unambiguous: do it, then
+   say what you did. Ambiguous but reversible: take the most likely reading, do
+   it, and name the reading you took. A plan the user must approve before you
+   execute it is an escalation.
 
 4. **Deliverable outputs** (type="output") — when you produce files,
    reports, or other artifacts. Tell the user where to find them.
 
 ### Reporting Format
 
-**summary** — write for humans: be clear, direct, and avoid technical jargon.
+**message** — write for humans: be clear, direct, and avoid technical jargon.
   ✅ "AirPods Pro lowest price today: ¥1199, no change from yesterday."
   ❌ "Successfully fetched 3 URLs, price delta: 0"
 
@@ -244,7 +252,8 @@ export interface AppPromptOptions {
  * Build the complete system prompt for an automation App session.
  *
  * Structure:
- * 1. Full main Agent system prompt (identity, tools, coding guidelines, env)
+ * 1. Host system prompt: the full main-Agent prompt, or on the halo engine only
+ *    the Halo context appended to the engine's own default prompt
  * 2. Automation context overlay (headless mode, report_to_user, escalation)
  * 3. App-specific system_prompt (from spec)
  * 4. Memory instructions (from memory service)
@@ -261,6 +270,10 @@ export function buildAppSystemPrompt(options: AppPromptOptions): string {
     workDir: options.workDir,
     modelInfo: options.modelInfo,
     knowledgeBases: getKBReferencesForApp(options.appId),
+    // A run mounts no digital-human management tools, so it must not be told it can.
+    digitalHumansEnabled: false,
+    // Who it is comes from its App Instructions, not Halo's introduction.
+    ownIdentity: !!options.appSpec.system_prompt,
   }
   let basePrompt = options.usesAIBrowser
     ? buildSystemPromptWithAIBrowser(promptCtx, AI_BROWSER_SYSTEM_PROMPT)
@@ -342,7 +355,10 @@ export function buildInitialMessage(options: {
   triggerContext: string
   userConfig?: Record<string, unknown>
   appName: string
-  memorySnapshot: MemorySnapshot
+  /** null when this digital human's memory is turned off */
+  memorySnapshot: MemorySnapshot | null
+  /** The space's topics, offered read-only; null when not offered */
+  spaceTopics?: TopicsTree | null
 }): string {
   const parts: string[] = []
 
@@ -350,7 +366,7 @@ export function buildInitialMessage(options: {
   parts.push(`## Trigger\n\nWhat initiated this run.\n\n${options.triggerContext}`)
 
   // ── Memory ─────────────────────────────────────────────────────────────
-  parts.push(buildMemorySection(options.memorySnapshot))
+  if (options.memorySnapshot) parts.push(buildMemorySection(options.memorySnapshot, options.spaceTopics))
 
   // ── User Configuration ─────────────────────────────────────────────────
   if (options.userConfig && Object.keys(options.userConfig).length > 0) {
@@ -358,12 +374,17 @@ export function buildInitialMessage(options: {
   }
 
   // ── Instructions ───────────────────────────────────────────────────────
+  const steps = options.memorySnapshot
+    ? [
+        'Update memory (`# now`, `# History`, and topics where knowledge settled) — internal housekeeping, do not mention this in your report',
+        'Report results via `mcp__halo-report__report_to_user`',
+      ]
+    : ['Report results via `mcp__halo-report__report_to_user`']
   parts.push(
     `## Instructions\n\n` +
     `Strictly follow the "${options.appName}" task requirements defined in your App Instructions (system prompt).\n` +
     `Complete this run based on the trigger above, then:\n` +
-    `1. Update memory (\`# now\` and \`# History\`) — internal housekeeping, do not mention this in your report\n` +
-    `2. Report results via \`mcp__halo-report__report_to_user\``
+    steps.map((step, i) => `${i + 1}. ${step}`).join('\n')
   )
 
   return parts.join('\n\n')
@@ -380,11 +401,23 @@ export function buildInitialMessage(options: {
  */
 export function buildEscalationResumeMessage(escalation: {
   originalQuestion: string
+  questions?: EscalationQuestion[]
   userResponse: EscalationResponse
 }): string {
-  const responseText = escalation.userResponse.text
-    || escalation.userResponse.choice
-    || '(no response)'
+  const questions = escalation.questions ?? []
+
+  // Several answers are listed against the questions they belong to: read on
+  // their own ("Yes; the second one") they are not answers at all.
+  if (questions.length > 1) {
+    return (
+      `User answered your escalation.\n\n` +
+      `${escalation.originalQuestion}\n\n` +
+      `${formatEscalationAnswer(questions, escalation.userResponse)}\n\n` +
+      `Continue your task based on these answers.`
+    )
+  }
+
+  const responseText = formatEscalationAnswer(questions, escalation.userResponse) || '(no response)'
   return (
     `User responded to your escalation.\n\n` +
     `Your question: "${escalation.originalQuestion}"\n` +
@@ -398,82 +431,42 @@ export function buildEscalationResumeMessage(escalation: {
 // ============================================
 
 /**
- * Build the ## Memory section for the initial message.
- *
- * Three variants based on memory state:
- * - No file: guidance to create one
- * - Small file (≤30 lines): full content inline
- * - Large file (>30 lines): first section + structural outline
+ * Sits immediately above the injected memory. One digital human, many
+ * concurrent executions, one first-person file: without this, a line another
+ * instance wrote about itself reads as a description of the reader.
  */
-function buildMemorySection(snapshot: MemorySnapshot): string {
-  const lines: string[] = []
-  lines.push('## Memory')
-  lines.push('')
-  lines.push('Your persistent memory from previous runs. Read it to maintain continuity and avoid repeating work.')
-  lines.push('')
+const MEMORY_AUTHORSHIP_FRAMING =
+  'Shared by this digital human’s executions. The memory’s "I" is the digital human, ' +
+  'not this execution. Claims of a role, an assignment or work in progress belong to ' +
+  'the execution that wrote them; verify those at their live source before acting.'
 
-  if (!snapshot.exists) {
-    // ── No memory file ─────────────────────────────────────────────────
-    lines.push(`**File**: \`${snapshot.memoryFilePath}\``)
-    lines.push('')
-    lines.push('No memory file exists yet. Create it with Write using the `# now` / `# History` structure.')
-    lines.push('Put your most important state under `# now` — it will be auto-loaded next run.')
-  } else if (snapshot.fullContent !== null) {
-    // ── Small memory: inject full content ──────────────────────────────
-    const sizeKB = (snapshot.sizeBytes / 1024).toFixed(1)
-    lines.push(`**File**: \`${snapshot.memoryFilePath}\``)
-    lines.push(`**Size**: ${snapshot.totalLines} lines, ${sizeKB}KB`)
-    lines.push('')
-    lines.push('### Content (full):')
-    lines.push('')
-    lines.push(snapshot.fullContent)
-  } else {
-    // ── Large memory: first section + outline ──────────────────────────
-    const sizeKB = (snapshot.sizeBytes / 1024).toFixed(1)
-    lines.push(`**File**: \`${snapshot.memoryFilePath}\``)
-    lines.push(`**Size**: ${snapshot.totalLines} lines, ${sizeKB}KB`)
+/**
+ * Offered below the digital human's own topics when its owner let it consult
+ * the space's memory. Called memory, never knowledge: a knowledge base is a
+ * separate thing the agent may also be given in the same turn.
+ */
+const SPACE_TOPICS_TITLE = "Space memory topics (read-only) — generated from the space's topic files"
+const SPACE_TOPICS_NOTE = `
+Topics from this space's shared memory, written by its conversations. Read them
+when their description fits; they are not yours to edit. Refer to them by path
+when you need them again — do not copy them into your own memory. If sources
+disagree, verify the current facts rather than choosing by memory ownership.
+`.trim()
 
-    if (snapshot.firstSection) {
-      lines.push('')
-      lines.push('### Working Memory (# now, auto-loaded):')
-      lines.push('')
-      lines.push(snapshot.firstSection)
-    }
 
-    if (snapshot.headers.length > 0) {
-      lines.push('')
-      lines.push('### Structure:')
-      for (const h of snapshot.headers) {
-        const loadedTag = h === snapshot.headers[0] && snapshot.firstSection
-          ? ' ← loaded above'
-          : ''
-        lines.push(`  L${h.line}: ${h.heading} (${h.lineCount} lines)${loadedTag}`)
-      }
-    }
-
-    lines.push('')
-    lines.push(`Use \`Read("${snapshot.memoryFilePath}")\` to see full content or specific sections.`)
-  }
-
-  // ── Archive info ─────────────────────────────────────────────────────
-  if (snapshot.archiveTotalCount > 0 || snapshot.compactionArchiveCount > 0) {
-    lines.push('')
-
-    if (snapshot.archiveTotalCount > 0) {
-      lines.push(`**Run History** (\`${snapshot.memoryArchiveDir}\`, ${snapshot.archiveTotalCount} files):`)
-      for (const f of snapshot.archiveFiles) {
-        lines.push(`  - ${f}`)
-      }
-      if (snapshot.archiveTotalCount > snapshot.archiveFiles.length) {
-        lines.push(`  ... and ${snapshot.archiveTotalCount - snapshot.archiveFiles.length} more`)
-      }
-    }
-
-    if (snapshot.compactionArchiveCount > 0) {
-      const compactDir = snapshot.memoryArchiveDir.replace(/\/run$/, '')
-      lines.push(`**Compaction Archives** (\`${compactDir}\`, ${snapshot.compactionArchiveCount} files)`)
-    }
-  }
-
-  return lines.join('\n')
+/**
+ * The `## Memory` block for a run or a session.
+ *
+ * Exported for app-chat, which injects the same section at the start of a
+ * session — the digital human is the same one either way, so it must meet its
+ * memory in the same shape whether the turn came from a schedule or a teammate.
+ */
+export function buildMemorySection(snapshot: MemorySnapshot, spaceTopics?: TopicsTree | null): string {
+  return renderMemorySection(snapshot, {
+    ...MEMORY_SECTION_LIMITS['digital-human'],
+    framing: MEMORY_AUTHORSHIP_FRAMING,
+    readOnlyTopics: spaceTopics
+      ? { title: SPACE_TOPICS_TITLE, note: SPACE_TOPICS_NOTE, tree: spaceTopics }
+      : undefined,
+  })
 }

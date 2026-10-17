@@ -9,6 +9,7 @@
  *   HALO_TEST_API_URL   - API URL (default: https://api.anthropic.com)
  *   HALO_TEST_MODEL     - Model to use (default: claude-haiku-4-5-20251001)
  *   HALO_TEST_PROVIDER  - Provider ID (default: anthropic)
+ *   HALO_TEST_SDK_ENGINE - SDK engine selected in the isolated profile
  */
 
 import { test as base, ElectronApplication, Page } from '@playwright/test'
@@ -16,7 +17,8 @@ import { _electron as electron } from 'playwright'
 import path from 'path'
 import fs from 'fs'
 import crypto from 'crypto'
-import { fileURLToPath } from 'url'
+import { fileURLToPath, pathToFileURL } from 'url'
+import type { RegistrySource } from '../../../src/shared/store/store-types'
 
 // ESM compatibility: __dirname is not available in ES modules
 const __filename = fileURLToPath(import.meta.url)
@@ -28,6 +30,11 @@ const TEST_API_URL = process.env.HALO_TEST_API_URL || ''
 const TEST_MODEL = process.env.HALO_TEST_MODEL || ''
 const TEST_PROVIDER = process.env.HALO_TEST_PROVIDER || ''
 const TEST_OAUTH_SOURCE = process.env.HALO_TEST_OAUTH_SOURCE || ''
+const TEST_SDK_ENGINE = process.env.HALO_TEST_SDK_ENGINE || ''
+
+if (TEST_SDK_ENGINE && !['anthropic', 'halo', 'codex', 'dsh'].includes(TEST_SDK_ENGINE)) {
+  throw new Error('HALO_TEST_SDK_ENGINE must name a supported SDK engine')
+}
 
 // Validate: if API key is set, the other three must also be set
 if (TEST_API_KEY && (!TEST_API_URL || !TEST_MODEL || !TEST_PROVIDER)) {
@@ -44,20 +51,31 @@ if (TEST_API_KEY && (!TEST_API_URL || !TEST_MODEL || !TEST_PROVIDER)) {
 
 // Types for the fixture
 interface ElectronFixtures {
+  appStoreRegistries: RegistrySource[] | undefined
   electronApp: ElectronApplication
   window: Page
 }
 
 /**
  * Get the app entry point path.
- * Requires "npm run build" to produce out/main/index.mjs.
+ *
+ * Read from package.json's `main` rather than hard-coded: the bundle's module
+ * format is a build setting (electron.vite.config.ts) and the app's own entry
+ * field is the only thing that must agree with the launcher.
  */
 export function getAppEntryPath(): string {
+  if (process.env.HALO_E2E_PACKAGED_APP) {
+    if (process.env.PERF_CONTENT_IDENTITY_RUN) throw new Error('Frozen performance runtime identity requires the declared production output entry')
+    const executable = path.resolve(process.env.HALO_E2E_PACKAGED_APP)
+    if (!fs.existsSync(executable)) throw new Error(`Packaged app missing: ${executable}`)
+    return executable
+  }
   const projectRoot = path.resolve(__dirname, '../../..')
-  const appEntryPath = path.join(projectRoot, 'out/main/index.mjs')
+  const main = JSON.parse(fs.readFileSync(path.join(projectRoot, 'package.json'), 'utf-8')).main as string
+  const appEntryPath = path.resolve(projectRoot, main)
 
   if (!fs.existsSync(appEntryPath)) {
-    throw new Error('Built app not found. Run "npm run build" first.')
+    throw new Error(`Built app not found at ${appEntryPath}. Run "npm run build" first.`)
   }
 
   // Ensure product.json exists in out/main/ so auth-loader can find providers.
@@ -114,7 +132,7 @@ function ensureProductJson(projectRoot: string): void {
  * anything written to the SQLite/config files before the app opens them is
  * picked up on boot exactly like a real prior install.
  */
-export function createTestConfigDir(appPath: string): string {
+export function createTestConfigDir(appPath: string, registries?: RegistrySource[]): string {
   const testDir = path.join(
     process.env.TMPDIR || '/tmp',
     `halo-e2e-test-${Date.now()}`
@@ -162,7 +180,7 @@ export function createTestConfigDir(appPath: string): string {
       sources.push(oauthSource)
       console.log(`[E2E] Loaded OAuth source: ${oauthSource.provider}`)
     } catch (err) {
-      console.warn('[E2E] Failed to parse HALO_TEST_OAUTH_SOURCE:', err.message)
+      console.warn('[E2E] Failed to parse HALO_TEST_OAUTH_SOURCE:', err instanceof Error ? err.message : String(err))
     }
   }
 
@@ -201,6 +219,8 @@ export function createTestConfigDir(appPath: string): string {
       completed: true  // Skip onboarding in tests
     },
     mcpServers: {},
+    ...(TEST_SDK_ENGINE ? { agent: { sdkEngine: TEST_SDK_ENGINE } } : {}),
+    ...(registries ? { appStore: { registries, cacheTtlMs: 3600000, autoCheckUpdates: true } } : {}),
     isFirstLaunch: false  // Skip first launch flow
   }
 
@@ -261,8 +281,34 @@ export async function launchElectronApp(appEntryPath: string, testConfigDir: str
   // but Playwright needs Electron in full app mode to connect via CDP.
   const { ELECTRON_RUN_AS_NODE: _, ...cleanEnv } = process.env
 
-  return electron.launch({
-    args: [appEntryPath],
+  if (process.env.HALO_E2E_PACKAGED_APP) {
+    return electron.launch({
+      executablePath: appEntryPath,
+      args: ['--lang=en-US', ...(process.env.HALO_E2E_NO_SANDBOX === '1' ? ['--no-sandbox'] : [])],
+      env: { ...cleanEnv, HALO_DATA_DIR: path.join(testConfigDir, '.halo'), HALO_E2E_TEST: '1', ELECTRON_DISABLE_GPU: '1' },
+    })
+  }
+
+  const bootstrap = path.join(path.dirname(appEntryPath), `.e2e-bootstrap-${crypto.randomUUID()}.cjs`)
+  const appData = path.join(testConfigDir, 'electron-data')
+  const userData = path.join(appData, 'user')
+  fs.mkdirSync(userData, { recursive: true })
+  // macOS resolves appData independently of HOME. Isolate browser storage before main imports.
+  // Selectors are English UI labels, so the renderer must not follow the OS language.
+  fs.writeFileSync(bootstrap, `const { app } = require('electron');\napp.commandLine.appendSwitch('lang', 'en-US');\napp.setPath('appData',${JSON.stringify(appData)});\napp.setPath('userData', ${JSON.stringify(userData)});\nimport(${JSON.stringify(pathToFileURL(appEntryPath).href)});\n`)
+  const identityModule = process.env.PERF_CONTENT_IDENTITY_RUN ? await import('../../perf/build-identity/index.mjs') : undefined
+  // Pixel assertions compare CSS sRGB values, not the host monitor's color profile.
+  const launchArgs = ['--force-color-profile=srgb', ...(process.env.HALO_E2E_NO_SANDBOX === '1' ? ['--no-sandbox'] : []), bootstrap]
+  let identityFile: string | undefined
+  if (identityModule) {
+    try {
+      const projectRoot = path.resolve(__dirname, '../../..')
+      const productionMain = path.resolve(projectRoot, JSON.parse(fs.readFileSync(path.join(projectRoot, 'package.json'), 'utf8')).main)
+      identityFile = await identityModule.prepareLaunch(process.env.PERF_CONTENT_IDENTITY_RUN!, { productionMain, entryPath: appEntryPath, bootstrap, launchArgs })
+    } catch (error) { fs.rmSync(bootstrap, { force: true }); throw error }
+  }
+  const instance = await electron.launch({
+    args: launchArgs,
     env: {
       ...cleanEnv,
       // Use test-specific config directory
@@ -277,21 +323,51 @@ export async function launchElectronApp(appEntryPath: string, testConfigDir: str
       // Mark as E2E test
       HALO_E2E_TEST: '1'
     }
+  }).catch(error => {
+    if (identityModule && identityFile) identityModule.failLaunch(identityFile, error)
+    fs.rmSync(bootstrap, { force: true }); throw error
   })
+  instance.once('close', () => fs.rmSync(bootstrap, { force: true }))
+  if (identityModule && identityFile) {
+    try {
+      const observed = await instance.evaluate(({ app }) => ({
+        electron: process.versions.electron, chromium: process.versions.chrome, node: process.versions.node,
+        execPath: process.execPath, pid: process.pid, appPath: app.getAppPath(), appVersion: app.getVersion(),
+        appData: app.getPath('appData'), userData: app.getPath('userData'),
+      }))
+      const processInfo = instance.process()
+      identityModule.observeLaunch(identityFile, observed, processInfo.spawnfile, processInfo.spawnargs)
+      instance.once('close', () => {
+        try { identityModule.closeLaunch(identityFile!) }
+        catch (error) { console.error(`[PerfIdentity] Owned runtime close could not be authenticated: ${identityFile}: ${error instanceof Error ? error.message : String(error)}`) }
+      })
+    } catch (error) {
+      identityModule.failLaunch(identityFile, error)
+      await instance.close()
+      throw error
+    }
+  }
+  return instance
 }
 
 /**
  * Extended test fixture with Electron support
  */
 export const test = base.extend<ElectronFixtures>({
+  appStoreRegistries: [undefined, { option: true }],
   // Electron application instance
-  electronApp: async ({}, use) => {
+  electronApp: async ({ appStoreRegistries }, use, testInfo) => {
     const appEntryPath = getAppEntryPath()
-    const testConfigDir = createTestConfigDir(appEntryPath)
+    const testConfigDir = createTestConfigDir(appEntryPath, appStoreRegistries)
     const app = await launchElectronApp(appEntryPath, testConfigDir)
 
     // Use the app in tests
     await use(app)
+
+    if (testInfo.status !== testInfo.expectedStatus) {
+      const log = path.join(testConfigDir, '.halo', 'logs', 'main.log')
+      if (fs.existsSync(log)) await testInfo.attach('electron-main-log', { body: fs.readFileSync(log).subarray(-500000), contentType: 'text/plain' })
+    }
 
     // Cleanup after tests
     await app.close()

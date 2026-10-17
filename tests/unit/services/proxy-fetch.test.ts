@@ -23,19 +23,21 @@ import http from 'node:http'
 import zlib from 'node:zlib'
 import type { AddressInfo } from 'node:net'
 
-const resolveProxy = vi.fn(async () => 'DIRECT')
-let networkChangeHandler: ((cfg: { proxy?: string; browserUseProxy?: boolean }) => void) | null = null
+const resolveProxy = vi.fn(async (_url: string) => 'DIRECT')
+const setProxy = vi.fn(async () => {})
+type NetworkChange = { proxy?: string; browserUseProxy?: boolean; noProxy?: string }
+let networkChangeHandler: ((cfg: NetworkChange) => void) | null = null
 
 vi.mock('electron', () => ({
   session: {
     defaultSession: { resolveProxy: (url: string) => resolveProxy(url) },
-    fromPartition: () => ({ setProxy: () => Promise.resolve() }),
+    fromPartition: () => ({ setProxy }),
   },
 }))
 
 vi.mock('../../../src/main/foundation/config.service', () => ({
   getConfig: () => ({ network: {} }),
-  onNetworkConfigChange: (h: (cfg: { proxy?: string; browserUseProxy?: boolean }) => void) => {
+  onNetworkConfigChange: (h: (cfg: NetworkChange) => void) => {
     networkChangeHandler = h
     return () => {}
   },
@@ -53,7 +55,7 @@ const originalFetchMock = vi.fn(async () => new Response('direct-body', { status
 ;(globalThis as { fetch: typeof fetch }).fetch = originalFetchMock as unknown as typeof fetch
 
 // Dynamic import after mocks + global patch are in place.
-const { proxyFetch, clearProxyCache } = await import('../../../src/main/services/proxy-fetch')
+const { proxyFetch, clearProxyCache, resolveProxyAgent } = await import('../../../src/main/services/proxy-fetch')
 
 describe('proxyFetch — DIRECT path', () => {
   beforeEach(() => {
@@ -156,5 +158,122 @@ describe('proxyFetch — body decompression on the proxy path', () => {
     expect(res.status).toBe(200)
     expect(await res.text()).toBe('decoded-payload')
     expect(res.headers.get('content-encoding')).toBeNull()
+  })
+})
+
+describe('proxyFetch — keep-alive connections through an HTTP proxy', () => {
+  // Answers the way Clash/mihomo's HTTP inbound does: a request carrying the
+  // full target URL is forwarded (here: echoed), one carrying only a path gets
+  // an empty 400 and a closed connection.
+  let proxyServer: http.Server
+  const received: Array<{ connection: number | undefined; target: string; body: string }> = []
+
+  beforeEach(async () => {
+    received.length = 0
+    let connectionCount = 0
+    const connectionOf = new WeakMap<object, number>()
+    proxyServer = http.createServer((req, res) => {
+      const chunks: Buffer[] = []
+      req.on('data', (chunk: Buffer) => chunks.push(chunk))
+      req.on('end', () => {
+        const target = req.url ?? ''
+        const body = Buffer.concat(chunks).toString()
+        received.push({ connection: connectionOf.get(req.socket), target, body })
+        if (!/^https?:\/\//.test(target)) {
+          res.writeHead(400, { connection: 'close' }).end()
+          return
+        }
+        res.writeHead(200, { 'content-type': 'text/plain' }).end(body)
+      })
+    })
+    proxyServer.on('connection', (socket) => connectionOf.set(socket, ++connectionCount))
+    await new Promise<void>((resolve) => proxyServer.listen(0, '127.0.0.1', resolve))
+    const { port } = proxyServer.address() as AddressInfo
+    networkChangeHandler?.({ proxy: `http://127.0.0.1:${port}`, browserUseProxy: false })
+  })
+
+  afterEach(() => {
+    networkChangeHandler?.({ proxy: '', browserUseProxy: false })
+    proxyServer.closeAllConnections()
+    proxyServer.close()
+  })
+
+  it('sends requests on a reused connection with the full target URL', async () => {
+    const chat = 'http://gateway.example.com/v1/chat/completions'
+    const models = 'http://gateway.example.com/v1/models'
+
+    for (const body of ['{"turn":1}', '{"turn":2}']) {
+      const res = await proxyFetch(chat, { method: 'POST', headers: { 'content-type': 'application/json' }, body })
+      expect(res.status).toBe(200)
+      expect(await res.text()).toBe(body)
+    }
+    const res = await proxyFetch(models)
+    expect(res.status).toBe(200)
+    await res.text()
+
+    expect(received).toEqual([
+      { connection: 1, target: chat, body: '{"turn":1}' },
+      { connection: 1, target: chat, body: '{"turn":2}' },
+      { connection: 1, target: models, body: '' },
+    ])
+  })
+})
+
+describe('proxyFetch — hosts listed to bypass the proxy', () => {
+  // Nothing listens here: a request routed through it would fail.
+  const deadProxy = 'http://127.0.0.1:9'
+
+  beforeEach(() => {
+    delete process.env.NO_PROXY
+    delete process.env.no_proxy
+    resolveProxy.mockClear()
+    originalFetchMock.mockClear()
+    setProxy.mockClear()
+    clearProxyCache()
+  })
+  afterEach(() => {
+    networkChangeHandler?.({ proxy: '', browserUseProxy: false, noProxy: '' })
+  })
+
+  it('sends a listed host direct while the Settings proxy is on', async () => {
+    networkChangeHandler?.({ proxy: deadProxy, browserUseProxy: false, noProxy: '.weixin.qq.com' })
+
+    const res = await proxyFetch('https://qyapi.weixin.qq.com/cgi-bin/gettoken')
+
+    expect(await res.text()).toBe('direct-body')
+    expect(originalFetchMock).toHaveBeenCalledTimes(1)
+    expect(await resolveProxyAgent('https://qyapi.weixin.qq.com/')).toBeUndefined()
+    expect(await resolveProxyAgent('https://api.anthropic.com/')).toBeDefined()
+  })
+
+  it('sends a listed host direct without asking the system proxy', async () => {
+    networkChangeHandler?.({ proxy: '', browserUseProxy: false, noProxy: 'docs.example.com' })
+
+    await proxyFetch('https://docs.example.com/page')
+
+    expect(resolveProxy).not.toHaveBeenCalled()
+    expect(originalFetchMock).toHaveBeenCalledTimes(1)
+  })
+
+  it('gives the AI Browser the same list when it follows the Settings proxy', () => {
+    networkChangeHandler?.({ proxy: deadProxy, browserUseProxy: true, noProxy: '.weixin.qq.com' })
+
+    expect(setProxy).toHaveBeenLastCalledWith({
+      proxyRules: deadProxy,
+      proxyBypassRules: 'localhost,127.0.0.1,[::1],.weixin.qq.com',
+    })
+  })
+
+  it('keeps an inherited IP range for requests and for the AI Browser', async () => {
+    process.env.NO_PROXY = '10.0.0.0/8'
+    networkChangeHandler?.({ proxy: deadProxy, browserUseProxy: true, noProxy: '' })
+
+    const res = await proxyFetch('http://10.1.2.3:8080/status')
+
+    expect(await res.text()).toBe('direct-body')
+    expect(setProxy).toHaveBeenLastCalledWith({
+      proxyRules: deadProxy,
+      proxyBypassRules: 'localhost,127.0.0.1,[::1],10.0.0.0/8',
+    })
   })
 })

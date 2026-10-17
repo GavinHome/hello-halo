@@ -7,6 +7,7 @@ import { useState, useEffect } from 'react'
 import { Loader2 } from 'lucide-react'
 import { useTranslation } from '../../i18n'
 import { api } from '../../api'
+import { clearUpdateSnooze } from '../../services/update-snooze'
 import type { UpdateStatus } from './types'
 
 declare const __BUILD_TIME__: string
@@ -31,12 +32,20 @@ export function AboutSection() {
   // Update check state
   const [updateStatus, setUpdateStatus] = useState<UpdateStatus>({ phase: 'idle' })
 
+  // Preview builds share a data directory with the stable install, so "which
+  // one am I looking at" is a question the user can genuinely have. Only the
+  // preview channel is labelled — stable is the unremarkable case.
+  const [isPreviewChannel, setIsPreviewChannel] = useState(false)
+
   // Load app version
   useEffect(() => {
     api.getVersion().then((result) => {
       if (result.success && result.data) {
         setAppVersion(result.data)
       }
+    })
+    api.getUpdateChannel().then((result) => {
+      setIsPreviewChannel(result.success && result.data === 'experience')
     })
   }, [])
 
@@ -56,6 +65,9 @@ export function AboutSection() {
         case 'downloading':
           setUpdateStatus({ phase: 'downloading', version: data.version, percent: data.percent })
           break
+        case 'staging':
+          setUpdateStatus({ phase: 'staging', version: data.version })
+          break
         case 'downloaded':
         case 'manual-download':
           setUpdateStatus({ phase: 'ready', version: data.version })
@@ -68,8 +80,11 @@ export function AboutSection() {
     return () => unsubscribe()
   }, [])
 
-  // Handle check for updates
+  // An earlier deferral must not swallow the prompt the user is asking for now;
+  // with an update already downloaded, the check re-announces it and the
+  // prompt reopens.
   const handleCheckForUpdates = async () => {
+    clearUpdateSnooze()
     setUpdateStatus({ phase: 'checking' })
     await api.checkForUpdates()
   }
@@ -77,7 +92,7 @@ export function AboutSection() {
   const isBusy = updateStatus.phase === 'checking' || updateStatus.phase === 'downloading'
 
   return (
-    <section id="about" className="bg-card rounded-xl border border-border p-6">
+    <section id="about" className="bg-card rounded-xl border border-border-faint p-6">
       <h2 className="text-lg font-medium mb-4">{t('About')}</h2>
 
       <div className="space-y-3 text-sm">
@@ -85,6 +100,11 @@ export function AboutSection() {
           <span className="text-muted-foreground">{t('Version')}</span>
           <div className="flex flex-wrap items-center justify-end gap-x-3 gap-y-1">
             <span>{appVersion ? `${appVersion} (${__BUILD_TIME__.replace(/T(\d{2}):(\d{2}).*/, '-$1$2')})` : '-'}</span>
+            {isPreviewChannel && (
+              <span className="px-1.5 py-0.5 rounded text-[10px] font-medium bg-amber-500/15 text-amber-600 dark:text-amber-400">
+                {t('Preview channel')}
+              </span>
+            )}
             <button
               onClick={handleCheckForUpdates}
               disabled={isBusy}
@@ -102,6 +122,11 @@ export function AboutSection() {
                     version: updateStatus.version ?? '',
                     percent: Math.round(updateStatus.percent ?? 0)
                   })}
+                </span>
+              ) : updateStatus.phase === 'staging' ? (
+                <span className="flex items-center gap-1 text-muted-foreground">
+                  <Loader2 className="w-3 h-3 animate-spin" />
+                  {t('Preparing {{version}}…', { version: updateStatus.version ?? '' })}
                 </span>
               ) : updateStatus.phase === 'ready' ? (
                 <span className="text-emerald-500">{t('New version available')}: {updateStatus.version}</span>

@@ -15,6 +15,7 @@ import { createPortal } from 'react-dom'
 import { X, ChevronLeft, ChevronRight, ZoomIn, ZoomOut } from 'lucide-react'
 import type { ImageAttachment } from '../../types'
 import { useTranslation } from '../../i18n'
+import { imageAttachmentSrc } from '../../../shared/types/image-attachment'
 
 interface ImageViewerProps {
   images: ImageAttachment[]
@@ -27,6 +28,10 @@ export function ImageViewer({ images, initialIndex = 0, onClose }: ImageViewerPr
   const [currentIndex, setCurrentIndex] = useState(initialIndex)
   const [scale, setScale] = useState(1)
   const [isClosing, setIsClosing] = useState(false)
+  const [failed, setFailed] = useState(false)
+
+  // Switching images retries the load; a failure of one image is not of the next.
+  useEffect(() => { setFailed(false) }, [currentIndex])
 
   const currentImage = images[currentIndex]
   const hasMultiple = images.length > 1
@@ -183,14 +188,21 @@ export function ImageViewer({ images, initialIndex = 0, onClose }: ImageViewerPr
         onClick={(e) => e.stopPropagation()}
         onWheel={handleWheel}
       >
-        <img
-          src={`data:${currentImage.mediaType};base64,${currentImage.data}`}
-          alt={currentImage.name || t('Image')}
-          className="max-w-full max-h-[85vh] object-contain select-none
-            transition-transform duration-150 ease-out"
-          style={{ transform: `scale(${scale})` }}
-          draggable={false}
-        />
+        {failed ? (
+          <div className="px-10 py-8 rounded-lg bg-white/10 text-white/70 text-sm">
+            {t('Image failed to load')}
+          </div>
+        ) : (
+          <img
+            src={imageAttachmentSrc(currentImage)}
+            alt={currentImage.name || t('Image')}
+            className="max-w-full max-h-[85vh] object-contain select-none
+              transition-transform duration-150 ease-out"
+            style={{ transform: `scale(${scale})` }}
+            draggable={false}
+            onError={() => setFailed(true)}
+          />
+        )}
       </div>
 
       {/* Image name */}

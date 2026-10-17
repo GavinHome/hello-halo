@@ -15,11 +15,16 @@
  */
 
 import { shell } from 'electron'
-import { join } from 'path'
+import { isAbsolute, join, resolve } from 'path'
 import { existsSync, mkdirSync, readFileSync, writeFileSync, readdirSync, statSync, rmSync, renameSync } from 'fs'
-import { getHaloDir, getTempSpacePath, getSpacesDir } from '../foundation/config.service'
+import { rm } from 'fs/promises'
+import { getHaloDir, getTempSpacePath, getSpacesDir, resolveClaudeConfigDir } from '../foundation/config.service'
+import { canonicalPath, isPathWithin } from '../foundation/path-containment'
 import { v4 as uuidv4 } from 'uuid'
 import { getAppManager } from './app-bridge'
+import { getTaskStateService } from '../platform/task-state'
+import { resolveMemoryLayout, type MemoryLayout } from '../platform/memory'
+import { resolveMemorySettings, sanitizeMemorySettings, type MemorySettings, type ResolvedMemorySettings } from '../../shared/types/memory'
 
 // Re-export config helper for backward compatibility with existing imports
 export { getSpacesDir } from '../foundation/config.service'
@@ -32,6 +37,7 @@ interface Space {
   id: string
   name: string
   icon: string
+  color?: string
   path: string
   isTemp: boolean
   createdAt: string
@@ -50,12 +56,15 @@ interface SpaceLayoutPreferences {
 
 interface SpacePreferences {
   layout?: SpaceLayoutPreferences
+  /** Memory shared by this space's conversations; see shared/types/memory. */
+  memory?: MemorySettings
 }
 
 interface SpaceMeta {
   id: string
   name: string
   icon: string
+  color?: string
   createdAt: string
   updatedAt: string
   preferences?: SpacePreferences
@@ -70,6 +79,7 @@ interface SpaceIndexEntry {
   path: string
   name: string
   icon: string
+  color?: string
   createdAt: string
   updatedAt: string
   lastActiveAt?: string  // Last user activity time (cached, derivable from conversation data)
@@ -114,6 +124,7 @@ function metaToEntry(meta: SpaceMeta, spacePath: string): SpaceIndexEntry {
     path: spacePath,
     name: meta.name,
     icon: meta.icon,
+    color: meta.color,
     createdAt: meta.createdAt,
     updatedAt: meta.updatedAt,
     workingDir: meta.workingDir
@@ -250,7 +261,10 @@ function loadSpaceIndex(): Map<string, SpaceIndexEntry> {
   }
 
   const backfilled = backfillSortOrder(map)
-  if (migrated || backfilled > 0) persistIndex(map)
+  if (migrated || backfilled > 0) {
+    // Not fatal: the next start migrates/backfills again from the same input.
+    try { persistIndex(map) } catch { /* logged in persistIndex */ }
+  }
   registerHaloTemp(map)
   return map
 }
@@ -287,6 +301,13 @@ function tryReadMeta(spacePath: string): SpaceMeta | null {
 /**
  * Persist the registry Map to disk as v3 (atomic write via tmp + rename).
  * Excludes halo-temp (isTemp entries are memory-only).
+ *
+ * Throws when the index could not be written, since a change kept only in
+ * memory would come back undone on the next start. Callers undo or report it.
+ * One attempt only: this runs on the main process, which must never wait out
+ * a file another program (an antivirus or indexer on Windows) holds open.
+ * Activity writes retry on their own throttle timer; user actions retry
+ * between timers (persistIndexWithRetry), then fail and roll back.
  */
 function persistIndex(map: Map<string, SpaceIndexEntry>): void {
   // Filter out halo-temp before persisting
@@ -312,10 +333,65 @@ function persistIndex(map: Map<string, SpaceIndexEntry>): void {
     writeFileSync(tmpPath, JSON.stringify(data, null, 2))
     renameSync(tmpPath, indexPath)
   } catch (error) {
-    console.error('[Space] Failed to persist index:', error)
+    console.error(`[Space] Failed to persist index ${indexPath}:`, error)
     // Clean up tmp file if rename failed
     try { if (existsSync(tmpPath)) rmSync(tmpPath) } catch { /* ignore */ }
+    throw error
   }
+}
+
+/**
+ * On Windows, replacing a file another program holds open (an antivirus or
+ * indexer scanning it) fails with one of these until that program lets go.
+ */
+const TRANSIENT_LOCK_CODES = new Set(['EPERM', 'EBUSY', 'EACCES'])
+const INDEX_RETRY_DELAYS_MS = [50, 100, 200, 400]
+
+/** persistIndex for a user action: waits out a brief lock on timers, never by blocking. */
+async function persistIndexWithRetry(map: Map<string, SpaceIndexEntry>): Promise<void> {
+  for (let attempt = 0; ; attempt++) {
+    try {
+      persistIndex(map)
+      if (attempt > 0) console.log(`[Space] Index written after ${attempt} retr${attempt === 1 ? 'y' : 'ies'}`)
+      return
+    } catch (error) {
+      // Each failed attempt is already logged by persistIndex.
+      const code = (error as NodeJS.ErrnoException).code
+      if (!code || !TRANSIENT_LOCK_CODES.has(code) || attempt >= INDEX_RETRY_DELAYS_MS.length) throw error
+      await new Promise(resolve => setTimeout(resolve, INDEX_RETRY_DELAYS_MS[attempt]))
+    }
+  }
+}
+
+let registryCommits: Promise<unknown> = Promise.resolve()
+
+/**
+ * Apply a change to the given registry entries and persist it. If persisting
+ * fails, the entries are put back as they were and the error is rethrown.
+ * Changes run one at a time, so a rollback never undoes what a later write
+ * already put on disk.
+ */
+function commitRegistryChange(ids: Iterable<string>, change: () => void): Promise<void> {
+  const commit = registryCommits.then(async () => {
+    const reg = getRegistry()
+    const before = new Map<string, SpaceIndexEntry | undefined>()
+    for (const id of ids) {
+      const entry = reg.get(id)
+      before.set(id, entry ? { ...entry } : undefined)
+    }
+    change()
+    try {
+      await persistIndexWithRetry(reg)
+    } catch (error) {
+      for (const [id, saved] of before) {
+        if (saved) reg.set(id, saved)
+        else reg.delete(id)
+      }
+      throw error
+    }
+  })
+  registryCommits = commit.catch(() => {})
+  return commit
 }
 
 // ============================================================================
@@ -330,6 +406,7 @@ function entryToSpace(id: string, entry: SpaceIndexEntry): Space {
     id,
     name: entry.name,
     icon: entry.icon,
+    color: entry.color,
     path: entry.path,
     isTemp: !!entry.isTemp,
     createdAt: entry.createdAt,
@@ -471,7 +548,7 @@ export function getAllSpacePaths(): string[] {
 /**
  * Create a new space. Registers in both memory and disk index.
  */
-export function createSpace(input: { name: string; icon: string; customPath?: string }): Space {
+export async function createSpace(input: { name: string; icon: string; color?: string; customPath?: string }): Promise<Space> {
   const id = uuidv4()
   const now = new Date().toISOString()
 
@@ -491,6 +568,7 @@ export function createSpace(input: { name: string; icon: string; customPath?: st
     id,
     name: input.name,
     icon: input.icon,
+    color: input.color,
     createdAt: now,
     updatedAt: now,
     workingDir
@@ -513,13 +591,18 @@ export function createSpace(input: { name: string; icon: string; customPath?: st
     path: spacePath,
     name: input.name,
     icon: input.icon,
+    color: input.color,
     createdAt: now,
     updatedAt: now,
     workingDir,
     sortOrder
   }
-  getRegistry().set(id, entry)
-  persistIndex(getRegistry())
+  try {
+    await commitRegistryChange([id], () => getRegistry().set(id, entry))
+  } catch (error) {
+    try { rmSync(spacePath, { recursive: true, force: true }) } catch { /* unregistered, unreachable */ }
+    throw error
+  }
 
   console.log(`[Space] Created space ${id}: path=${spacePath}${workingDir ? `, workingDir=${workingDir}` : ''}`)
 
@@ -527,7 +610,37 @@ export function createSpace(input: { name: string; icon: string; customPath?: st
 }
 
 /**
- * Delete a space. Removes from both memory and disk index.
+ * Remove a space's registry entry without touching anything on disk —
+ * distinct from deleteSpace(), which deletes files. For spaces whose path
+ * is currently unreachable (external drive unplugged, etc.): the data isn't
+ * gone, Halo just stops tracking it. Reconnecting the drive and creating a
+ * space pointed at the same path won't recover the old id/conversations —
+ * this only clears the dead entry, it doesn't preserve a path to relink one.
+ *
+ * Refuses to run on a space whose path actually resolves — this is not a
+ * shortcut around deleteSpace()'s confirmation flow for live spaces.
+ */
+export async function forgetSpace(spaceId: string): Promise<boolean> {
+  const entry = getRegistry().get(spaceId)
+  if (!entry || entry.isTemp) return false
+  if (existsSync(entry.path)) {
+    console.warn(`[Space] forgetSpace refused: path still resolves for ${spaceId}`)
+    return false
+  }
+
+  try {
+    await commitRegistryChange([spaceId], () => getRegistry().delete(spaceId))
+  } catch {
+    return false
+  }
+  console.log(`[Space] Forgot unreachable space ${spaceId} (path: ${entry.path})`)
+  return true
+}
+
+/**
+ * Delete a space. The index on disk drops it first, so a delete that cannot
+ * be recorded fails before anything is removed rather than coming back on
+ * the next start. Files left behind by a failed removal are only logged.
  */
 export async function deleteSpace(spaceId: string): Promise<boolean> {
   const entry = getRegistry().get(spaceId)
@@ -537,38 +650,49 @@ export async function deleteSpace(spaceId: string): Promise<boolean> {
   const spacesDir = getSpacesDir()
   const isCentralized = spacePath.startsWith(spacesDir)
 
+  // The entry stays in memory until cleanup is done: app cleanup resolves
+  // this space's paths through the registry.
+  const withoutSpace = new Map(getRegistry())
+  withoutSpace.delete(spaceId)
   try {
-    // Clean up all apps belonging to this space from the database
-    // This must happen BEFORE deleting files to ensure proper cleanup
-    const manager = getAppManager()
-    if (manager) {
-      try {
-        await manager.deleteAppsInSpace(spaceId)
-      } catch (err) {
-        console.error(`[Space] Failed to cleanup apps for space ${spaceId}:`, err)
-      }
-    }
-
-    if (isCentralized) {
-      // Centralized storage (new spaces + default spaces): delete entire folder
-      rmSync(spacePath, { recursive: true, force: true })
-    } else {
-      // Legacy custom path spaces: only delete .halo folder (preserve user's files)
-      const haloDir = join(spacePath, '.halo')
-      if (existsSync(haloDir)) {
-        rmSync(haloDir, { recursive: true, force: true })
-      }
-    }
-
-    // Unregister from index (memory + disk)
-    getRegistry().delete(spaceId)
-    persistIndex(getRegistry())
-
-    return true
-  } catch (error) {
-    console.error(`[Space] Failed to delete space ${spaceId}:`, error)
+    await persistIndexWithRetry(withoutSpace)
+  } catch {
+    console.error(`[Space] Delete of ${spaceId} aborted: the index could not be written`)
     return false
   }
+
+  // Clean up all apps belonging to this space from the database
+  // This must happen BEFORE deleting files to ensure proper cleanup
+  const manager = getAppManager()
+  if (manager) {
+    try {
+      await manager.deleteAppsInSpace(spaceId)
+    } catch (err) {
+      console.error(`[Space] Failed to cleanup apps for space ${spaceId}:`, err)
+    }
+  }
+
+  try {
+    getTaskStateService()?.deleteAllInSpace(spaceId)
+  } catch (err) {
+    console.error(`[Space] Failed to cleanup task state for space ${spaceId}:`, err)
+  }
+
+  getRegistry().delete(spaceId)
+  // Another write during the app cleanup above may have put the entry back on disk.
+  try { persistIndex(getRegistry()) } catch { /* logged in persistIndex */ }
+
+  // Centralized storage: delete the entire folder. Legacy custom path: only
+  // its .halo folder, keeping the user's files.
+  const target = isCentralized ? spacePath : join(spacePath, '.halo')
+  // Async: its retries (a file briefly held by another program) must not block the main process.
+  try {
+    await rm(target, { recursive: true, force: true, maxRetries: 4, retryDelay: 100 })
+  } catch (err) {
+    console.error(`[Space] Deleted space ${spaceId} but could not remove ${target}:`, err)
+  }
+
+  return true
 }
 
 /**
@@ -597,31 +721,18 @@ export function openSpaceFolder(spaceId: string): boolean {
 /**
  * Update space metadata. Updates registry (memory + disk) and meta.json.
  */
-export function updateSpace(spaceId: string, updates: { name?: string; icon?: string }): Space | null {
+export async function updateSpace(spaceId: string, updates: { name?: string; icon?: string; color?: string }): Promise<Space | null> {
   const entry = getRegistry().get(spaceId)
   if (!entry || entry.isTemp) return null
 
   try {
-    // Update registry entry in memory
-    if (updates.name) entry.name = updates.name
-    if (updates.icon) entry.icon = updates.icon
-    entry.updatedAt = new Date().toISOString()
-
-    // Persist index
-    persistIndex(getRegistry())
-
-    // Write meta.json — read existing to preserve preferences
-    const existingMeta = tryReadMeta(entry.path)
-    const meta: SpaceMeta = {
-      id: spaceId,
-      name: entry.name,
-      icon: entry.icon,
-      createdAt: entry.createdAt,
-      updatedAt: entry.updatedAt,
-      preferences: existingMeta?.preferences,
-      workingDir: entry.workingDir
-    }
-    writeFileSync(join(entry.path, '.halo', 'meta.json'), JSON.stringify(meta, null, 2))
+    await commitRegistryChange([spaceId], () => {
+      if (updates.name) entry.name = updates.name
+      if (updates.icon) entry.icon = updates.icon
+      if (updates.color !== undefined) entry.color = updates.color
+      entry.updatedAt = new Date().toISOString()
+    })
+    writeMeta(spaceId, entry)
 
     return entryToSpaceWithPreferences(spaceId, entry)
   } catch (error) {
@@ -631,12 +742,108 @@ export function updateSpace(spaceId: string, updates: { name?: string; icon?: st
 }
 
 /**
+ * Write meta.json from the registry entry, keeping the preferences already
+ * stored there. Replaced whole, so a failed write leaves the old file intact.
+ */
+function writeMeta(spaceId: string, entry: SpaceIndexEntry): void {
+  const existingMeta = tryReadMeta(entry.path)
+  const meta: SpaceMeta = {
+    id: spaceId,
+    name: entry.name,
+    icon: entry.icon,
+    color: entry.color,
+    createdAt: entry.createdAt,
+    updatedAt: entry.updatedAt,
+    preferences: existingMeta?.preferences,
+    workingDir: entry.workingDir
+  }
+  const metaPath = join(entry.path, '.halo', 'meta.json')
+  const tmpPath = `${metaPath}.tmp`
+  try {
+    writeFileSync(tmpPath, JSON.stringify(meta, null, 2))
+    renameSync(tmpPath, metaPath)
+  } catch (error) {
+    try { rmSync(tmpPath, { force: true }) } catch { /* ignore */ }
+    throw error
+  }
+}
+
+/**
+ * Why `workingDir` cannot be a space's working directory, or null when it can:
+ * an existing folder, given by its full path, outside the folders where Halo and
+ * the engine keep their own data — except `ownDataDir`, the space's own data
+ * folder, where a space without a project folder works. Nothing is created
+ * here — Halo neither makes nor removes the user's folders.
+ */
+export function workingDirProblem(workingDir: string, ownDataDir?: string): string | null {
+  if (!workingDir || !isAbsolute(workingDir)) return 'Choose a folder by its full path.'
+  const dir = resolve(workingDir)
+  try {
+    if (!statSync(dir).isDirectory()) return 'That is not a folder.'
+  } catch {
+    return 'That folder does not exist.'
+  }
+  const isOwnDataDir = ownDataDir !== undefined && canonicalPath(dir) === canonicalPath(ownDataDir)
+  if (!isOwnDataDir && [getHaloDir(), resolveClaudeConfigDir()].some(root => isPathWithin(dir, root))) {
+    return 'That folder holds Halo’s own data. Choose a project folder.'
+  }
+  return null
+}
+
+/**
+ * Why this space's working directory cannot be changed to `workingDir`, or null
+ * when it can. A space whose own data folder is gone — a legacy space kept in
+ * the project folder that was deleted — has nothing left to point elsewhere.
+ */
+export function workingDirChangeProblem(spaceId: string, workingDir: string): string | null {
+  const entry = getRegistry().get(spaceId)
+  if (!entry || entry.isTemp) return 'This workspace’s folder cannot be changed.'
+  const problem = workingDirProblem(workingDir, entry.path)
+  if (problem) return problem
+  if (!existsSync(join(entry.path, '.halo'))) {
+    return 'This workspace’s conversations and settings were kept in a folder that is no longer there; choosing another folder cannot bring them back. Restore or reconnect that folder first.'
+  }
+  return null
+}
+
+/**
+ * Point a space at another working directory. Only the record changes: the
+ * agent, the file panel and the space's digital humans follow it, and Halo's
+ * own data for the space stays where it is. The default space keeps its own.
+ * meta.json is written first, so a failure changes nothing.
+ *
+ * @returns the updated space, or null for an unknown or default space
+ * @throws Error with a readable reason when the folder cannot be used or the
+ *   record cannot be written
+ */
+export async function setSpaceWorkingDir(spaceId: string, workingDir: string): Promise<Space | null> {
+  const entry = getRegistry().get(spaceId)
+  if (!entry || entry.isTemp) return null
+  const problem = workingDirChangeProblem(spaceId, workingDir)
+  if (problem) throw new Error(problem)
+
+  const changed: SpaceIndexEntry = { ...entry, workingDir: resolve(workingDir), updatedAt: new Date().toISOString() }
+  writeMeta(spaceId, changed)
+  try {
+    await commitRegistryChange([spaceId], () => {
+      entry.workingDir = changed.workingDir
+      entry.updatedAt = changed.updatedAt
+    })
+  } catch (error) {
+    try { writeMeta(spaceId, getRegistry().get(spaceId)!) } catch { /* the index stays authoritative */ }
+    throw error
+  }
+  console.log(`[Space] Working directory of ${spaceId} is now ${entry.workingDir}`)
+  return entryToSpaceWithPreferences(spaceId, entry)
+}
+
+/**
  * Persist a user-defined space ordering. Assigns sortOrder = index for each id
  * in the given order. Callers must pass the full dedicated-space id list in the
  * desired order; partial lists are rejected to prevent sortOrder collisions
  * that would corrupt the persisted index.
  */
-export function reorderSpaces(spaceIds: string[]): Space[] {
+export async function reorderSpaces(spaceIds: string[]): Promise<Space[]> {
   const registry = getRegistry()
 
   // Reject partial lists: assigning sortOrder only to a subset leaves the
@@ -653,12 +860,13 @@ export function reorderSpaces(spaceIds: string[]): Space[] {
     return listSpaces()
   }
 
-  for (let i = 0; i < spaceIds.length; i++) {
-    const entry = registry.get(spaceIds[i])
-    if (!entry || entry.isTemp) continue
-    entry.sortOrder = i
-  }
-  persistIndex(registry)
+  await commitRegistryChange(spaceIds, () => {
+    for (let i = 0; i < spaceIds.length; i++) {
+      const entry = registry.get(spaceIds[i])
+      if (!entry || entry.isTemp) continue
+      entry.sortOrder = i
+    }
+  })
   console.log('[Space] reorderSpaces: assigned sortOrder to %d spaces', spaceIds.length)
   return listSpaces()
 }
@@ -691,7 +899,13 @@ export function updateSpacePreferences(
     if (preferences.layout) {
       currentPrefs.layout = {
         ...currentPrefs.layout,
-        ...preferences.layout
+        ...sanitizeLayoutPreferences(preferences.layout)
+      }
+    }
+    if (preferences.memory) {
+      currentPrefs.memory = {
+        ...currentPrefs.memory,
+        ...sanitizeMemorySettings(preferences.memory)
       }
     }
 
@@ -737,6 +951,39 @@ export function getSpacePreferences(spaceId: string): SpacePreferences | null {
 }
 
 // ============================================================================
+// Space Memory
+// ============================================================================
+
+/** The recognised layout preferences of an untrusted object (an IPC or HTTP body). */
+function sanitizeLayoutPreferences(input: unknown): SpaceLayoutPreferences {
+  const out: SpaceLayoutPreferences = {}
+  if (!input || typeof input !== 'object') return out
+  const raw = input as Record<string, unknown>
+  if (typeof raw.artifactRailExpanded === 'boolean') out.artifactRailExpanded = raw.artifactRailExpanded
+  if (typeof raw.chatWidth === 'number' && Number.isFinite(raw.chatWidth)) out.chatWidth = raw.chatWidth
+  return out
+}
+
+/** A space's memory settings, defaults filled in (memory and auto-consolidation on). */
+export function getSpaceMemorySettings(spaceId: string): ResolvedMemorySettings {
+  return resolveMemorySettings(getSpacePreferences(spaceId)?.memory)
+}
+
+export function isSpaceMemoryEnabled(spaceId: string): boolean {
+  return getSpaceMemorySettings(spaceId).enabled
+}
+
+/**
+ * Where a space's memory lives: in the space's data directory, never the
+ * working directory, so it stays out of the user's project files.
+ */
+export function getSpaceMemoryLayout(spaceId: string): MemoryLayout | null {
+  const space = getSpace(spaceId)
+  if (!space || space.isMissing) return null
+  return resolveMemoryLayout({ type: 'user', spaceId, spacePath: space.path }, 'space')
+}
+
+// ============================================================================
 // Space Activity Tracking
 // ============================================================================
 
@@ -760,6 +1007,17 @@ const activityDirty = new Set<string>()  // Spaces with in-memory updates not ye
  * call within the throttle window triggers a disk write; a trailing timer
  * guarantees the final value is persisted.
  */
+function persistActivity(spaceId: string): boolean {
+  try {
+    persistIndex(getRegistry())
+    activityDirty.delete(spaceId)
+    return true
+  } catch {
+    activityDirty.add(spaceId)
+    return false
+  }
+}
+
 export function touchSpaceActivity(spaceId: string): void {
   const entry = getRegistry().get(spaceId)
   if (!entry || entry.isTemp) return
@@ -775,15 +1033,13 @@ export function touchSpaceActivity(spaceId: string): void {
   }
 
   // First touch in this window: persist immediately and start trailing timer.
-  persistIndex(getRegistry())
-  console.log(`[Space] Activity recorded for ${spaceId}`)
+  // A failed write leaves the space dirty, so the trailing timer tries again.
+  if (persistActivity(spaceId)) console.log(`[Space] Activity recorded for ${spaceId}`)
 
   // Set trailing timer: when it fires, persist if any new touches arrived.
   const timer = setTimeout(() => {
     activityTimers.delete(spaceId)
-    if (activityDirty.has(spaceId)) {
-      activityDirty.delete(spaceId)
-      persistIndex(getRegistry())
+    if (activityDirty.has(spaceId) && persistActivity(spaceId)) {
       console.log(`[Space] Activity flushed (trailing) for ${spaceId}`)
     }
   }, ACTIVITY_THROTTLE_MS)
@@ -809,8 +1065,10 @@ export function flushSpaceActivity(): void {
   // If any spaces have dirty (un-persisted) activity, write once
   if (activityDirty.size > 0) {
     activityDirty.clear()
-    persistIndex(getRegistry())
-    console.log('[Space] Activity flushed on shutdown')
+    try {
+      persistIndex(getRegistry())
+      console.log('[Space] Activity flushed on shutdown')
+    } catch { /* logged in persistIndex; only timestamps are lost */ }
   }
 }
 

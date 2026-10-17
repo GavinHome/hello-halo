@@ -19,6 +19,10 @@
     "group": "settings"
   },
   {
+    "method": "GET",
+    "path": "/api/config/read-failure"
+  },
+  {
     "method": "POST",
     "path": "/api/config/validate"
   },
@@ -54,6 +58,10 @@
     "method": "DELETE",
     "path": "/api/ai-sources/sources/:sourceId",
     "group": "settings"
+  },
+  {
+    "method": "POST",
+    "path": "/api/ai-sources/refresh-stale-catalogs"
   },
   {
     "method": "POST",
@@ -106,9 +114,38 @@
     "group": "workspace"
   },
   {
+    "method": "PUT",
+    "path": "/api/spaces/:spaceId/working-dir",
+    "group": "workspace"
+  },
+  {
+    "method": "GET",
+    "path": "/api/spaces/:spaceId/preferences",
+    "group": "workspace"
+  },
+  {
+    "method": "PUT",
+    "path": "/api/spaces/:spaceId/preferences",
+    "group": "workspace"
+  },
+  {
+    "method": "GET",
+    "path": "/api/spaces/:spaceId/memory",
+    "group": "workspace"
+  },
+  {
+    "method": "POST",
+    "path": "/api/spaces/:spaceId/memory/consolidate",
+    "group": "workspace"
+  },
+  {
     "method": "DELETE",
     "path": "/api/spaces/:spaceId",
     "group": "workspace"
+  },
+  {
+    "method": "POST",
+    "path": "/api/spaces/:spaceId/forget"
   },
   {
     "method": "POST",
@@ -162,6 +199,10 @@
     "method": "POST",
     "path": "/api/agent/message",
     "group": "conversation"
+  },
+  {
+    "method": "POST",
+    "path": "/api/agent/inject-message"
   },
   {
     "method": "POST",
@@ -228,6 +269,14 @@
     "path": "/api/agent/toolsets/close"
   },
   {
+    "method": "POST",
+    "path": "/api/agent/goal/get"
+  },
+  {
+    "method": "POST",
+    "path": "/api/agent/goal/set"
+  },
+  {
     "method": "GET",
     "path": "/api/terminal/list",
     "group": "terminal"
@@ -264,6 +313,15 @@
   },
   {
     "method": "GET",
+    "path": "/api/spaces/:spaceId/artifacts/query",
+    "group": "workspace"
+  },
+  {
+    "method": "POST",
+    "path": "/api/spaces/:spaceId/artifacts/resolve"
+  },
+  {
+    "method": "GET",
     "path": "/api/spaces/:spaceId/artifacts/tree",
     "group": "workspace"
   },
@@ -275,6 +333,14 @@
   {
     "method": "GET",
     "path": "/api/artifacts/download"
+  },
+  {
+    "method": "POST",
+    "path": "/api/artifacts/download-ticket"
+  },
+  {
+    "method": "GET",
+    "path": "/api/artifacts/file/:ticket"
   },
   {
     "method": "GET",
@@ -302,8 +368,20 @@
   },
   {
     "method": "POST",
+    "path": "/api/spaces/:spaceId/artifacts/upload"
+  },
+  {
+    "method": "POST",
     "path": "/api/spaces/:spaceId/artifacts/folder",
     "group": "workspace"
+  },
+  {
+    "method": "POST",
+    "path": "/api/spaces/:spaceId/artifacts/retain"
+  },
+  {
+    "method": "POST",
+    "path": "/api/spaces/:spaceId/artifacts/release"
   },
   {
     "method": "POST",
@@ -367,6 +445,27 @@
     "path": "/api/wecom-bot/scan-auth/create-assistant"
   },
   {
+    "method": "POST",
+    "path": "/api/feishu-bot/scan-auth/start"
+  },
+  {
+    "method": "POST",
+    "path": "/api/feishu-bot/scan-auth/poll"
+  },
+  {
+    "method": "POST",
+    "path": "/api/feishu-bot/scan-auth/cancel"
+  },
+  {
+    "method": "POST",
+    "path": "/api/feishu-bot/scan-auth/create-assistant"
+  },
+  {
+    "method": "POST",
+    "path": "/api/feishu-bot/reachability",
+    "group": "channels"
+  },
+  {
     "method": "GET",
     "path": "/api/im-channels/status",
     "group": "channels"
@@ -385,6 +484,18 @@
     "method": "GET",
     "path": "/api/im-channels/providers",
     "group": "channels"
+  },
+  {
+    "method": "POST",
+    "path": "/api/im-channels/set-instance-app"
+  },
+  {
+    "method": "POST",
+    "path": "/api/im-channels/create-instance"
+  },
+  {
+    "method": "POST",
+    "path": "/api/im-channels/unbind-instance"
   },
   {
     "method": "GET",
@@ -431,8 +542,42 @@
   },
   {
     "method": "GET",
+    "path": "/api/im-sessions/linked",
+    "group": "channels"
+  },
+  {
+    "method": "POST",
+    "path": "/api/im-sessions/set-push-link",
+    "group": "channels"
+  },
+  {
+    "method": "GET",
     "path": "/api/auth/providers",
     "group": "settings"
+  },
+  {
+    "method": "POST",
+    "path": "/api/auth/start-login"
+  },
+  {
+    "method": "POST",
+    "path": "/api/auth/complete-login"
+  },
+  {
+    "method": "POST",
+    "path": "/api/auth/cancel-login"
+  },
+  {
+    "method": "POST",
+    "path": "/api/auth/refresh-token"
+  },
+  {
+    "method": "GET",
+    "path": "/api/auth/check-token"
+  },
+  {
+    "method": "POST",
+    "path": "/api/auth/logout"
   },
   {
     "method": "GET",
@@ -442,6 +587,70 @@
   {
     "method": "POST",
     "path": "/api/analytics/report"
+  },
+  {
+    "method": "GET",
+    "path": "/api/apps/states"
+  },
+  {
+    "method": "GET",
+    "path": "/api/apps/studio-summary"
+  },
+  {
+    "method": "GET",
+    "path": "/api/apps/people"
+  },
+  {
+    "method": "GET",
+    "path": "/api/apps/pending-inbox"
+  },
+  {
+    "method": "GET",
+    "path": "/api/apps/capability-inventory"
+  },
+  {
+    "method": "GET",
+    "path": "/api/apps/:appId/pending-entries"
+  },
+  {
+    "method": "GET",
+    "path": "/api/apps/:appId/activity/:entryId"
+  },
+  {
+    "method": "POST",
+    "path": "/api/apps/:appId/activity/:entryId/adopt-author-version"
+  },
+  {
+    "method": "GET",
+    "path": "/api/apps/:appId/author-spec"
+  },
+  {
+    "method": "POST",
+    "path": "/api/apps/:appId/space-preview"
+  },
+  {
+    "method": "POST",
+    "path": "/api/apps/:appId/escalation/:entryId/retry"
+  },
+  {
+    "method": "POST",
+    "path": "/api/apps/:appId/escalation/:entryId/deadline"
+  },
+  {
+    "method": "POST",
+    "path": "/api/apps/:appId/escalation/:entryId/dismiss"
+  },
+  {
+    "method": "POST",
+    "path": "/api/apps/:appId/runs/:runId/close"
+  },
+  {
+    "method": "POST",
+    "path": "/api/apps/:appId/runs/start"
+  },
+  {
+    "method": "POST",
+    "path": "/api/apps/:appId/runs/:runId/stop"
   },
   {
     "method": "GET",
@@ -455,6 +664,10 @@
   },
   {
     "method": "GET",
+    "path": "/api/apps/overview"
+  },
+  {
+    "method": "GET",
     "path": "/api/apps/:appId",
     "group": "digital-human"
   },
@@ -462,6 +675,14 @@
     "method": "GET",
     "path": "/api/apps/:appId/available-skills",
     "group": "digital-human"
+  },
+  {
+    "method": "GET",
+    "path": "/api/spaces/:spaceId/available-skills"
+  },
+  {
+    "method": "GET",
+    "path": "/api/spaces/:spaceId/effective-mcp-apps"
   },
   {
     "method": "GET",
@@ -489,6 +710,26 @@
     "group": "digital-human"
   },
   {
+    "method": "GET",
+    "path": "/api/apps/:appId/memory",
+    "group": "digital-human"
+  },
+  {
+    "method": "POST",
+    "path": "/api/apps/:appId/memory/consolidate",
+    "group": "digital-human"
+  },
+  {
+    "method": "GET",
+    "path": "/api/apps/:appId/reminders",
+    "group": "digital-human"
+  },
+  {
+    "method": "DELETE",
+    "path": "/api/apps/:appId/reminders/:reminderId",
+    "group": "digital-human"
+  },
+  {
     "method": "DELETE",
     "path": "/api/apps/:appId/permanent",
     "group": "digital-human"
@@ -512,6 +753,14 @@
     "method": "GET",
     "path": "/api/apps/:appId/activity",
     "group": "digital-human"
+  },
+  {
+    "method": "GET",
+    "path": "/api/apps/:appId/runs"
+  },
+  {
+    "method": "GET",
+    "path": "/api/apps/:appId/run-stats"
   },
   {
     "method": "POST",
@@ -589,6 +838,10 @@
   },
   {
     "method": "POST",
+    "path": "/api/apps/:appId/chat/inject"
+  },
+  {
+    "method": "POST",
     "path": "/api/apps/:appId/chat/stop",
     "group": "digital-human"
   },
@@ -601,6 +854,14 @@
     "method": "GET",
     "path": "/api/apps/:appId/chat/messages",
     "group": "digital-human"
+  },
+  {
+    "method": "GET",
+    "path": "/api/apps/:appId/chat/transcript"
+  },
+  {
+    "method": "GET",
+    "path": "/api/apps/:appId/chat/messages/:messageId/thoughts"
   },
   {
     "method": "GET",
@@ -619,6 +880,16 @@
   {
     "method": "POST",
     "path": "/api/apps/:appId/chat/restart",
+    "group": "digital-human"
+  },
+  {
+    "method": "GET",
+    "path": "/api/apps/:appId/chats/clearable",
+    "group": "digital-human"
+  },
+  {
+    "method": "POST",
+    "path": "/api/apps/:appId/chats/clear-all",
     "group": "digital-human"
   },
   {
@@ -645,6 +916,178 @@
     "method": "POST",
     "path": "/api/apps/:appId/sessions/delete",
     "group": "digital-human"
+  },
+  {
+    "method": "GET",
+    "path": "/api/teams",
+    "group": "team"
+  },
+  {
+    "method": "POST",
+    "path": "/api/teams",
+    "group": "team"
+  },
+  {
+    "method": "POST",
+    "path": "/api/teams/propose-members",
+    "group": "team"
+  },
+  {
+    "method": "GET",
+    "path": "/api/teams/collab-for-conversation/:conversationId",
+    "group": "team"
+  },
+  {
+    "method": "POST",
+    "path": "/api/teams/:teamId/save-collab",
+    "group": "team"
+  },
+  {
+    "method": "GET",
+    "path": "/api/teams/:teamId",
+    "group": "team"
+  },
+  {
+    "method": "GET",
+    "path": "/api/teams/:teamId/detail",
+    "group": "team"
+  },
+  {
+    "method": "GET",
+    "path": "/api/teams/:teamId/chat-messages",
+    "group": "team"
+  },
+  {
+    "method": "POST",
+    "path": "/api/teams/:teamId/members/:appId/send",
+    "group": "team"
+  },
+  {
+    "method": "POST",
+    "path": "/api/teams/:teamId/members/:appId/stop",
+    "group": "team"
+  },
+  {
+    "method": "GET",
+    "path": "/api/teams/:teamId/artifacts",
+    "group": "team"
+  },
+  {
+    "method": "GET",
+    "path": "/api/teams/:teamId/conversations",
+    "group": "team"
+  },
+  {
+    "method": "POST",
+    "path": "/api/teams/:teamId/conversations",
+    "group": "team"
+  },
+  {
+    "method": "PATCH",
+    "path": "/api/teams/:teamId/conversations/:epochId",
+    "group": "team"
+  },
+  {
+    "method": "DELETE",
+    "path": "/api/teams/:teamId/conversations/:epochId",
+    "group": "team"
+  },
+  {
+    "method": "GET",
+    "path": "/api/teams/:teamId/epochs",
+    "group": "team"
+  },
+  {
+    "method": "GET",
+    "path": "/api/teams/:teamId/epochs/:epochId/board",
+    "group": "team"
+  },
+  {
+    "method": "GET",
+    "path": "/api/teams/:teamId/epochs/:epochId/artifacts",
+    "group": "team"
+  },
+  {
+    "method": "PATCH",
+    "path": "/api/teams/:teamId",
+    "group": "team"
+  },
+  {
+    "method": "DELETE",
+    "path": "/api/teams/:teamId",
+    "group": "team"
+  },
+  {
+    "method": "POST",
+    "path": "/api/teams/:teamId/members",
+    "group": "team"
+  },
+  {
+    "method": "PATCH",
+    "path": "/api/teams/:teamId/members/:appId",
+    "group": "team"
+  },
+  {
+    "method": "DELETE",
+    "path": "/api/teams/:teamId/checks/:checkId",
+    "group": "team"
+  },
+  {
+    "method": "DELETE",
+    "path": "/api/teams/:teamId/members/:appId",
+    "group": "team"
+  },
+  {
+    "method": "PUT",
+    "path": "/api/teams/:teamId/edges",
+    "group": "team"
+  },
+  {
+    "method": "POST",
+    "path": "/api/teams/:teamId/run",
+    "group": "team"
+  },
+  {
+    "method": "POST",
+    "path": "/api/teams/:teamId/pause",
+    "group": "team"
+  },
+  {
+    "method": "GET",
+    "path": "/api/teams/:teamId/triggers",
+    "group": "team"
+  },
+  {
+    "method": "POST",
+    "path": "/api/teams/:teamId/triggers",
+    "group": "team"
+  },
+  {
+    "method": "POST",
+    "path": "/api/teams/:teamId/invite"
+  },
+  {
+    "method": "DELETE",
+    "path": "/api/teams/:teamId/invite/:jti"
+  },
+  {
+    "method": "POST",
+    "path": "/api/teams/:teamId/join"
+  },
+  {
+    "method": "POST",
+    "path": "/api/teams/:teamId/leave",
+    "group": "team"
+  },
+  {
+    "method": "GET",
+    "path": "/api/teams/:teamId/federation/presence",
+    "group": "team"
+  },
+  {
+    "method": "DELETE",
+    "path": "/api/teams/:teamId/triggers/:triggerId",
+    "group": "team"
   },
   {
     "method": "POST",
@@ -757,6 +1200,10 @@
     "group": "store"
   },
   {
+    "method": "GET",
+    "path": "/api/store/updates/:appId/preview"
+  },
+  {
     "method": "POST",
     "path": "/api/store/publish/preview",
     "group": "store"
@@ -842,6 +1289,11 @@
   },
   {
     "method": "POST",
+    "path": "/api/tlon/:kbId/linked-dirs/:linkId/retry",
+    "group": "knowledge-base"
+  },
+  {
+    "method": "POST",
     "path": "/api/tlon/:kbId/files",
     "group": "knowledge-base"
   },
@@ -879,5 +1331,89 @@
     "method": "GET",
     "path": "/api/tlon/:kbId/ingest-status",
     "group": "knowledge-base"
+  },
+  {
+    "method": "GET",
+    "path": "/api/task-state"
+  },
+  {
+    "method": "POST",
+    "path": "/api/task-state/mark-unseen"
+  },
+  {
+    "method": "POST",
+    "path": "/api/task-state/mark-read"
+  },
+  {
+    "method": "POST",
+    "path": "/api/task-state/set-kept"
+  },
+  {
+    "method": "POST",
+    "path": "/api/task-state/remove"
+  },
+  {
+    "method": "POST",
+    "path": "/api/git/repositories"
+  },
+  {
+    "method": "POST",
+    "path": "/api/git/status"
+  },
+  {
+    "method": "POST",
+    "path": "/api/git/changes"
+  },
+  {
+    "method": "POST",
+    "path": "/api/git/file-contents"
+  },
+  {
+    "method": "POST",
+    "path": "/api/git/revision-options"
+  },
+  {
+    "method": "POST",
+    "path": "/api/git/commit-graph"
+  },
+  {
+    "method": "POST",
+    "path": "/api/git/stage"
+  },
+  {
+    "method": "POST",
+    "path": "/api/git/unstage"
+  },
+  {
+    "method": "POST",
+    "path": "/api/git/discard"
+  },
+  {
+    "method": "POST",
+    "path": "/api/git/commit"
+  },
+  {
+    "method": "POST",
+    "path": "/api/git/sync"
+  },
+  {
+    "method": "POST",
+    "path": "/api/git/snapshot"
+  },
+  {
+    "method": "POST",
+    "path": "/api/git/count-changed-since"
+  },
+  {
+    "method": "POST",
+    "path": "/api/code-review/start"
+  },
+  {
+    "method": "GET",
+    "path": "/api/code-review/latest"
+  },
+  {
+    "method": "GET",
+    "path": "/api/code-review/availability"
   }
 ]

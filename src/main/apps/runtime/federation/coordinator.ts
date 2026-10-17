@@ -1,0 +1,1430 @@
+/**
+ * apps/runtime/federation -- Federation Coordinator
+ *
+ * All join + presence logic. Transport-agnostic: drives a FederationLink (dumb
+ * pipe) and persists through FederationStore (office_nodes) + TeamStore (remote
+ * team_members). Owns no transport, no HTTP, and no team-coordination kernel
+ * state.
+ */
+
+import type { FederationStore, OfficeCredentialLike } from './deps'
+import type { TeamStore } from '../../team'
+import type { FederationLink } from './link'
+import {
+  nodeToPresence,
+  type FederationMessage,
+  type JoinReject,
+  type JoinRequest,
+  type NodeId,
+  type NodePresence,
+  type OfficeContext,
+  type PresenceSnapshot,
+  type RosterSnapshot,
+  type MemberRuntimeSnap,
+  type MemberStatusFrame,
+  type RosterFrame,
+  type SerializedWakeRequest,
+  type StreamFramesFrame,
+  type WakeFrame,
+} from './types'
+import {
+  FEDERATION_PROTOCOL_VERSION,
+  isM2Frame,
+  isSameProtocol,
+  type M2Frame,
+} from './protocol-m2'
+import { isFeedSyncFrame, type FeedSyncFrame } from './log/types'
+import { SELF_NODE_ID, type TeamMemberRuntimeStatus, type TeamStatus, type RosterBusyEntry } from '../../../../shared/apps/team-types'
+import {
+  PRESENCE_CONFIRMED_OFFLINE_MS,
+  PRESENCE_HEARTBEAT_INTERVAL_MS,
+  PRESENCE_SUSPECT_AFTER_MS,
+} from './presence-constants'
+import type { TurnCompletion } from '../team/message-bus'
+import { validateWakeAdmission } from './wake-admission'
+
+const LOG_TAG = '[Federation]'
+
+/** A node's bound member for confirmed-offline fan-out (resolved via owner_node_id). */
+export interface NodeBoundMember {
+  appId: string
+  memberIdentity: string | null
+}
+
+export interface FederationCoordinatorDeps {
+  context: OfficeContext
+  link: FederationLink
+  federationStore: FederationStore
+  teamStore: TeamStore
+  /** Injected so the coordinator never imports http/auth (dependency direction). */
+  verifyCredential: (token: string) => OfficeCredentialLike | null
+  now?: () => number
+  /**
+   * Monotonic clock for presence silence measurement. Unlike now()
+   * — which stamps persisted wall-clock timestamps (joinedAt/lastSeen/since) and
+   * must stay wall-clock for display + restart ordering — this drives the
+   * suspect/confirmed FSM, so it MUST NOT advance across a host suspend
+   * (CLOCK_MONOTONIC, not BOOTTIME). Production injects performance.now();
+   * deterministic tests that inject only now() inherit it as the silence clock,
+   * preserving their fake-clock semantics. A laptop sleep then does not register
+   * as transport silence, preventing a wake-up storm of false confirmed-offline.
+   */
+  monotonicNow?: () => number
+  /**
+   * Override the suspect/confirmed thresholds (and derived heartbeat interval)
+   * for deterministic tests with a fake clock + small values. Defaults to the
+   * LAN constants.
+   */
+  presence?: {
+    suspectAfterMs?: number
+    confirmedOfflineMs?: number
+    heartbeatIntervalMs?: number
+  }
+  onPresenceChange?: (snap: PresenceSnapshot) => void
+  /**
+   * Fired EXACTLY ONCE per bound member when its owner node is confirmed-offline
+   * (bootstrap wires this to bus.resolvePendingWaitsForMember so a waiting
+   * lead unblocks immediately instead of hanging on the 2h sync timeout). suspect
+   * never fires this. The coordinator stays free of the bus by injection.
+   */
+  onMemberConfirmedOffline?: (appId: string) => void
+  /**
+   * Resolve a node's bound members for confirmed-offline fan-out, using the
+   * persistent team_members.owner_node_id binding. Defaults to an empty
+   * array (an office that tracks no member ownership). Bootstrap/manager pass a
+   * teamStore-backed resolver.
+   */
+  listMembersForNode?: (nodeId: NodeId) => NodeBoundMember[]
+  /**
+   * Surfaced join-grant/reject for the client side (no crash on reject). A grant
+   * from an authority on another protocol version is refused here and surfaced
+   * as a VERSION_INCOMPATIBLE reject instead.
+   */
+  onJoinGrant?: (assignedNodeId: NodeId) => void
+  /**
+   * `peerPv` is the other side's own FEDERATION_PROTOCOL_VERSION as it reported
+   * it — the reject frame's `pv`, or the refused grant's `pv` — and undefined
+   * when the other side is too old to report it on a reject.
+   */
+  onJoinReject?: (reason: JoinReject['reason'], peerPv?: number) => void
+  /**
+   * Host-side notification of a brought member's spaceId, when the joiner
+   * supplied one. The spaceId is not persisted on the member row (no schema
+   * for it here); the manager caches it for later wake addressing. Skipped when
+   * a member carries no spaceId.
+   */
+  onRemoteMemberSpaceId?: (appId: string, spaceId: string) => void
+  /**
+   * Owner role: run a brought member's turn locally when a wake arrives. Set only
+   * on the node that owns the member; a non-owner that receives a wake logs+drops.
+   *
+   * `undelivered` says no turn ran anywhere — the host forwarded this wake to a
+   * third node and it never arrived. It must stay distinguishable from a turn
+   * that ran and produced nothing, or the original sender is told it was answered.
+   */
+  onWake?: (request: SerializedWakeRequest) => Promise<{ finalMessage: string | null; undelivered?: { reason: string } }>
+  /** Current authority, including after an election; queried again while metadata catches up. */
+  getWakeAuthority?: () => NodeId | null
+  getRosterAuthority?: () => NodeId | null
+  canDispatchWake?: (fromNode: NodeId, request: SerializedWakeRequest) => boolean
+  wakeAdmissionTimeoutMs?: number
+  /**
+   * Authority role: a remote turn finished. Set only on the authority node so the
+   * pending wait keyed by correlationId resolves; elsewhere logs+drops.
+   */
+  onTurnComplete?: (correlationId: string, outcome: TurnCompletion, fromNode?: NodeId) => void
+  /**
+   * Host role: a joiner is leaving and asks to drop the members it brought.
+   * Set only on the host coordinator; the manager re-checks ownership against
+   * `from` before removing, then re-broadcasts the converged roster.
+   */
+  onMemberLeave?: (from: NodeId, appIds: string[]) => void
+  /**
+   * Activity relay: a batch of stream-frames arrived over this office's link.
+   * The manager replays + re-broadcasts as appropriate. Absent → the frame
+   * is dropped (an office that does not relay activity).
+   */
+  onStreamFrames?: (batch: StreamFramesFrame) => void
+  /**
+   * Host role: the office roster changed (a node joined / membership shifted).
+   * Bootstrap wires this to emit a `team:updated` UI event so the authority's
+   * renderer re-fetches the roster + relationship graph. Set on the host
+   * coordinator (and, on the joiner, after a roster is materialized).
+   */
+  onRosterChanged?: (officeId: string) => void
+  /**
+   * Joiner role: a roster snapshot arrived from the host. The manager provides a
+   * function that materializes the office into the LOCAL team store (shadow
+   * office). Set only on the joiner coordinator; absent on the host (a host
+   * never receives roster frames).
+   */
+  onRoster?: (snapshot: RosterSnapshot, version: number | undefined) => void
+  /**
+   * Joiner role: a run-state change arrived (`member-status`). The manager checks its version against `baseVersion`.
+   */
+  onMemberStatus?: (frame: MemberStatusFrame) => void
+  /**
+   * M2 dispatch seam: every authority/replication/artifact frame (the M2 family,
+   * outside the M1 join+presence+relay set) is delegated here verbatim. The
+   * manager wires this to the per-office authority module so the coordinator
+   * stays focused on M1 join+presence and never imports the authority logic.
+   * Absent → an M2 frame is dropped with a debug log (an office that does not run
+   * the M2 layer, e.g. an M1-only build).
+   */
+  onM2Frame?: (from: NodeId, frame: M2Frame) => void
+  /**
+   * Unified feed-log sync frames (`feed-subscribe`/`feed-unsubscribe`/
+   * `feed-entries`/`feed-ack`/`feed-nack`, and the discovery frames): routed
+   * verbatim to the manager's feed transports.
+   * The coordinator carries the correct `from` (the delivering peer), which the
+   * feed producer/consumer need to track cursors — so routing here, not at the
+   * manager's many inbound entrypoints, keeps the source attribution in one place.
+   * Absent → a feed-sync frame is dropped.
+   */
+  onFeedFrame?: (from: NodeId, frame: FeedSyncFrame) => void
+  /**
+   * M2 join enrichment: the authority's current tenure (term) at admission,
+   * folded into the join-grant so a joiner aligns its term baseline.
+   * Absent → grant carries no term (M1 behaviour).
+   */
+  getJoinGrantExtras?: () => { term?: number }
+  /**
+   * Run-context seam: the office's currently-open run epoch id (or null when no
+   * run is open). Stamped into the roster snapshot so a joiner can derive the live
+   * session key and render an in-progress run's history on join. Read-only
+   * pass-through from the kernel run-epoch; the coordinator never owns epoch state.
+   */
+  getCurrentRunEpoch?: () => string | null
+  /**
+   * Run-context seam: a member's live runtime status on the authority
+   * (idle/working/waiting_user/error), stamped per-member into the roster snapshot
+   * so a joiner animates the working pulse + run banner in step with the host.
+   * Read-only pass-through from the kernel's getMemberStatus; the coordinator owns
+   * no member-status state. Absent → 'idle' for every member (M1 behaviour).
+   */
+  getMemberRuntimeStatus?: (appId: string) => TeamMemberRuntimeStatus
+  /**
+   * The office's status as a viewer observes it, which is NOT the stored run
+   * status: that one only tracks the office's own orchestrated run, so a member
+   * working outside one (its own schedule, a 1:1 chat, an IM turn) leaves it
+   * reading idle. Sending the stored value made the host show "working" while
+   * every joiner showed "ready" — and a joiner's list refresh would undo even a
+   * correct local guess. Absent → the stored status (M1 behaviour).
+   */
+  getObservableOfficeStatus?: (officeId: string) => TeamStatus
+  /**
+   * Everything a member is serving right now (run + conversations), each with an
+   * authority-generated human label, stamped into the roster snapshot so a joiner
+   * can say "busy with another conversation" truthfully (P0-2). Read-only
+   * pass-through from the kernel; absent → derived from status alone.
+   */
+  getMemberBusy?: (appId: string) => RosterBusyEntry[]
+  /**
+   * M2 authority-presence seam: invoked from the presence FSM when a peer node's
+   * reachability transitions. Unlike onMemberConfirmedOffline (member-keyed, for
+   * that unblock), this is NODE-keyed and lets the handover layer notice the
+   * AUTHORITY node going suspect/confirmed so it can drive an election. Fired on
+   * every transition (online/suspect/offline). Absent → no election driver.
+   */
+  onNodePresence?: (nodeId: NodeId, status: 'online' | 'suspect' | 'offline') => void
+  /**
+   * Presence-tracking predicate: whether THIS node runs the silence FSM over a
+   * ledger row. "I know this node's address" (an office_nodes row exists) and
+   * "I have a direct transport to it" (its silence is measurable here) are two
+   * separate facts: a joiner persists peer rows for the election roster + the
+   * address book, but only its direct upstream (the believed authority)
+   * exchanges frames with it — sweeping a no-transport row would false-confirm
+   * a healthy peer offline. Untracked rows take their status from the
+   * authority's presence-update projection instead. Default: every row is
+   * tracked (host behaviour, and full-mesh test links).
+   */
+  isPresenceTracked?: (nodeId: NodeId) => boolean
+  /**
+   * Host/authority role: a node was newly admitted into the office ledger by a
+   * join-request (first admission or a rejoin that refreshed its contact card).
+   * The manager wires this to the authority's roster replication so membership
+   * changes ride the committed blackboard log — the quorum denominator every
+   * node then derives from its ledger is the COMMITTED roster, not a local view.
+   */
+  onNodeAdmitted?: (node: {
+    nodeId: NodeId
+    identity: string
+    displayName: string | null
+    joinedAt: number
+    advertisedUrl: string | null
+  }) => void
+}
+
+export interface FederationCoordinator {
+  start(): void
+  stop(): void
+  pendingWakeAdmissions(): number
+  /** Client-side helper: send a join-request to the host via the link. */
+  requestJoin(req: JoinRequest): void
+  /** Broadcast one heartbeat for this node. Exposed for deterministic tests. */
+  sendHeartbeat(): void
+  /**
+   * Advance the per-node debounce FSM against the current clock: online → suspect
+   * → confirmed-offline as silence crosses each threshold. Exposed for
+   * deterministic tests; `tick` is an alias.
+   */
+  sweepPresence(): void
+  tick(): void
+  /**
+   * OS-resume grace: re-baseline every non-confirmed node's silence and emit a
+   * heartbeat, so a machine waking from sleep does not mass-confirm healthy
+   * peers offline. Driven by the power event, independent of the clock-delta
+   * guard in sweepPresence (which is platform-dependent).
+   */
+  notifyResume(): void
+  getPresence(): PresenceSnapshot
+  /**
+   * Host role: re-project the full roster to every joiner + refresh local UI.
+   * Exposed so the manager's egress can re-broadcast on EVERY membership mutation
+   * (kick / edge change / dissolve), not only on join. No-op effect on a
+   * joiner coordinator (it has no joiners to project to).
+   */
+  broadcastRoster(): void
+  /**
+   * Host role: project only what changed since the last projection — nothing
+   * when nothing did; run-state alone as `member-status`.
+   * The throttled refresh during a run uses this.
+   */
+  refreshRoster(): void
+  /**
+   * Host role: whether `nodeId`'s latest join-request was refused and it has
+   * not been admitted since. Such a node is not a member of the live office:
+   * its frames other than a fresh join-request are not to be acted on.
+   */
+  isAdmissionRefused(nodeId: NodeId): boolean
+}
+
+export function createFederationCoordinator(
+  deps: FederationCoordinatorDeps
+): FederationCoordinator {
+  const {
+    context,
+    link,
+    federationStore,
+    teamStore,
+    verifyCredential,
+    onPresenceChange,
+    onMemberConfirmedOffline,
+    onJoinGrant,
+    onJoinReject,
+    onRemoteMemberSpaceId,
+    onWake,
+    onTurnComplete,
+    onMemberLeave,
+    onStreamFrames,
+    onRosterChanged,
+    onRoster,
+    onMemberStatus,
+    onM2Frame,
+    onFeedFrame,
+    getJoinGrantExtras,
+    getCurrentRunEpoch,
+    getMemberRuntimeStatus,
+    getObservableOfficeStatus,
+    getMemberBusy,
+    onNodePresence,
+    onNodeAdmitted,
+  } = deps
+  const now = deps.now ?? (() => Date.now())
+  // Silence clock: monotonic in production; falls back to now() so tests that
+  // inject only a fake now() keep measuring silence off that same clock.
+  const monotonicNow = deps.monotonicNow ?? now
+  const suspectAfterMs = deps.presence?.suspectAfterMs ?? PRESENCE_SUSPECT_AFTER_MS
+  const confirmedOfflineMs = deps.presence?.confirmedOfflineMs ?? PRESENCE_CONFIRMED_OFFLINE_MS
+  const heartbeatIntervalMs = deps.presence?.heartbeatIntervalMs ?? PRESENCE_HEARTBEAT_INTERVAL_MS
+  const listMembersForNode = deps.listMembersForNode ?? (() => [])
+  const isPresenceTracked = deps.isPresenceTracked ?? (() => true)
+  const { officeId } = context
+
+  let heartbeatTimer: ReturnType<typeof setInterval> | null = null
+  let joinedAuthorityNode: NodeId | null = null
+
+  // Per-node debounce flag: a node confirmed-offline only acts ONCE and only
+  // returns to online via a fresh join. The office_nodes row carries the
+  // reachability projection (online/suspect/offline); this set guards the
+  // single-fire + bare-heartbeat-drop semantics that the row alone can't express.
+  const confirmedNodes = new Set<NodeId>()
+
+  // Per-node monotonic last-seen, the silence numerator for the FSM. Kept here
+  // (not in the persisted office_nodes row) so the wall-clock lastSeen the store
+  // holds for display/ordering is never conflated with the monotonic measurement.
+  // A node with no record yet (e.g. it was upserted online without a heartbeat
+  // having flowed through this coordinator) is seeded lazily by projecting its
+  // persisted wall-silence into monotonic space, so first-sweep timing matches.
+  const monotonicLastSeen = new Map<NodeId, number>()
+  // Last sweep's (wall, monotonic) pair, for host suspend/resume detection.
+  let lastSweep: { wall: number; mono: number } | null = null
+
+  // Host-side rejoin-request rate limit: when a confirmed-offline node keeps
+  // heartbeating on a live socket, the host nudges it to re-handshake — but at
+  // most once per window per node, not on every 2s heartbeat, so a stuck peer is
+  // not spammed. Keyed by nodeId → last monotonic send time.
+  const lastRejoinNudge = new Map<NodeId, number>()
+  const REJOIN_NUDGE_INTERVAL_MS = Math.max(suspectAfterMs, 5000)
+
+  // Joiner-side: the last join-request this node sent, so it can re-send on a
+  // host `rejoin-request` (or any future self-driven rejoin) without the manager
+  // re-supplying it. Set by requestJoin; null on a pure host coordinator.
+  let lastJoinRequest: JoinRequest | null = null
+
+  // Joiner-side latch: every JoinReject reason is non-retryable, so once a
+  // re-driven join is rejected, repeating the identical request on each
+  // heartbeat/nudge is a livelock (reject → heartbeat → re-drive → reject,
+  // forever). Recovery re-drives are suppressed until an explicit requestJoin
+  // (reconnect re-auth, redial to a new authority, or a user re-join — each a
+  // genuinely new context) or a grant clears the latch.
+  let joinRejectedTerminally = false
+
+  // Host-side mirror of the same latch: nodes whose latest join-request this
+  // coordinator rejected. Nudging such a node to re-handshake would only make
+  // it repeat the request that just failed, so the rejoin nudge is suppressed
+  // until a join-request from it is admitted (it presents something new).
+  const rejectedJoinNodes = new Set<NodeId>()
+
+  // What the log last said about each node's refused joins. A node refused over
+  // a relay asks again every second or so (the relay ends the refused session and
+  // the node reconnects), so a refusal is logged in full once and its repeats as
+  // one count per window. Bounded: any identity a relay admits can be refused.
+  const refusalLog = new Map<NodeId, { reason: JoinReject['reason']; loggedAt: number; repeats: number }>()
+  const REFUSAL_LOG_WINDOW_MS = 10 * 60_000
+  const REFUSAL_LOG_MAX_NODES = 1024
+
+  function markSeen(nodeId: NodeId): void {
+    monotonicLastSeen.set(nodeId, monotonicNow())
+  }
+
+  /** Monotonic last-seen for a node, seeding lazily from persisted wall-silence. */
+  function monotonicLastSeenOf(node: { nodeId: NodeId; lastSeen: number }): number {
+    const recorded = monotonicLastSeen.get(node.nodeId)
+    if (recorded !== undefined) return recorded
+    const seeded = monotonicNow() - Math.max(0, now() - node.lastSeen)
+    monotonicLastSeen.set(node.nodeId, seeded)
+    return seeded
+  }
+
+  // ── Presence projection / notification ──
+
+  // Host-authoritative peer presence adopted from inbound `presence-update`
+  // frames. A joiner's own FSM only tracks its direct link (the host); its node
+  // ledger has no rows for the OTHER joiners, so without this overlay every
+  // peer looked permanently online on a joiner's UI while the host already saw
+  // it suspect/offline. In-memory only — never persisted — so it cannot perturb
+  // the node ledger (candidate order, reconciliation). Ledger rows always win.
+  const adoptedPeerPresence = new Map<NodeId, NodePresence>()
+
+  function snapshot(): PresenceSnapshot {
+    const rows = federationStore.listNodesByOffice(officeId).map(nodeToPresence)
+    const known = new Set(rows.map((n) => n.nodeId))
+    const peers = [...adoptedPeerPresence.values()].filter((p) => !known.has(p.nodeId))
+    return {
+      officeId,
+      nodes: [...rows, ...peers],
+    }
+  }
+
+  function notifyPresence(): void {
+    onPresenceChange?.(snapshot())
+  }
+
+  /** Identity ids of every member owned by a node (drives offline fan-out). */
+  function memberIdentitiesForNode(nodeId: NodeId): string[] {
+    const ids = new Set<string>()
+    for (const m of teamStore.listMembersByTeam(officeId)) {
+      if (m.ownerNodeId === nodeId && m.memberIdentity) ids.add(m.memberIdentity)
+    }
+    return [...ids]
+  }
+
+  // ── Host side: handle a join-request ──
+
+  function logRefusal(node: NodeId, reason: JoinReject['reason'], detail?: string): void {
+    const ts = now()
+    const last = refusalLog.get(node)
+    if (last?.reason === reason) {
+      last.repeats += 1
+      if (ts - last.loggedAt < REFUSAL_LOG_WINDOW_MS) return
+      console.warn(
+        `${LOG_TAG} join rejected node=${node} reason=${reason} repeats=${last.repeats} over=${Math.round((ts - last.loggedAt) / 60_000)}m`
+      )
+      last.loggedAt = ts
+      last.repeats = 0
+      return
+    }
+    refusalLog.delete(node)
+    const oldest = refusalLog.size >= REFUSAL_LOG_MAX_NODES ? refusalLog.keys().next().value : undefined
+    if (oldest !== undefined) refusalLog.delete(oldest)
+    refusalLog.set(node, { reason, loggedAt: ts, repeats: 0 })
+    console.warn(`${LOG_TAG} join rejected node=${node} reason=${reason}${detail ? ` ${detail}` : ''} ts=${ts}`)
+  }
+
+  function rejectJoin(to: NodeId, reason: JoinReject['reason'], detail?: string): void {
+    logRefusal(to, reason, detail)
+    rejectedJoinNodes.add(to)
+    link.send(to, {
+      kind: 'join-reject',
+      officeId,
+      reason,
+      // Always this node's own version (mirrors JoinGrant's unconditional pv),
+      // not just on VERSION_INCOMPATIBLE — one shape, no reason-conditional branch.
+      pv: FEDERATION_PROTOCOL_VERSION,
+    })
+  }
+
+  /**
+   * Structured mode only: link the lead to each newly-joined remote member with
+   * the SAME edge shape the recommended topology uses for local members — a
+   * single lead → member sync edge (replies ride the wake/turn-complete
+   * correlation, so no reverse edge is needed; a reverse edge would also form a
+   * cycle that scrambles the topology auto-layout). Merges into the existing
+   * edge set — never drops edges. No-op in free mode (no topology) or when no
+   * lead exists yet.
+   */
+  function ensureLeadEdges(joinedAppIds: string[]): void {
+    const team = teamStore.getTeamById(officeId)
+    if (!team || team.collabMode !== 'structured' || !team.leadAppId) return
+    const leadAppId = team.leadAppId
+
+    const edges = teamStore.listEdgesByTeam(officeId)
+    const seen = new Set(edges.map((e) => `${e.fromAppId}→${e.toAppId}`))
+    let changed = false
+    for (const appId of joinedAppIds) {
+      if (appId === leadAppId) continue
+      if (seen.has(`${leadAppId}→${appId}`)) continue
+      edges.push({ teamId: officeId, fromAppId: leadAppId, toAppId: appId, sync: true })
+      seen.add(`${leadAppId}→${appId}`)
+      changed = true
+    }
+    if (changed) teamStore.replaceEdgesForTeam(officeId, edges)
+  }
+
+  /**
+   * Build the office roster from the local store. Owner node ids are emitted
+   * ABSOLUTE (the crux of SELF-relativity on the wire): a member stored as SELF
+   * here is owned by the HOST → emit the host's own node id; a member with a real
+   * remote node id is emitted as-is. The receiver remaps back to SELF-relative.
+   */
+  function buildRosterSnapshot(): RosterSnapshot {
+    const team = teamStore.getTeamById(officeId)
+    const epochId = getCurrentRunEpoch?.() ?? undefined
+    // The run epoch's in-progress tasks resolve the title shown beneath a working
+    // member, so a joiner's node reads "writing report.md" — not just a pulse.
+    const inProgressByAppId = new Map<string, string>()
+    if (epochId) {
+      for (const task of teamStore.listTasksByEpoch(officeId, epochId)) {
+        if (task.status === 'in_progress' && task.assigneeAppId) {
+          inProgressByAppId.set(task.assigneeAppId, task.title)
+        }
+      }
+    }
+    // One ledger read per snapshot, not one per member.
+    const nodes = federationStore.listNodesByOffice(officeId)
+    const nodesById = new Map(nodes.map((n) => [n.nodeId, n]))
+    const members = teamStore.listMembersByTeam(officeId).map((m) => {
+      const absoluteOwner = m.ownerNodeId === SELF_NODE_ID ? context.selfNodeId : m.ownerNodeId ?? context.selfNodeId
+      const status = getMemberRuntimeStatus?.(m.appId) ?? 'idle'
+      const currentTaskTitle = status === 'working' ? inProgressByAppId.get(m.appId) : undefined
+      const busy = getMemberBusy?.(m.appId) ?? []
+      return {
+        appId: m.appId,
+        memberName: m.memberName,
+        role: m.role,
+        duty: m.duty ?? null,
+        acceptsChecks: m.acceptsChecks !== false,
+        isLead: m.isLead,
+        ownerNodeId: absoluteOwner,
+        memberIdentity: m.memberIdentity ?? null,
+        // Prefer the live node ledger, fall back to the name persisted on the
+        // member row at join (covers rows written before the ledger had a name).
+        ownerDisplayName: nodesById.get(absoluteOwner)?.displayName ?? m.ownerDisplayName ?? null,
+        status,
+        ...(currentTaskTitle ? { currentTaskTitle } : {}),
+        ...(busy.length > 0 ? { busy } : {}),
+      }
+    })
+    return {
+      team: {
+        id: officeId,
+        name: team?.name ?? officeId,
+        goal: team?.goal ?? '',
+        leadAppId: team?.leadAppId ?? null,
+        collabMode: (team?.collabMode as 'structured' | 'free') ?? 'structured',
+        hostNodeId: context.selfNodeId,
+        ...(epochId ? { epochId } : {}),
+        // What a viewer observes, not the stored run status — otherwise a
+        // member working outside a run shows on the host and nowhere else.
+        status: getObservableOfficeStatus?.(officeId) ?? team?.status ?? 'idle',
+      },
+      members,
+      edges: teamStore.listEdgesByTeam(officeId).map((e) => ({
+        fromAppId: e.fromAppId,
+        toAppId: e.toAppId,
+      })),
+      // Address book: every admitted node's contact card, so joiners can dial a
+      // peer (e.g. a newly-elected authority) after the host is gone. Consumed
+      // in memory on the joiner — never materialized into its office_nodes.
+      nodes: nodes.map((n) => ({
+        nodeId: n.nodeId,
+        displayName: n.displayName,
+        advertisedUrl: n.advertisedUrl,
+        joinedAt: n.joinedAt,
+      })),
+    }
+  }
+
+  // ── Roster egress by version ──
+  //
+  // The roster is re-projected on every board write while members work, but
+  // between membership changes only run state moves. Peers then receive just
+  // that (`member-status`, versioned); a membership change, or a peer asking
+  // with `roster-request`, gets the full roster.
+  let rosterVersion = 0
+  let lastStructural: string | null = null
+  let lastRuntime = new Map<string, string>()
+  let lastStatus: string | undefined
+
+  /**
+   * Host: refresh local UI + project the roster change to every joiner. `forceFull`
+   * re-sends the full roster to everyone even when nothing changed. Returns
+   * whether the full roster went out.
+   */
+  function projectRoster(forceFull = false): boolean {
+    const snapshot = buildRosterSnapshot()
+    const runtime = new Map<string, MemberRuntimeSnap>()
+    const structural = JSON.stringify({
+      ...snapshot,
+      team: { ...snapshot.team, status: undefined },
+      members: snapshot.members.map((m) => {
+        runtime.set(m.appId, {
+          appId: m.appId,
+          status: m.status ?? 'idle',
+          ...(m.currentTaskTitle ? { currentTaskTitle: m.currentTaskTitle } : {}),
+          ...(m.busy && m.busy.length > 0 ? { busy: m.busy } : {}),
+        })
+        return { ...m, status: undefined, currentTaskTitle: undefined, busy: undefined }
+      }),
+    })
+    const changed: MemberRuntimeSnap[] = []
+    const runtimeKeys = new Map<string, string>()
+    for (const [appId, snap] of runtime) {
+      const key = JSON.stringify(snap)
+      runtimeKeys.set(appId, key)
+      if (lastRuntime.get(appId) !== key) changed.push(snap)
+    }
+    const statusChanged = snapshot.team.status !== lastStatus
+    // No periodic full resend: a peer that missed a change sees the version
+    // mismatch on the next status (the run-state liveness re-projection keeps
+    // sending them) and asks for the roster itself.
+    const full = forceFull || structural !== lastStructural
+    // Nothing changed: the re-projection is a liveness re-baseline, an empty
+    // status naming the current version (a peer that missed a change sees the
+    // mismatch and asks for the roster).
+    const unchanged = !full && changed.length === 0 && !statusChanged
+    const baseVersion = rosterVersion
+    if (!unchanged) rosterVersion += 1
+    const fullFrame: RosterFrame = { kind: 'roster', officeId, snapshot, version: rosterVersion }
+    if (full) {
+      link.broadcast(fullFrame)
+    } else {
+      const statusFrame: MemberStatusFrame = {
+        kind: 'member-status',
+        officeId,
+        baseVersion: unchanged ? rosterVersion : baseVersion,
+        version: rosterVersion,
+        ...(statusChanged && snapshot.team.status ? { status: snapshot.team.status } : {}),
+        members: changed,
+      }
+      link.broadcast(statusFrame)
+    }
+    if (unchanged) return false
+    lastStructural = structural
+    lastRuntime = runtimeKeys
+    lastStatus = snapshot.team.status
+    onRosterChanged?.(officeId)
+    return full
+  }
+
+  function broadcastRoster(): void {
+    projectRoster(true)
+  }
+
+  function refreshRoster(): void {
+    projectRoster()
+  }
+
+  /** Host: a joiner could not line up a `member-status`; answer with the full roster. */
+  function sendFullRoster(to: NodeId): void {
+    link.send(to, { kind: 'roster', officeId, snapshot: buildRosterSnapshot(), version: rosterVersion })
+  }
+
+  /**
+   * Resolve a unique member name for a NEW brought member. Member names are the
+   * team-wide addressing key (the lead dispatches by name), so two members must
+   * never share one. Preference order: the name as brought → "name·owner" (the
+   * joiner's display name, the same identity the owner badge shows) → a numeric
+   * suffix as the last resort.
+   */
+  function disambiguateMemberName(preferred: string, ownerDisplayName?: string): string {
+    const base = preferred.trim() || 'member'
+    if (!teamStore.getMemberByName(officeId, base)) return base
+    const owner = ownerDisplayName?.trim()
+    const withOwner = owner ? `${base}·${owner}` : base
+    if (withOwner !== base && !teamStore.getMemberByName(officeId, withOwner)) return withOwner
+    for (let i = 2; i < 100; i++) {
+      const candidate = `${withOwner}-${i}`
+      if (!teamStore.getMemberByName(officeId, candidate)) return candidate
+    }
+    return `${base}-${Date.now().toString(36)}`
+  }
+
+  function handleJoinRequest(req: JoinRequest): void {
+    if (req.officeId !== officeId) {
+      rejectJoin(req.fromNode, 'OFFICE_MISMATCH')
+      return
+    }
+    const cred = verifyCredential(req.credentialToken)
+    if (cred && cred.officeId !== officeId) {
+      rejectJoin(req.fromNode, 'OFFICE_MISMATCH')
+      return
+    }
+    if (!cred) {
+      // Roster re-entry: an unverifiable token from an ALREADY-ADMITTED node is
+      // not a forgery but the normal shape of recovery — the invite was signed
+      // by a creator key this authority does not hold (rejoining a survivor-
+      // elected authority) or its ledger record is gone (the issuer restarted
+      // without it). The WS auth layer grants such sessions by device-key proof
+      // + admitted-node check; mirroring that rule here keeps the join-request
+      // level from vetoing a session the transport already trusts (the veto was
+      // a livelock: reject → heartbeat → re-drive → reject). Fail-closed: no
+      // office_nodes row → never a first admission. fromNode is trustworthy
+      // because the manager's inbound routing asserts it against the session's
+      // device-key-proven identity before frames reach this coordinator.
+      if (!federationStore.getNode(officeId, req.fromNode)) {
+        rejectJoin(req.fromNode, 'CREDENTIAL_INVALID')
+        return
+      }
+      console.log(
+        `${LOG_TAG} credential unverifiable for admitted node=${req.fromNode}; admitting via roster re-entry`
+      )
+    }
+    // One protocol: a node on another version is refused (it, or this node,
+    // must update — the joiner's UI says so).
+    if (!isSameProtocol(req.pv)) {
+      rejectJoin(req.fromNode, 'VERSION_INCOMPATIBLE', `peerPv=${req.pv} selfPv=${FEDERATION_PROTOCOL_VERSION}`)
+      return
+    }
+    // Persisted identity for this node's bindings. In production a node's wire id
+    // IS its portable Identity.id (identityId === fromNode), and the host edge has
+    // already asserted fromNode === the device-key-proven session id — so the
+    // control plane cannot be spoofed regardless. identityId is carried through
+    // for the member/presence bindings.
+    const nodeIdentity = req.identityId
+
+    const ts = now()
+
+    // Preserve original join order on rejoin: only the first join stamps joinedAt.
+    const existing = federationStore.getNode(officeId, req.fromNode)
+    const admittedJoinedAt = existing?.joinedAt ?? ts
+    const admittedUrl = req.advertisedUrl ?? existing?.advertisedUrl ?? null
+    federationStore.upsertNode({
+      nodeId: req.fromNode,
+      officeId,
+      identity: nodeIdentity,
+      displayName: req.displayName ?? null,
+      joinedAt: admittedJoinedAt,
+      lastSeen: ts,
+      status: 'online',
+      // Address book: how peers dial this node after a transport loss. A rejoin
+      // without a URL keeps the previously-learned one (store COALESCEs too).
+      advertisedUrl: admittedUrl,
+    })
+    // Route the membership change into the committed roster (replicated
+    // blackboard log) — first admission or a contact-card refresh; a plain
+    // rejoin with an unchanged card is not a membership change.
+    if (!existing || existing.advertisedUrl !== admittedUrl || existing.displayName !== (req.displayName ?? null)) {
+      onNodeAdmitted?.({
+        nodeId: req.fromNode,
+        identity: nodeIdentity,
+        displayName: req.displayName ?? null,
+        joinedAt: admittedJoinedAt,
+        advertisedUrl: admittedUrl,
+      })
+    }
+    // Rejoin is the ONLY exit from confirmed-offline. Clearing the flag here
+    // re-arms the node so a later confirmed transition can fire again. Reset its
+    // monotonic last-seen so the fresh tenure starts with a full grace window.
+    confirmedNodes.delete(req.fromNode)
+    lastRejoinNudge.delete(req.fromNode)
+    rejectedJoinNodes.delete(req.fromNode)
+    refusalLog.delete(req.fromNode)
+    markSeen(req.fromNode)
+
+    // Persist brought members as remote team_members. An appId already present
+    // is a rejoin (keep its existing row/name); a colliding NEW name is admitted
+    // under a disambiguated name (see disambiguateMemberName) — never silently
+    // dropped.
+    const presentAppIds = new Set(teamStore.listMembersByTeam(officeId).map((m) => m.appId))
+    const joinedAppIds: string[] = []
+    for (const m of req.bringMembers) {
+      if (presentAppIds.has(m.appId)) {
+        // Rejoin: the row (and any disambiguated name) is already persisted.
+        if (m.spaceId) onRemoteMemberSpaceId?.(m.appId, m.spaceId)
+        joinedAppIds.push(m.appId)
+        continue
+      }
+      if (!cred) {
+        // Roster re-entry admits the node and its already-present members only;
+        // a NEW member needs a verifiable invite (its scope overlay is signed
+        // into the credential and there is nothing to persist without it).
+        console.warn(
+          `${LOG_TAG} skipping new member on credential-less re-entry team=${officeId} app=${m.appId} node=${req.fromNode}`
+        )
+        continue
+      }
+      const memberName = disambiguateMemberName(m.memberName, req.displayName)
+      if (memberName !== m.memberName) {
+        console.log(
+          `${LOG_TAG} member name taken team=${officeId} app=${m.appId}: "${m.memberName}" → "${memberName}"`
+        )
+      }
+      try {
+        teamStore.addMember({
+          teamId: officeId,
+          appId: m.appId,
+          memberName,
+          role: m.role ?? '',
+          isLead: false,
+          aiProvisioned: false,
+          addedAt: ts,
+          ownerNodeId: req.fromNode,
+          origin: 'remote',
+          memberIdentity: nodeIdentity,
+          // Persisted for the owner badge: joiners keep no office_nodes rows for
+          // their peers, so the name must travel with the member row itself.
+          ownerDisplayName: req.displayName ?? null,
+          // Persist the invite's permission overlay so the authority's scope gate
+          // reads it off the member row; without it a narrowly-invited guest would
+          // resolve to the open default and bypass the scope.
+          scopeJson: JSON.stringify(cred.scope),
+        })
+        if (m.spaceId) onRemoteMemberSpaceId?.(m.appId, m.spaceId)
+        presentAppIds.add(m.appId) // a repeated appId later in this request is a duplicate, not a new member
+        joinedAppIds.push(m.appId)
+      } catch (err) {
+        // A real persistence failure: the member is NOT in the roster, so do not
+        // link it into the topology (a phantom edge would point at nobody).
+        console.error(
+          `${LOG_TAG} failed to persist remote member team=${officeId} app=${m.appId} node=${req.fromNode}`,
+          err instanceof Error ? err.message : err
+        )
+      }
+    }
+
+    // Structured mode: link the lead to each joined member before snapshotting so
+    // the roster carries the new edges.
+    ensureLeadEdges(joinedAppIds)
+
+    console.log(
+      `${LOG_TAG} node joined node=${req.fromNode} identity=${nodeIdentity} pv=${FEDERATION_PROTOCOL_VERSION} ts=${ts}`
+    )
+    const grantExtras = getJoinGrantExtras?.() ?? {}
+    link.send(req.fromNode, {
+      kind: 'join-grant',
+      officeId,
+      assignedNodeId: req.fromNode,
+      pv: FEDERATION_PROTOCOL_VERSION,
+      ...(grantExtras.term !== undefined ? { term: grantExtras.term } : {}),
+    })
+
+    link.broadcast({
+      kind: 'presence-update',
+      officeId,
+      nodeId: req.fromNode,
+      status: 'online',
+      members: [nodeIdentity],
+      since: ts,
+    })
+    notifyPresence()
+    // A node re-joining with nothing changed still needs the roster it anchors on.
+    if (!projectRoster()) sendFullRoster(req.fromNode)
+  }
+
+  // ── Presence: inbound heartbeat ──
+
+  function handleHeartbeat(fromNode: NodeId, ts: number): void {
+    const node = federationStore.getNode(officeId, fromNode)
+    if (!node) return
+    // A refused node (e.g. on another protocol version) keeps its socket and
+    // heartbeats; counting them would keep it "online" and route wakes to it.
+    // Its silence then takes the normal suspect → offline path.
+    if (!lastJoinRequest && rejectedJoinNodes.has(fromNode)) return
+
+    // Once confirmed-offline, a bare heartbeat must NOT silently revive the
+    // node — recovery requires a fresh join handshake (the node may hold stale
+    // state while a reassigned member already runs the turn). Drop it; do not
+    // even refresh lastSeen, so the row stays consistently offline until rejoin.
+    //
+    // BUT the heartbeat arriving proves the node's WS session is still LIVE. The
+    // joiner's reconnect-reauth path (which would re-drive the join) only fires on
+    // a socket DROP, so a still-connected confirmed-offline node would otherwise
+    // deadlock forever (heartbeats arrive, are dropped, never re-join). Break the
+    // deadlock by nudging the node to re-handshake — a `rejoin-request` control
+    // frame the node answers by re-sending its join-request. This preserves the
+    // no-silent-revive invariant while guaranteeing liveness on a live socket.
+    // Rate-limited so a stuck peer is not spammed.
+    if (confirmedNodes.has(fromNode)) {
+      // Don't nudge a node whose join was already terminally rejected (see
+      // joinRejectedTerminally / rejectedJoinNodes above).
+      const rejoinSuppressed = lastJoinRequest
+        ? joinRejectedTerminally
+        : rejectedJoinNodes.has(fromNode)
+      if (rejoinSuppressed) return
+      const mono = monotonicNow()
+      const last = lastRejoinNudge.get(fromNode) ?? -Infinity
+      if (mono - last >= REJOIN_NUDGE_INTERVAL_MS) {
+        lastRejoinNudge.set(fromNode, mono)
+        if (lastJoinRequest) {
+          // JOINER role (this node joined via a join-request): the confirmed
+          // peer is the HOST — nudging IT to rejoin is meaningless (it never
+          // joined anything). Re-drive OUR OWN join instead; the fresh grant
+          // clears this node's latch and recovery completes.
+          console.warn(
+            `${LOG_TAG} heartbeat from confirmed-offline host=${fromNode} on live session; re-driving join`
+          )
+          link.send(fromNode, lastJoinRequest)
+        } else {
+          console.warn(
+            `${LOG_TAG} heartbeat from confirmed-offline node=${fromNode} on live session; sending rejoin-request`
+          )
+          link.send(fromNode, { kind: 'rejoin-request', officeId })
+        }
+      }
+      return
+    }
+
+    federationStore.touchNode(officeId, fromNode, ts)
+    markSeen(fromNode)
+
+    // Recovery: a single heartbeat while in suspect rolls back to online with
+    // NO side effects (the jitter was absorbed; no member was ever reassigned).
+    // An unlatched 'offline' row recovers the same way — the no-silent-revive
+    // invariant is enforced by confirmedNodes, not by row status.
+    if (node.status === 'suspect' || node.status === 'offline') {
+      federationStore.setNodeStatus(officeId, fromNode, 'online', ts)
+      console.log(`${LOG_TAG} node recovered suspect→online node=${fromNode} ts=${ts}`)
+      link.broadcast({
+        kind: 'presence-update',
+        officeId,
+        nodeId: fromNode,
+        status: 'online',
+        members: memberIdentitiesForNode(fromNode),
+        since: ts,
+      })
+      onNodePresence?.(fromNode, 'online')
+      notifyPresence()
+    }
+  }
+
+  // ── Owner side: run a remote member's turn, then report completion ──
+
+  // Receipt identity includes the authenticated peer, so another peer cannot replay its result.
+  const inFlightWakes = new Set<string>()
+  const recentlyCompleted = new Map<string, { outcome: TurnCompletion; at: number }>()
+  const COMPLETED_LEDGER_TTL_MS = 10 * 60_000
+  const COMPLETED_LEDGER_CAP = 4096
+  function rememberCompleted(correlationId: string, outcome: TurnCompletion): void {
+    const at = now()
+    // Map preserves insertion order (chronological, keys unique per wake), so the
+    // expired entries are a prefix — delete until the first still-live one.
+    for (const [key, entry] of recentlyCompleted) {
+      if (at - entry.at > COMPLETED_LEDGER_TTL_MS) recentlyCompleted.delete(key)
+      else break
+    }
+    recentlyCompleted.set(correlationId, { outcome, at })
+    if (recentlyCompleted.size > COMPLETED_LEDGER_CAP) {
+      const oldest = recentlyCompleted.keys().next().value
+      if (oldest !== undefined) recentlyCompleted.delete(oldest)
+    }
+  }
+
+  const pendingAdmissions = new Map<string, { from: NodeId; msg: WakeFrame; deadline: number }>()
+  const ADMISSION_LIMIT = 128
+  const ADMISSION_RECHECK_MS = 250
+  let admissionTimer: ReturnType<typeof setTimeout> | undefined
+
+  function wakeKey(from: NodeId, correlationId: string): string { return `${from}\0${correlationId}` }
+
+  function checkWake(from: NodeId, msg: WakeFrame) {
+    return validateWakeAdmission({
+      officeId, outerOfficeId: msg.officeId, correlationId: msg.correlationId, fromNode: from,
+      selfNodeId: context.selfNodeId,
+      authorityNodeId: deps.getWakeAuthority?.() ?? joinedAuthorityNode ?? teamStore.getTeamById(officeId)?.hostNodeId ?? context.selfNodeId,
+      request: msg.request, store: teamStore, canDispatch: deps.canDispatchWake,
+    })
+  }
+
+  function finishWake(from: NodeId, msg: WakeFrame, outcome: TurnCompletion): void {
+    const key = wakeKey(from, msg.correlationId)
+    inFlightWakes.delete(key)
+    pendingAdmissions.delete(key)
+    rememberCompleted(key, outcome)
+    try { link.send(from, { kind: 'turn-complete', officeId, correlationId: msg.correlationId, outcome }) } catch (error) {
+      console.error(`${LOG_TAG} wake receipt send failed office=${officeId} peer=${from}`, error)
+    }
+  }
+
+  function refuseWake(from: NodeId, msg: WakeFrame, reason: string): void {
+    console.warn(`${LOG_TAG} wake refused office=${officeId} peer=${from} reason=${reason}`)
+    finishWake(from, msg, { kind: 'undelivered', reason })
+  }
+
+  function runAdmittedWake(from: NodeId, msg: WakeFrame): void {
+    console.log(`${LOG_TAG} wake admitted office=${officeId} app=${msg.request.appId}`)
+    let running: ReturnType<NonNullable<FederationCoordinatorDeps['onWake']>>
+    try { running = onWake!(msg.request) } catch (error) {
+      finishWake(from, msg, { kind: 'error', message: error instanceof Error ? error.message : String(error) })
+      return
+    }
+    void running.then((result): TurnCompletion => result.undelivered
+      ? { kind: 'undelivered', reason: result.undelivered.reason }
+      : { kind: 'result', content: result.finalMessage ?? '' })
+      .catch((error): TurnCompletion => ({ kind: 'error', message: error instanceof Error ? error.message : String(error) }))
+      .then(outcome => finishWake(from, msg, outcome))
+  }
+
+  function scheduleAdmissionCheck(): void {
+    if (admissionTimer || pendingAdmissions.size === 0) return
+    admissionTimer = setTimeout(() => {
+      admissionTimer = undefined
+      for (const [key, pending] of pendingAdmissions) {
+        const check = checkWake(pending.from, pending.msg)
+        if (check.ok) {
+          pendingAdmissions.delete(key)
+          runAdmittedWake(pending.from, pending.msg)
+        } else if (!check.metadataPending || Date.now() >= pending.deadline) {
+          refuseWake(pending.from, pending.msg, check.reason ?? 'wake-admission-failed')
+        }
+      }
+      scheduleAdmissionCheck()
+    }, ADMISSION_RECHECK_MS)
+    admissionTimer.unref?.()
+  }
+
+  function handleWake(from: NodeId, msg: WakeFrame): void {
+    if (!onWake) { refuseWake(from, msg, 'not-the-owner'); return }
+    const check = checkWake(from, msg)
+    if (!check.ok && !check.metadataPending) { refuseWake(from, msg, check.reason ?? 'wake-admission-failed'); return }
+    const key = wakeKey(from, msg.correlationId)
+    const done = recentlyCompleted.get(key)
+    if (done) {
+      if (!check.ok) { refuseWake(from, msg, check.reason ?? 'wake-admission-failed'); return }
+      link.send(from, { kind: 'turn-complete', officeId, correlationId: msg.correlationId, outcome: done.outcome })
+      return
+    }
+    if (inFlightWakes.has(key)) return
+    inFlightWakes.add(key)
+    if (check.metadataPending) {
+      if (pendingAdmissions.size >= ADMISSION_LIMIT) { refuseWake(from, msg, 'wake-admission-full'); return }
+      pendingAdmissions.set(key, { from, msg, deadline: Date.now() + (deps.wakeAdmissionTimeoutMs ?? 30000) })
+      console.log(`${LOG_TAG} wake awaiting office metadata office=${officeId} peer=${from} pending=${pendingAdmissions.size}`)
+      scheduleAdmissionCheck()
+      return
+    }
+    runAdmittedWake(from, msg)
+  }
+
+  // ── Inbound dispatch ──
+
+  function onMessage(from: NodeId, msg: FederationMessage): void {
+    switch (msg.kind) {
+      case 'join-request':
+        handleJoinRequest(msg)
+        break
+      case 'join-grant': {
+        // One protocol: an authority on another version cannot be joined (it,
+        // or this node, must update).
+        if (!isSameProtocol(msg.pv)) {
+          console.warn(`${LOG_TAG} join grant refused: authority protocol ${msg.pv} ≠ ${FEDERATION_PROTOCOL_VERSION} office=${officeId}`)
+          joinRejectedTerminally = true
+          onJoinReject?.('VERSION_INCOMPATIBLE', msg.pv)
+          break
+        }
+        joinedAuthorityNode = from
+        console.log(`${LOG_TAG} join granted assignedNodeId=${msg.assignedNodeId}`)
+        // A grant is a fresh handshake: clear this node's confirmed-offline
+        // latches on its peers. Without it a host confirmed-offline during a
+        // transport blip stays latched forever on the joiner — the host clears
+        // its latch on our join-request, but nothing cleared ours (the
+        // asymmetric half of the no-silent-revive invariant).
+        confirmedNodes.clear()
+        lastRejoinNudge.clear()
+        joinRejectedTerminally = false
+        let revived = false
+        for (const node of federationStore.listNodesByOffice(officeId)) {
+          if (node.nodeId === context.selfNodeId) continue
+          markSeen(node.nodeId)
+          if (node.status !== 'online') {
+            federationStore.setNodeStatus(officeId, node.nodeId, 'online', now())
+            revived = true
+          }
+        }
+        if (revived) notifyPresence()
+        onJoinGrant?.(msg.assignedNodeId)
+        break
+      }
+      case 'join-reject':
+        // Latch (see joinRejectedTerminally above); every reject reason is
+        // terminal for the request as sent.
+        joinRejectedTerminally = true
+        onJoinReject?.(msg.reason, msg.pv)
+        break
+      case 'heartbeat':
+        handleHeartbeat(msg.fromNode, msg.ts)
+        break
+      case 'rejoin-request':
+        // Joiner role: host confirmed us offline while our socket stayed up;
+        // re-send the last join-request to re-admit and re-arm the FSM. A host
+        // coordinator never sends itself a rejoin-request.
+        if (lastJoinRequest && !joinRejectedTerminally) {
+          console.log(`${LOG_TAG} rejoin-request received office=${officeId}; re-sending join-request`)
+          link.send(lastJoinRequest.fromNode, lastJoinRequest)
+        } else if (!lastJoinRequest) {
+          console.warn(`${LOG_TAG} rejoin-request received office=${officeId} but no prior join-request to re-send`)
+        }
+        break
+      case 'presence-update':
+        if (deps.getRosterAuthority && from !== deps.getRosterAuthority()) {
+          console.warn(`${LOG_TAG} presence-update refused office=${officeId} peer=${from} reason=authority-mismatch`)
+          break
+        }
+        // Presence is host-authoritative and projected from office_nodes; most
+        // inbound frames are observational (the local FSM owns this node's own
+        // view). PEER nodes with no local ledger row adopt the host's projection
+        // so a joiner's UI shows them going away/offline (self excluded — a
+        // node's own presence is never remote-driven). A confirmed-OFFLINE
+        // projection also drives the local unblock: a joiner-lead waiting on a
+        // member owned by ANOTHER joiner only learns of that peer's loss this
+        // way; otherwise the wait hangs until the hours-long sync timeout.
+        if (msg.nodeId !== context.selfNodeId) {
+          adoptedPeerPresence.set(msg.nodeId, {
+            nodeId: msg.nodeId,
+            identity: msg.nodeId,
+            displayName: null,
+            status: msg.status,
+            lastSeen: msg.since,
+          })
+          // A persisted-but-untracked peer row (a joiner's ledger copy of a
+          // peer it has no transport to) adopts the projection into the ledger
+          // itself: the election views (candidate order, online set) read row
+          // status, so without this a dead peer would count as an online
+          // candidate forever. Tracked rows stay FSM-owned — the local silence
+          // measurement wins over a remote projection there.
+          if (!isPresenceTracked(msg.nodeId)) {
+            const row = federationStore.getNode(officeId, msg.nodeId)
+            if (row && row.status !== msg.status) {
+              federationStore.setNodeStatus(officeId, msg.nodeId, msg.status, msg.since)
+            }
+            // For projection-owned rows the authority's 'online' IS the rejoin
+            // signal: re-arm the confirmed latch so a later offline projection
+            // fires the member unblock again (tracked rows re-arm on a real
+            // join handshake instead).
+            if (msg.status === 'online') confirmedNodes.delete(msg.nodeId)
+          }
+          notifyPresence()
+        }
+        if (msg.status === 'offline') applyRemoteOffline(msg)
+        break
+      case 'wake':
+        handleWake(from, msg)
+        break
+      case 'turn-complete':
+        if (msg.officeId !== officeId) { console.warn(`${LOG_TAG} turn completion refused office=${officeId} reason=office mismatch`); break }
+        if (onTurnComplete) onTurnComplete(msg.correlationId, msg.outcome, from)
+        else console.warn(`${LOG_TAG} turn-complete for non-authority office=${officeId} corr=${msg.correlationId}; dropping`)
+        break
+      case 'stream-frames':
+        if (onStreamFrames) onStreamFrames(msg)
+        else console.warn(`${LOG_TAG} stream-frames with no relay office=${officeId} session=${msg.sessionKey}; dropping`)
+        break
+      case 'roster':
+        // Joiner role: materialize the shadow office from the host's projection.
+        // A host never receives roster frames (it is the sole authority), so a
+        // roster with no handler is dropped with a warning.
+        if (deps.getRosterAuthority && (from !== deps.getRosterAuthority()
+          || msg.snapshot.team.id !== officeId || msg.snapshot.team.hostNodeId !== from)) {
+          console.warn(`${LOG_TAG} roster refused office=${officeId} peer=${from} reason=authority-mismatch`)
+          break
+        }
+        if (onRoster) onRoster(msg.snapshot, msg.version)
+        else console.warn(`${LOG_TAG} roster with no handler office=${officeId}; dropping`)
+        break
+      case 'member-status':
+        if (deps.getRosterAuthority && from !== deps.getRosterAuthority()) {
+          console.warn(`${LOG_TAG} member-status refused office=${officeId} peer=${from} reason=authority-mismatch`)
+          break
+        }
+        if (onMemberStatus) onMemberStatus(msg)
+        else console.warn(`${LOG_TAG} member-status with no handler office=${officeId}; dropping`)
+        break
+      case 'roster-request':
+        sendFullRoster(from)
+        break
+      case 'member-leave':
+        // Host role: a joiner left → drop the members it brought and re-converge.
+        if (onMemberLeave) onMemberLeave(from, msg.appIds)
+        else console.warn(`${LOG_TAG} member-leave with no handler office=${officeId}; dropping`)
+        break
+      default:
+        // Feed-sync transport frames: routed to the manager's ctrl-feed with the
+        // delivering peer as the source (feeds route acks/subscribes by author).
+        if (isFeedSyncFrame(msg)) {
+          if (onFeedFrame) onFeedFrame(from, msg)
+          else console.debug(`${LOG_TAG} feed-sync frame with no ctrl-feed office=${officeId} kind=${msg.kind}; dropping`)
+          break
+        }
+        // M2 family (authority / replication / artifact): delegated verbatim to
+        // the injected authority module. Unknown future frames are ignored
+        // (forward-compat: an unknown optional frame never crashes the node).
+        if (isM2Frame(msg)) {
+          if (onM2Frame) onM2Frame(from, msg)
+          else console.debug(`${LOG_TAG} M2 frame with no authority module office=${officeId} kind=${msg.kind}; dropping`)
+        } else {
+          console.debug(`${LOG_TAG} unknown frame office=${officeId} kind=${(msg as { kind?: string }).kind}; ignoring`)
+        }
+        break
+    }
+  }
+
+  // ── Public surface ──
+
+  function sendHeartbeat(): void {
+    link.broadcast({ kind: 'heartbeat', officeId, fromNode: context.selfNodeId, ts: now() })
+  }
+
+  /** online → suspect (HOLD). Persist + broadcast(suspect); NO side effects. */
+  function enterSuspect(nodeId: NodeId, ts: number, lastSeen: number): void {
+    federationStore.setNodeStatus(officeId, nodeId, 'suspect', lastSeen)
+    console.log(`${LOG_TAG} node suspect node=${nodeId} lastSeen=${lastSeen} ts=${ts}`)
+    link.broadcast({
+      kind: 'presence-update',
+      officeId,
+      nodeId,
+      status: 'suspect',
+      members: memberIdentitiesForNode(nodeId),
+      since: ts,
+    })
+    onNodePresence?.(nodeId, 'suspect')
+    notifyPresence()
+  }
+
+  /**
+   * suspect → confirmed-offline. The single source of confirmed-offline. NOW
+   * act: persist offline, fan out each bound member (unblock via the injected
+   * onMemberConfirmedOffline), and broadcast presence(offline, members[]). Guarded
+   * to fire exactly once per node until a rejoin re-arms it.
+   */
+  function confirmOffline(nodeId: NodeId, ts: number, lastSeen: number): void {
+    confirmedNodes.add(nodeId)
+    federationStore.setNodeStatus(officeId, nodeId, 'offline', lastSeen)
+
+    // Fan out via the persistent owner_node_id binding (not the last presence
+    // frame) so the unblock never misses a member.
+    const bound = listMembersForNode(nodeId)
+    for (const member of bound) {
+      onMemberConfirmedOffline?.(member.appId)
+    }
+
+    const members = bound
+      .map((m) => m.memberIdentity)
+      .filter((id): id is string => id != null)
+    const memberIds = members.length > 0 ? [...new Set(members)] : memberIdentitiesForNode(nodeId)
+
+    console.log(
+      `${LOG_TAG} node confirmed-offline node=${nodeId} lastSeen=${lastSeen} ts=${ts} members=${bound.length}`
+    )
+    link.broadcast({
+      kind: 'presence-update',
+      officeId,
+      nodeId,
+      status: 'offline',
+      members: memberIds,
+      since: ts,
+    })
+    onNodePresence?.(nodeId, 'offline')
+    notifyPresence()
+  }
+
+  /**
+   * Drive the local confirmed-offline side-effect from a host-projected
+   * presence(offline) frame. Used when this node has no direct FSM over the
+   * offline node (a joiner observing a PEER joiner's loss via the host). Resolves
+   * the affected members to local appIds — by the persistent owner_node_id
+   * binding and by the identity ids the frame carries — and unblocks each waiting
+   * lead exactly once. Guarded by confirmedNodes so a repeated offline projection
+   * does not re-fire; this node's OWN nodeId is skipped (the local FSM owns it).
+   * No re-broadcast and no FSM mutation here: this is a pure local unblock,
+   * keeping presence host-authoritative and avoiding a fan-out loop.
+   */
+  function applyRemoteOffline(msg: { nodeId: NodeId; members: string[] }): void {
+    if (msg.nodeId === context.selfNodeId) return
+    if (confirmedNodes.has(msg.nodeId)) return
+    confirmedNodes.add(msg.nodeId)
+
+    const affectedIdentities = new Set(msg.members)
+    const appIds = new Set<string>()
+    for (const m of teamStore.listMembersByTeam(officeId)) {
+      const ownedByOfflineNode = m.ownerNodeId === msg.nodeId
+      const namedByFrame = m.memberIdentity != null && affectedIdentities.has(m.memberIdentity)
+      if (ownedByOfflineNode || namedByFrame) appIds.add(m.appId)
+    }
+
+    console.log(
+      `${LOG_TAG} remote offline projection office=${officeId} node=${msg.nodeId} members=${appIds.size}`
+    )
+    for (const appId of appIds) onMemberConfirmedOffline?.(appId)
+  }
+
+  /**
+   * Advance every tracked node's debounce FSM against the current clock. A
+   * transport-silence sequence always passes online → suspect → confirmed; there
+   * is no online → offline direct jump. A node already
+   * confirmed-offline is inert until a rejoin.
+   */
+  function sweepPresence(): void {
+    const ts = now()
+    const mono = monotonicNow()
+
+    // Host suspend/resume guard: the monotonic clock does not advance
+    // while the machine sleeps, so a sweep across a resume shows the wall clock
+    // jumping far more than the monotonic clock. On such a gap, do NOT escalate
+    // any node this tick — instead grant every node a fresh grace window so a
+    // wake-up does not register a sleep as transport silence and mass-confirm
+    // healthy peers offline. Real departures re-confirm on later normal ticks.
+    if (lastSweep) {
+      const wallDelta = ts - lastSweep.wall
+      const monoDelta = mono - lastSweep.mono
+      if (wallDelta - monoDelta >= confirmedOfflineMs) {
+        regraceNonConfirmed()
+        console.warn(
+          `${LOG_TAG} presence resume guard office=${officeId} wallDelta=${wallDelta} monoDelta=${monoDelta}; granting grace`
+        )
+        return
+      }
+    }
+    lastSweep = { wall: ts, mono }
+
+    for (const node of federationStore.listNodesByOffice(officeId)) {
+      // Never sweep this node's OWN row: a node does not heartbeat to itself,
+      // so its self-silence grows unboundedly and would "confirm" it offline
+      // ~13s after it records itself (host at hostOffice, joiner at join-grant).
+      // A joiner then BROADCASTS that phantom offline up to the host, poisoning
+      // the host's confirmedNodes guard — when the node later dies for real,
+      // applyRemoteOffline short-circuits and no unblock/busy-clear ever fires.
+      if (node.nodeId === context.selfNodeId) continue
+      // Rows without a direct transport (a joiner's persisted PEER rows) are
+      // never silence-swept — no frames flow here, so their silence measures
+      // nothing. Their status is adopted from the authority's presence frames.
+      if (!isPresenceTracked(node.nodeId)) continue
+      if (confirmedNodes.has(node.nodeId)) continue
+      const silence = mono - monotonicLastSeenOf(node)
+      if (node.status === 'online') {
+        // online → suspect always broadcasts first, even when silence already
+        // exceeds confirmedOfflineMs in this same tick, so downstream observers
+        // never see a bare online→offline transition.
+        if (silence >= confirmedOfflineMs) {
+          enterSuspect(node.nodeId, ts, node.lastSeen)
+          confirmOffline(node.nodeId, ts, node.lastSeen)
+        } else if (silence >= suspectAfterMs) {
+          enterSuspect(node.nodeId, ts, node.lastSeen)
+        }
+      } else if (node.status === 'suspect') {
+        if (silence >= confirmedOfflineMs) {
+          confirmOffline(node.nodeId, ts, node.lastSeen)
+        }
+      }
+    }
+  }
+
+  /**
+   * Re-baseline every non-confirmed peer's silence to now and reset the sweep
+   * pair, so the next tick measures fresh silence. The shared core of both the
+   * sweep's clock-delta resume guard and the explicit OS-resume path. Latched
+   * (confirmed-offline) nodes are left as a real prior departure.
+   */
+  function regraceNonConfirmed(): void {
+    for (const node of federationStore.listNodesByOffice(officeId)) {
+      if (node.nodeId === context.selfNodeId) continue
+      if (!confirmedNodes.has(node.nodeId)) markSeen(node.nodeId)
+    }
+    lastSweep = { wall: now(), mono: monotonicNow() }
+  }
+
+  /**
+   * Explicit system-resume grace, driven by the OS power event rather than
+   * inferred from a wall/monotonic clock gap — the sweep's clock-delta guard is
+   * platform-dependent (some platforms advance performance.now() across sleep,
+   * defeating it), so this is the reliable path.
+   */
+  function notifyResume(): void {
+    regraceNonConfirmed()
+    // Announce liveness immediately so peers that did NOT sleep re-baseline this
+    // node too, instead of waiting a full heartbeat interval.
+    sendHeartbeat()
+    console.log(`${LOG_TAG} resume grace applied office=${officeId}`)
+  }
+
+  function requestJoin(req: JoinRequest): void {
+    // Remember it so an inbound rejoin-request can re-send it without the manager
+    // re-supplying the payload (the host-driven recovery from confirmed-offline).
+    lastJoinRequest = req
+    // An explicit (re-)join is a new context — reconnect re-auth, redial to a
+    // newly-elected authority, or a user-supplied credential — so a previous
+    // terminal reject no longer binds the recovery paths.
+    joinRejectedTerminally = false
+    link.send(req.fromNode, req) // peers resolve the host; in M1a the link routes it.
+  }
+
+  function start(): void {
+    link.onMessage(onMessage)
+    if (heartbeatTimer) return
+    // The heartbeat period also drives the silence sweep; at 2s it is well below
+    // the 6s suspect threshold so a single missed beat never trips the FSM.
+    const interval = Math.max(1, heartbeatIntervalMs)
+    heartbeatTimer = setInterval(() => {
+      sendHeartbeat()
+      sweepPresence()
+    }, interval)
+    if (typeof heartbeatTimer.unref === 'function') heartbeatTimer.unref()
+    console.log(`${LOG_TAG} started office=${officeId} self=${context.selfNodeId}`)
+  }
+
+  function stop(): void {
+    if (admissionTimer) { clearTimeout(admissionTimer); admissionTimer = undefined }
+    for (const pending of [...pendingAdmissions.values()]) refuseWake(pending.from, pending.msg, 'coordinator-stopped')
+    if (heartbeatTimer) {
+      clearInterval(heartbeatTimer)
+      heartbeatTimer = null
+    }
+    link.close()
+    console.log(`${LOG_TAG} stopped office=${officeId}`)
+  }
+
+  return {
+    start,
+    stop,
+    pendingWakeAdmissions: () => pendingAdmissions.size,
+    requestJoin,
+    sendHeartbeat,
+    sweepPresence,
+    notifyResume,
+    tick: sweepPresence,
+    getPresence: snapshot,
+    broadcastRoster,
+    refreshRoster,
+    isAdmissionRefused: (nodeId) => rejectedJoinNodes.has(nodeId),
+  }
+}

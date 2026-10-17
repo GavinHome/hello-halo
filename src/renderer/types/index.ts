@@ -11,6 +11,23 @@ import {
 } from '../../shared/types/ai-sources';
 import { NotificationChannelsConfig }  from '../../shared/types/notification-channels';
 import type { KBSource } from '../../shared/types/tlon';
+import type { MemorySettings } from '../../shared/types/memory';
+// Re-exported below as well, but `export … from` creates no local binding, so the
+// declarations in this file that USE these names need their own import.
+import type { ApiProvider } from '../../shared/types/ai-sources';
+import type { FileChangesSummary } from '../../shared/file-changes';
+import type { GoalInput } from '../../shared/types/goal';
+import type {
+  TranscriptMessage,
+  ToolCall,
+  ThoughtType,
+  Thought,
+  TaskProgress,
+  ThoughtsSummary,
+  TokenUsage,
+} from '../../shared/types/transcript';
+import type { ApiRetryState } from '../../shared/types/api-retry';
+import { DEFAULT_MAX_TURNS } from '../../shared/constants/agent-limits';
 // Re-export them
 export { DEFAULT_MODEL, getCurrentModelName, hasAnyAISource };
 
@@ -32,6 +49,8 @@ export type {
   OAuthCompleteResult,
   PresetApiConfig,
   AuthProviderConfig,
+  StoredModelSelection,
+  ResolvedModelSelection,
   // Legacy types for backward compatibility
   LegacyAISourcesConfig,
   OAuthSourceConfig,
@@ -44,7 +63,9 @@ export {
   createEmptyAISourcesConfig,
   getCurrentSource,
   getModelDisplayName,
+  resolveModelSelection,
   getSourceById,
+  getSourceAccountName,
   isSourceConfigured,
   createSource,
   addSource,
@@ -127,16 +148,24 @@ export interface SystemConfig {
 export interface AgentConfig {
   maxTurns: number;         // Maximum tool call turns per message
   promptProfile?: 'official' | 'halo';  // System prompt profile
-  sdkEngine?: 'anthropic' | 'halo' | 'codex';  // Agent SDK engine (requires restart)
+  sdkEngine?: 'anthropic' | 'halo' | 'codex' | 'dsh';  // Agent SDK engine (requires restart)
   configDirMode?: 'halo' | 'cc' | 'custom';  // Claude CLI config directory mode
   customConfigDir?: string;  // Custom config dir path (when configDirMode === 'custom')
-  enableTeams?: boolean;    // Enable Agent Teams (multi-agent collaboration)
   enableDigitalHumans?: boolean; // Enable Digital Humans MCP tools (automation app management)
+  enableConversationInterop?: boolean; // Master switch for Cross-Conversation Interop (conversation_read/conversation_send). Undefined/true = on.
+  enableConversationSend?: boolean; // Sub-switch, only meaningful when enableConversationInterop is on: false = read-only (no conversation_send)
   disabledTools?: string[]; // Tools disabled by user (Extended Capabilities toggles)
   developerMode?: boolean;   // [Developer] Enable verbose diagnostic logging across the system
+  teamTurnTimeoutMs?: number; // Team member turn timeout in ms (overrides the built-in default)
+  teamCircuitLimits?: {       // Team circuit breaker overrides (per-epoch limits)
+    maxMessages?: number;
+    maxForwardDepth?: number;
+  };
+  teamMaxConcurrentTurns?: number; // Cap on team member turns running at once on this machine
+  maxResidentSessions?: number; // Most engine sessions kept resident at once (halved under memory pressure)
 }
 
-// Schedule value type (used by apps.store + schedule components)
+// Schedule value type (re-exported by components/apps/schedule-utils)
 export type ScheduleValue =
   | { type: 'every'; every: string }
   | { type: 'cron'; cron: string }
@@ -251,6 +280,8 @@ export interface McpServerStatus {
   errorDetail?: string;
   /** Epoch ms of the last probe/SDK report that produced this entry */
   lastCheckedAt?: number;
+  /** Round-trip time of the last native probe, in milliseconds. */
+  latencyMs?: number;
 }
 
 export interface NotificationConfig {
@@ -259,9 +290,7 @@ export interface NotificationConfig {
 
 // Global layout preferences (panel sizes and visibility)
 export interface LayoutConfig {
-  sidebarOpen?: boolean;                 // Whether conversation list sidebar is open
   sidebarWidth?: number;                 // Conversation list sidebar width (px)
-  sidebarTopSectionHeight?: number;      // Height of the top conversation sidebar section (px)
   artifactRailWidth?: number;            // Artifact rail panel width (px)
 }
 
@@ -269,12 +298,18 @@ export interface LayoutConfig {
 export interface NetworkConfig {
   proxy?: string;  // Manual proxy URL (e.g. http://host:port, socks5://host:port). Empty = use system proxy.
   browserUseProxy?: boolean;  // When true, AI Browser also uses the Settings proxy. Default false = system proxy.
+  noProxy?: string;  // Hosts reached directly, NO_PROXY style ("a.com, .b.com"); local addresses always are.
 }
 
 // Browser configuration
 export interface BrowserConfig {
   customAllowlist?: string[];  // User-added allowlist patterns; only honored when the build sets browserPolicy.userExtensible
   userAgent?: string;  // Custom User-Agent for the embedded AI Browser; overrides built-in desktop/mobile UAs (issue #124)
+}
+
+// Office federation configuration
+export interface FederationConfig {
+  gatewayUrl?: string;  // Empty inherits the build default; LAN-only when neither is set.
 }
 
 export interface HaloConfig {
@@ -288,13 +323,14 @@ export interface HaloConfig {
   notifications?: NotificationConfig;  // Notification preferences
   notificationChannels?: NotificationChannelsConfig;  // External notification channels
   /** @deprecated Migrated to imChannels.instances[] */
-  wecomBot?: import('../../../shared/types/notification-channels').WecomBotConfig;
-  imChannels?: import('../../../shared/types/notification-channels').ImChannelsConfig;  // IM channels (multi-instance)
+  wecomBot?: import('../../shared/types/notification-channels').WecomBotConfig;
+  imChannels?: import('../../shared/types/notification-channels').ImChannelsConfig;  // IM channels (multi-instance)
   agent?: AgentConfig;  // Agent behavior settings
   layout?: LayoutConfig;  // Global layout preferences (panel sizes and visibility)
   chat?: ChatConfig;  // Chat behavior preferences
   network?: NetworkConfig;  // Network settings (proxy, etc.)
   browser?: BrowserConfig;  // Browser settings (user custom allowlist)
+  federation?: FederationConfig;  // Office federation settings (gateway relay)
   isFirstLaunch: boolean;
   // True when the user deferred model configuration in the first-run wizard.
   // Suppresses the setup re-entry guard so they can reach Home and configure later.
@@ -314,12 +350,17 @@ export interface SpaceLayoutPreferences {
 // All space preferences (extensible for future features)
 export interface SpacePreferences {
   layout?: SpaceLayoutPreferences;
+  memory?: MemorySettings;  // Memory shared by the space's conversations
 }
 
 export interface Space {
   id: string;
   name: string;
   icon: string;
+  /** One of SPACE_COLOR_IDS — tints the letter avatar shown in SpaceSelector.
+   * Absent on spaces created before this field existed; the avatar falls back
+   * to a hash-derived color from the same palette in that case. */
+  color?: string;
   path: string;
   isTemp: boolean;
   createdAt: string;
@@ -334,6 +375,7 @@ export interface Space {
 export interface CreateSpaceInput {
   name: string;
   icon: string;
+  color?: string;
   customPath?: string;
 }
 
@@ -342,7 +384,7 @@ export interface CreateSpaceInput {
 // ============================================
 
 /** Agent engine that owns a conversation. Used for the EngineBadge UI. */
-export type EngineId = 'anthropic' | 'halo' | 'codex';
+export type EngineId = 'anthropic' | 'halo' | 'codex' | 'dsh';
 
 // Lightweight metadata for conversation list (no messages)
 // Used by listConversations for fast loading
@@ -357,6 +399,8 @@ export interface ConversationMeta {
   starred?: boolean; // Pinned conversation for quick access
   /** Engine recorded at conversation creation. Read with `?? 'anthropic'` fallback. */
   engineId?: EngineId | null;
+  /** User renamed it; the first message no longer sets the title. */
+  titleCustomized?: boolean;
 }
 
 // ============================================
@@ -369,18 +413,87 @@ export type TaskStatus = 'generating' | 'waiting' | 'completed-unseen' | 'error'
 // Item in the Pulse panel
 export interface PulseItem {
   conversationId: string;
+  /** Set for a digital-human conversation; its name and home space come from the app, not this item. */
+  appId?: string;
   spaceId: string;
-  spaceName: string;
   title: string;
   status: TaskStatus;
   starred: boolean;
   updatedAt: string;
+  /** ConversationMeta.preview — last message, truncated. */
+  preview?: string;
   /** Timestamp when user viewed this item; present = item is in grace period before removal */
   readAt?: number;
+  /** User clicked "Keep" — exempt from the grace-period auto-removal timer */
+  kept?: boolean;
+}
+
+/** A pulse item's read-grace-period bookkeeping (chat.store's `pulseReadAt` map value). */
+export interface PulseReadInfo {
+  readAt: number;
+  originalStatus: 'completed-unseen' | 'error';
+  spaceId: string;
+  title: string;
+  /** User clicked "Keep" — exempt from the grace-period auto-removal timer */
+  kept?: boolean;
 }
 
 /** Grace period for read pulse items before removal (milliseconds) */
 export const PULSE_READ_GRACE_PERIOD_MS = 60_000
+
+// ============================================
+// Task Panel Types (aggregated conversations + automation apps)
+// ============================================
+
+/**
+ * Status of a task-panel entry, independent of its source. Distinct from
+ * `TaskStatus` above — that type is conversation-specific and shared by
+ * TaskStatusDot/ConversationList/ChatHistoryPanel; renaming it to fold in
+ * automation apps would ripple through all of those. The task-panel
+ * aggregation layer (stores/task.store.ts) maps both `TaskStatus` and
+ * automation run status onto this one.
+ */
+export type TaskItemStatus = 'running' | 'waiting' | 'completed-unseen' | 'error' | 'idle';
+
+export type TaskSource = 'conversation' | 'automation' | 'team';
+
+/** A single entry in the task panel, aggregated from conversations, automation apps and teams. */
+export interface TaskItem {
+  /** Globally unique: `conv:<conversationId>`, `app:<appId>` or `team:<teamId>` */
+  key: string;
+  source: TaskSource;
+  status: TaskItemStatus;
+
+  title: string;
+  /** Secondary line after the space name, e.g. "Waiting for your answer". */
+  detail: string;
+
+  spaceId: string | null;
+  spaceName: string;
+
+  /** Sort key and elapsed-time fallback. */
+  updatedAt: number;
+  /** When the running task started; drives the elapsed-time display. */
+  startedAt?: number;
+
+  /** Present when source === 'conversation'. */
+  conversationId?: string;
+  starred?: boolean;
+  /** Timestamp when user viewed this item; present = item is in grace period before removal. */
+  readAt?: number;
+  /** User clicked "Keep" — exempt from the grace-period auto-removal timer. */
+  kept?: boolean;
+
+  /** Present when source === 'automation'. */
+  appId?: string;
+  /** Seeds AutomationAvatar — must match the app's `spec.name` for a consistent face. */
+  appName?: string;
+  escalationId?: string;
+  runId?: string;
+
+  /** Present when source === 'team' — a team with a decision waiting on the user. */
+  teamId?: string;
+}
 
 // Full conversation with messages
 // Loaded on-demand when selecting a conversation
@@ -389,6 +502,16 @@ export interface Conversation extends ConversationMeta {
   sessionId?: string;
   version?: number;  // Format version: 2 = thoughts separated into .thoughts.json
   /**
+   * Set for a digital-human conversation (its transcript is read through the
+   * digital-human reader, not the space conversation store).
+   */
+  appId?: string;
+  /**
+   * Older history not loaded yet: `before` is the id of the oldest loaded
+   * message. Only digital-human conversations are paged.
+   */
+  earlier?: { hasMore: boolean; before: string | null };
+  /**
    * Per-conversation model pin (Cursor-style): the AI source + model this
    * conversation uses, independent of the global selection. Stamped at creation
    * from the active selection; read with a fallback to the global selection.
@@ -396,6 +519,8 @@ export interface Conversation extends ConversationMeta {
    */
   modelSourceId?: string;
   modelId?: string;
+  /** How hard this conversation's model thinks; absent until the user picks one. */
+  reasoningEffort?: import('../../shared/constants/reasoning-effort').ReasoningEffortLevel;
   /** Knowledge bases (Tlon) loaded into this conversation; injected per turn. */
   knowledgeBaseIds?: string[];
 }
@@ -428,9 +553,11 @@ export interface EngineCapabilities {
   todo: { states: TodoState[]; hasActiveForm: boolean };
   subAgent: { model: 'declarative' | 'imperative' | 'none'; visibleLifecycle: boolean };
   features: {
-    skills: boolean; mcp: boolean; hooks: boolean;
+    skills: boolean; mcp: boolean; hooks: boolean; permissionRules: boolean;
     sessionResume: boolean; sessionFork: boolean; interrupt: boolean;
     multimodalImage: boolean; contextCompaction: boolean; askUserQuestion: boolean;
+    /** Optional because a mobile client can talk to a server older than the flag. */
+    goal?: boolean;
   };
 }
 
@@ -440,6 +567,8 @@ export interface EngineAvailability {
   available: boolean;
   version: string;
   fingerprint: string;
+  /** Why the engine is unavailable, for Settings. Not localized. */
+  reason?: string;
 }
 
 /** Payload of `agent:get-engine-availability`. */
@@ -455,33 +584,14 @@ export interface EngineAvailabilityReport {
 // Message Types
 // ============================================
 
-export interface ToolCall {
-  id: string;
-  name: string;
-  status: ToolStatus;
-  input: Record<string, unknown>;
-  output?: string;
-  error?: string;
-  progress?: number;
-  requiresApproval?: boolean;
-  description?: string;
-}
+export type { ToolCall };
 
 // ============================================
 // Image Attachment Types (for multi-modal messages)
 // ============================================
 
-export type ImageMediaType = 'image/jpeg' | 'image/png' | 'image/gif' | 'image/webp';
-
-// Image attachment for messages
-export interface ImageAttachment {
-  id: string;
-  type: 'image';
-  mediaType: ImageMediaType;
-  data: string;  // Base64 encoded image data
-  name?: string;  // Optional filename
-  size?: number;  // File size in bytes
-}
+import type { ImageAttachment, ImageMediaType } from '../../shared/types/image-attachment';
+export type { ImageAttachment, ImageMediaType };
 
 // Content block types for multi-modal messages (matches Claude API)
 export interface TextContentBlock {
@@ -500,36 +610,20 @@ export interface ImageContentBlock {
 
 export type MessageContentBlock = TextContentBlock | ImageContentBlock;
 
-// Summary of thoughts for a message (used when thoughts are stored separately)
-export interface ThoughtsSummary {
-  count: number;
-  types: Partial<Record<ThoughtType, number>>;
-  duration?: number;  // seconds, from first to last thought timestamp
-}
-
 /**
  * Lightweight file changes summary stored in message metadata.
  * Allows immediate display of file change stats without loading full thoughts.
  */
 export type { FileChangesSummary } from '../../shared/file-changes';
 
-export interface Message {
-  id: string;
-  role: MessageRole;
-  content: string;  // Text content (for backward compatibility)
-  timestamp: string;
-  toolCalls?: ToolCall[];
-  thoughts?: Thought[] | null;  // null = stored separately (not loaded), undefined = none, Array = loaded
-  thoughtsSummary?: ThoughtsSummary;  // Present when thoughts are stored separately
+/** The shared transcript message plus renderer-only streaming state. */
+export interface Message extends TranscriptMessage {
   isStreaming?: boolean;
-  images?: ImageAttachment[];  // Attached images
-  tokenUsage?: TokenUsage;  // Token usage for this assistant message
-  metadata?: {
-    fileChanges?: FileChangesSummary;  // Lightweight file changes for immediate display
-  };
-  error?: string;  // Error message when assistant response failed (e.g., 429 rate limit)
-  source?: 'injection';  // How the message entered the conversation (SDK-agnostic)
-  sources?: KBSource[];  // Knowledge-base documents the agent Read this turn (clickable citations)
+  /**
+   * Row identity the view keeps when an optimistic message is replaced by its
+   * persisted twin, so the bubble is not rebuilt when the id changes.
+   */
+  clientKey?: string;
 }
 
 // ============================================
@@ -582,55 +676,13 @@ export interface ArtifactChangeEvent {
 export interface ArtifactTreeUpdateEvent {
   spaceId: string;
   updatedDirs: Array<{ dirPath: string; children: ArtifactTreeNode[] }>;
-  changes: ArtifactChangeEvent[];
 }
-
-// View mode for artifact display
-export type ArtifactViewMode = 'card' | 'tree';
 
 // ============================================
 // Thought Process Types (Agent's real-time reasoning)
 // ============================================
 
-export type ThoughtType = 'thinking' | 'text' | 'tool_use' | 'tool_result' | 'system' | 'result' | 'error';
-
-export interface Thought {
-  id: string;
-  type: ThoughtType;
-  content: string;
-  timestamp: string;
-  // For tool-related thoughts
-  toolName?: string;
-  toolInput?: Record<string, unknown>;
-  toolOutput?: string;
-  isError?: boolean;
-  // For result thoughts
-  duration?: number;
-  // For streaming state (real-time updates)
-  isStreaming?: boolean;  // True while content is being streamed
-  isReady?: boolean;      // True when tool params are complete (for tool_use)
-  // For merged tool result display (tool_use contains its result)
-  toolResult?: {
-    output: string;
-    isError: boolean;
-    timestamp: string;
-  };
-  // Sub-agent support: links this thought to a parent Task tool_use
-  parentToolUseId?: string;
-  // Task/Agent tool progress (updated via task lifecycle events)
-  taskProgress?: TaskProgress;
-}
-
-/** Progress tracking for a Task/Agent tool_use thought */
-export interface TaskProgress {
-  taskId: string;
-  status: 'running' | 'completed' | 'failed' | 'stopped';
-  lastToolName?: string;
-  toolCount: number;
-  durationMs: number;
-  summary?: string;
-  totalTokens?: number;
-}
+export type { ThoughtType, Thought, TaskProgress, ThoughtsSummary };
 
 // Legacy alias for backwards compatibility
 export interface ThinkingBlock {
@@ -644,29 +696,7 @@ export interface ThinkingBlock {
 // Canvas Context Types (AI awareness of user's open tabs)
 // ============================================
 
-/**
- * Canvas Context - Provides AI with awareness of user's currently open tabs
- * Injected into messages to enable natural language understanding of user context
- */
-export interface CanvasContext {
-  isOpen: boolean;
-  tabCount: number;
-  activeTab: {
-    type: string;  // 'browser' | 'code' | 'markdown' | 'image' | 'pdf' | 'text' | 'json' | 'csv' | 'terminal'
-    title: string;
-    url?: string;   // For browser/pdf tabs
-    path?: string;  // For file tabs
-    terminalSessionId?: string;  // For terminal tabs - the pty session id the AI drives via terminal_* tools
-  } | null;
-  tabs: Array<{
-    type: string;
-    title: string;
-    url?: string;
-    path?: string;
-    terminalSessionId?: string;  // For terminal tabs - the pty session id the AI drives via terminal_* tools
-    isActive: boolean;
-  }>;
-}
+export type { CanvasContext } from '../../shared/types/canvas-context';
 
 // ============================================
 // Agent Event Types
@@ -704,23 +734,23 @@ export interface AgentToolResultEvent extends AgentEventBase {
 }
 
 // Error type for special handling (e.g., interrupted response)
-export type AgentErrorType = 'interrupted';
+export type AgentErrorType = 'interrupted' | 'working_dir_unavailable';
+
+/** The space whose working directory a turn could not start in, and that folder. */
+export interface WorkDirIssue {
+  spaceId: string;
+  workDir: string;
+}
 
 export interface AgentErrorEvent extends AgentEventBase {
   type: 'error';
   error: string;
   errorType?: AgentErrorType;  // Special error type for custom UI handling
+  workDirIssue?: WorkDirIssue;  // Set with 'working_dir_unavailable'
 }
 
 // Token usage statistics from SDK result message
-export interface TokenUsage {
-  inputTokens: number;
-  outputTokens: number;
-  cacheReadTokens: number;
-  cacheCreationTokens: number;
-  totalCostUsd: number;
-  contextWindow: number;
-}
+export type { TokenUsage };
 
 export interface AgentCompleteEvent extends AgentEventBase {
   type: 'complete';
@@ -736,6 +766,11 @@ export interface AgentThoughtEvent extends AgentEventBase {
 export interface CompactInfo {
   trigger: 'manual' | 'auto';
   preTokens: number;
+}
+
+/** A model request the engine will resend, with its deadline on this client's clock. */
+export interface ApiRetryNotice extends ApiRetryState {
+  retryAt: number;
 }
 
 // ============================================
@@ -782,7 +817,10 @@ export type AgentEvent =
 // App State Types
 // ============================================
 
-export type AppView = 'splash' | 'gitBashSetup' | 'setup' | 'home' | 'space' | 'settings' | 'apps' | 'tlon' | 'serverConnect' | 'serverList';
+export type AppView = 'splash' | 'gitBashSetup' | 'setup' | 'space' | 'settings' | 'apps' | 'tlon' | 'store' | 'spaces' | 'serverConnect' | 'serverList';
+
+// ArtifactRail's tab strip.
+export type ArtifactRailTab = 'files' | 'digital-humans' | 'skill' | 'mcp';
 
 export interface AppState {
   view: AppView;
@@ -841,7 +879,7 @@ export const DEFAULT_CONFIG: HaloConfig = {
     port: 3456
   },
   mcpServers: {},  // Empty by default
-  agent: { maxTurns: 999 },  // Agent defaults
+  agent: { maxTurns: DEFAULT_MAX_TURNS },  // Agent defaults
   isFirstLaunch: true,
   modelConfigSkipped: false
 };
@@ -858,16 +896,9 @@ export function getConfigCurrentModelName(config: HaloConfig): string {
   return getCurrentModelName(config.aiSources);
 }
 
-// Icon options for spaces (using icon IDs that map to Lucide icons)
-export const SPACE_ICONS = [
-  'folder', 'code', 'globe', 'chart', 'file-text', 'palette',
-  'gamepad', 'wrench', 'smartphone', 'lightbulb', 'rocket', 'star'
-] as const;
-
-export type SpaceIconId = typeof SPACE_ICONS[number];
-
-// Default space icon
-export const DEFAULT_SPACE_ICON: SpaceIconId = 'folder';
+// Sent as Space.icon on creation — the backend field is still required, but
+// nothing renders a per-space icon anymore (see CreateSpaceForm.tsx).
+export const DEFAULT_SPACE_ICON = 'folder';
 
 // File type to icon ID mapping (maps to Lucide icon names)
 export const FILE_ICON_IDS: Record<string, string> = {
@@ -923,3 +954,5 @@ export const FILE_ICON_IDS: Record<string, string> = {
 export function getFileIconId(extension: string): string {
   return FILE_ICON_IDS[extension.toLowerCase()] || FILE_ICON_IDS.default;
 }
+
+export type { LiveInput } from './live-input'

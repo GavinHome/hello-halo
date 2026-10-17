@@ -3,7 +3,7 @@
  * Manages permissions, auto-launch, logs, and diagnostics
  */
 
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useRef } from 'react'
 import {
   FolderOpen, Activity, Loader2, AlertTriangle, CheckCircle,
   XOctagon, ChevronRight, Copy, FileText, RotateCcw, RefreshCw, Save, Power
@@ -12,10 +12,12 @@ import { useTranslation } from '../../i18n'
 import { api } from '../../api'
 import type { HaloConfig } from '../../types'
 import type { HealthCheckResult, HealthReport } from './types'
-import { Switch } from '../ui/Switch'
+import { Switch, switchRowHover } from '../ui/Switch'
 import { useConfirmDialog } from '../../hooks/useConfirmDialog'
 import { useSecurityPolicy } from '../../hooks/useSecurityPolicy'
 import { BrowserAllowlistCard } from './BrowserAllowlistCard'
+import { ProxyBypassField } from './ProxyBypassField'
+import { ChildLocalConnectionRow } from './ChildLocalConnectionRow'
 
 interface SystemSectionProps {
   config: HaloConfig | null
@@ -25,6 +27,36 @@ interface SystemSectionProps {
 export function SystemSection({ config, setConfig }: SystemSectionProps) {
   const { t } = useTranslation()
   const { showConfirm, DialogComponent: RestartDialogComponent } = useConfirmDialog()
+
+  const { showConfirm: confirmBrowserCleanup, DialogComponent: BrowserCleanupDialog } = useConfirmDialog()
+  const browserCleanupPending = useRef(false)
+  const [clearingBrowserData, setClearingBrowserData] = useState(false)
+  const [browserCleanupResult, setBrowserCleanupResult] = useState<'success' | 'error' | null>(null)
+
+  const handleClearBrowserData = async () => {
+    if (browserCleanupPending.current) return
+    browserCleanupPending.current = true
+    try {
+      const confirmed = await confirmBrowserCleanup({
+        title: t('Clear browser data?'),
+        message: t('This clears cookies, site storage and cache for the shared browser. ALL shared browser site logins, including those used by digital humans, will be signed out. Halo data and other browser sessions are kept. This cannot be undone.'),
+        confirmLabel: t('Clear browser data'),
+        cancelLabel: t('Cancel'),
+        variant: 'danger',
+      })
+      if (!confirmed) return
+      setClearingBrowserData(true)
+      setBrowserCleanupResult(null)
+      const result = await api.clearBrowserData()
+      setBrowserCleanupResult(result.success ? 'success' : 'error')
+    } catch (error) {
+      console.error('[SystemSection] Browser cleanup request failed:', error)
+      setBrowserCleanupResult('error')
+    } finally {
+      browserCleanupPending.current = false
+      setClearingBrowserData(false)
+    }
+  }
 
   // Build-time security policy. Used to hide tunnel-related diagnostics
   // rows when the tunnel feature is disabled by product config.
@@ -291,7 +323,7 @@ export function SystemSection({ config, setConfig }: SystemSectionProps) {
   return (
     <>
       {/* Permissions Section */}
-      <section id="permissions" className="bg-card rounded-xl border border-border p-6">
+      <section id="permissions" className="bg-card rounded-xl border border-border-faint p-6">
         <div className="flex items-center justify-between mb-4">
           <h2 className="text-lg font-medium">{t('Permissions')}</h2>
           <span className="text-xs px-2 py-1 rounded-full bg-green-500/20 text-green-500">
@@ -310,17 +342,7 @@ export function SystemSection({ config, setConfig }: SystemSectionProps) {
             <p className="font-medium">{t('Trust Mode')}</p>
             <p className="text-sm text-muted-foreground">{t('Automatically execute all operations')}</p>
           </div>
-          <label className="relative inline-flex items-center cursor-not-allowed">
-            <input
-              type="checkbox"
-              checked={true}
-              disabled
-              className="sr-only peer"
-            />
-            <div className="w-11 h-6 bg-primary rounded-full">
-              <div className="w-5 h-5 bg-white rounded-full shadow-md transform translate-x-5 mt-0.5" />
-            </div>
-          </label>
+          <Switch checked={true} onCheckedChange={() => {}} disabled={true} />
         </div>
       </section>
 
@@ -329,12 +351,39 @@ export function SystemSection({ config, setConfig }: SystemSectionProps) {
       <BrowserAllowlistCard />
 
       {/* System Section */}
-      <section id="system" className="bg-card rounded-xl border border-border p-6">
+      <section id="system" className="bg-card rounded-xl border border-border-faint p-6">
         <h2 className="text-lg font-medium mb-4">{t('System')}</h2>
+
+        <div className="border-b border-border pb-4 mb-4">
+          <div className="flex flex-col sm:flex-row sm:items-center gap-4">
+            <div className="flex-1 min-w-0">
+              <h3 className="font-medium">{t('Browser data')}</h3>
+              <p className="text-sm text-muted-foreground mt-1">
+                {t('Clear cookies, site storage and cache for all sites in the shared browser, including sites used by digital humans.')}
+              </p>
+            </div>
+            <button
+              type="button"
+              onClick={handleClearBrowserData}
+              disabled={clearingBrowserData}
+              className="w-full sm:w-auto shrink-0 px-4 py-2 text-sm rounded-lg border border-border text-destructive hover:bg-muted disabled:opacity-50 disabled:cursor-not-allowed"
+            >
+              {clearingBrowserData ? t('Clearing browser data...') : t('Clear browser data')}
+            </button>
+          </div>
+          {browserCleanupResult && (
+            <p role={browserCleanupResult === 'error' ? 'alert' : 'status'} className="mt-3 text-sm text-muted-foreground">
+              {browserCleanupResult === 'success'
+                ? t('Browser data cleared.')
+                : t('Could not clear all browser data. Please try again.')}
+            </p>
+          )}
+          {BrowserCleanupDialog}
+        </div>
 
         <div className="space-y-4">
           {/* Auto Launch */}
-          <div className="flex items-center justify-between">
+          <div className={`flex items-center justify-between py-1.5 ${switchRowHover}`}>
             <div className="flex-1">
               <div className="flex items-center gap-2">
                 <p className="font-medium">{t('Auto Launch on Startup')}</p>
@@ -349,46 +398,20 @@ export function SystemSection({ config, setConfig }: SystemSectionProps) {
                 {t('Automatically run Halo when system starts')}
               </p>
             </div>
-            <label className="relative inline-flex items-center cursor-pointer">
-              <input
-                type="checkbox"
-                checked={autoLaunch}
-                onChange={(e) => handleAutoLaunchChange(e.target.checked)}
-                className="sr-only peer"
-              />
-              <div className="w-11 h-6 bg-secondary rounded-full peer peer-checked:bg-primary transition-colors">
-                <div
-                  className={`w-5 h-5 bg-white rounded-full shadow-md transform transition-transform ${
-                    autoLaunch ? 'translate-x-5' : 'translate-x-0.5'
-                  } mt-0.5`}
-                />
-              </div>
-            </label>
+            <Switch checked={autoLaunch} onCheckedChange={handleAutoLaunchChange} />
           </div>
 
           {/* Task Complete Notification */}
-          <div className="flex items-center justify-between pt-4 border-t border-border">
-            <div className="flex-1">
-              <p className="font-medium">{t('Task Notifications')}</p>
-              <p className="text-sm text-muted-foreground">
-                {t('Notify when a task completes in the background')}
-              </p>
-            </div>
-            <label className="relative inline-flex items-center cursor-pointer">
-              <input
-                type="checkbox"
-                checked={taskCompleteNotify}
-                onChange={(e) => handleTaskNotifyChange(e.target.checked)}
-                className="sr-only peer"
-              />
-              <div className="w-11 h-6 bg-secondary rounded-full peer peer-checked:bg-primary transition-colors">
-                <div
-                  className={`w-5 h-5 bg-white rounded-full shadow-md transform transition-transform ${
-                    taskCompleteNotify ? 'translate-x-5' : 'translate-x-0.5'
-                  } mt-0.5`}
-                />
+          <div className="pt-4 border-t border-border">
+            <div className={`flex items-center justify-between py-1.5 ${switchRowHover}`}>
+              <div className="flex-1">
+                <p className="font-medium">{t('Task Notifications')}</p>
+                <p className="text-sm text-muted-foreground">
+                  {t('Notify when a task completes in the background')}
+                </p>
               </div>
-            </label>
+              <Switch checked={taskCompleteNotify} onCheckedChange={handleTaskNotifyChange} />
+            </div>
           </div>
 
           {/* Proxy */}
@@ -409,7 +432,7 @@ export function SystemSection({ config, setConfig }: SystemSectionProps) {
                 }}
                 onKeyDown={(e) => e.key === 'Enter' && handleProxySave()}
                 placeholder="http://127.0.0.1:1087"
-                className="flex-1 px-3 py-1.5 text-sm bg-secondary border border-border rounded-lg focus:outline-none focus:ring-2 focus:ring-primary/50 font-mono"
+                className="flex-1 px-3 py-1.5 text-sm bg-secondary border border-transparent rounded-lg focus:outline-none focus:border-primary/50 font-mono"
               />
               <button
                 onClick={handleProxySave}
@@ -430,20 +453,24 @@ export function SystemSection({ config, setConfig }: SystemSectionProps) {
               {t('Supports http://, https://')}
             </p>
 
+            <ProxyBypassField config={config} setConfig={setConfig} />
+
             {/* Browser proxy toggle — only visible when a proxy is configured */}
             {proxyInput.trim() && (
-              <div className="flex items-center justify-between mt-3 pt-3 border-t border-border/50">
-                <div className="flex-1 min-w-0 mr-3">
-                  <p className="text-sm font-medium">{t('Also apply to AI Browser')}</p>
-                  <p className="text-xs text-muted-foreground">
-                    {t('By default, AI Browser uses system proxy instead of the proxy above')}
-                  </p>
+              <div className="mt-3 pt-3 border-t border-border-faint">
+                <div className={`flex items-center justify-between py-1.5 ${switchRowHover}`}>
+                  <div className="flex-1 min-w-0 mr-3">
+                    <p className="text-sm font-medium">{t('Also apply to AI Browser')}</p>
+                    <p className="text-xs text-muted-foreground">
+                      {t('By default, AI Browser uses system proxy instead of the proxy above')}
+                    </p>
+                  </div>
+                  <Switch
+                    checked={browserUseProxy}
+                    onCheckedChange={handleBrowserUseProxyChange}
+                    size="sm"
+                  />
                 </div>
-                <Switch
-                  checked={browserUseProxy}
-                  onCheckedChange={handleBrowserUseProxyChange}
-                  size="sm"
-                />
               </div>
             )}
           </div>
@@ -466,7 +493,7 @@ export function SystemSection({ config, setConfig }: SystemSectionProps) {
                 }}
                 onKeyDown={(e) => e.key === 'Enter' && handleUserAgentSave()}
                 placeholder="Mozilla/5.0 (Windows NT 10.0; Win64; x64) ..."
-                className="flex-1 px-3 py-1.5 text-sm bg-secondary border border-border rounded-lg focus:outline-none focus:ring-2 focus:ring-primary/50 font-mono"
+                className="flex-1 px-3 py-1.5 text-sm bg-secondary border border-transparent rounded-lg focus:outline-none focus:border-primary/50 font-mono"
               />
               <button
                 onClick={handleUserAgentSave}
@@ -499,6 +526,23 @@ export function SystemSection({ config, setConfig }: SystemSectionProps) {
             <button
               onClick={() => api.openLogFolder()}
               className="flex items-center gap-2 px-3 py-1.5 text-sm bg-secondary hover:bg-secondary/80 rounded-lg transition-colors"
+            >
+              <FolderOpen className="w-4 h-4" />
+              {t('Open Folder')}
+            </button>
+          </div>
+
+          {/* Crash Reports */}
+          <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2 pt-4 border-t border-border">
+            <div className="flex-1">
+              <p className="font-medium">{t('Crash Reports')}</p>
+              <p className="text-sm text-muted-foreground">
+                {t('Crash reports stay on this computer. Open the folder to send them to support when asked.')}
+              </p>
+            </div>
+            <button
+              onClick={() => api.openCrashReportsFolder()}
+              className="flex items-center gap-2 self-end sm:self-auto px-3 py-1.5 text-sm bg-secondary hover:bg-secondary/80 rounded-lg transition-colors"
             >
               <FolderOpen className="w-4 h-4" />
               {t('Open Folder')}
@@ -596,7 +640,7 @@ export function SystemSection({ config, setConfig }: SystemSectionProps) {
                           <span>{healthReport.platform} ({healthReport.arch})</span>
                         </div>
                         <div className="flex justify-between">
-                          <span className="text-muted-foreground">{t('Memory')}</span>
+                          <span className="text-muted-foreground">{t('System Memory')}</span>
                           <span>{healthReport.system.memory.free} / {healthReport.system.memory.total}</span>
                         </div>
                         <div className="flex justify-between">
@@ -744,6 +788,9 @@ export function SystemSection({ config, setConfig }: SystemSectionProps) {
                               )}
                             </div>
                           </div>
+                          {healthCheckResult.services.childLocalConnection && (
+                            <ChildLocalConnectionRow check={healthCheckResult.services.childLocalConnection} />
+                          )}
                         </div>
                       </div>
                     )}

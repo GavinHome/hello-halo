@@ -12,18 +12,20 @@
  */
 
 import { useState, useRef, useEffect } from 'react'
-import { ChevronDown, Sparkles, Check, X } from 'lucide-react'
+import { ChevronDown, Brain, Check, X } from 'lucide-react'
 import { useAppStore } from '../../stores/app.store'
 import {
-  getCurrentSource,
+  resolveModelSelection,
   getCurrentModelName,
   AVAILABLE_MODELS,
   type AISourcesConfig,
   type AISource,
   type ModelOption,
+  type ResolvedModelSelection,
 } from '../../types'
 import { isAnthropicProvider } from '../../types'
 import { useTranslation } from '../../i18n'
+import { useFreshModelCatalogs } from '../../hooks/useFreshModelCatalogs'
 
 // ============================================
 // Types
@@ -66,28 +68,16 @@ function getSourceDisplayName(source: AISource, t: (s: string) => string): strin
   return t('Custom API')
 }
 
-/** Resolve the display label for the current selection */
+/** The label of what the app runs on: its own source and model, or the global selection. */
 function resolveSelectionLabel(
   aiSources: AISourcesConfig,
-  modelSourceId: string | undefined,
-  modelId: string | undefined,
+  selected: ResolvedModelSelection,
   t: (s: string) => string
 ): string {
-  if (!modelSourceId) {
-    // Follow global
-    const globalModelName = getCurrentModelName(aiSources)
-    return `${t('Follow global')} (${globalModelName})`
-  }
+  if (!selected.own) return `${t('Follow global')} (${getCurrentModelName(aiSources)})`
 
-  const source = aiSources.sources.find(s => s.id === modelSourceId)
-  if (!source) return t('Follow global')
-
-  const models = getModelsForSource(source)
-  const effectiveModelId = modelId || source.model
-  const model = models.find(m => m.id === effectiveModelId)
-  const modelName = model?.name || effectiveModelId
-
-  return `${getSourceDisplayName(source, t)} / ${modelName}`
+  const model = getModelsForSource(selected.source).find(m => m.id === selected.modelId)
+  return `${getSourceDisplayName(selected.source, t)} / ${model?.name || selected.modelId}`
 }
 
 // ============================================
@@ -105,11 +95,17 @@ export function AppModelSelector({
   const [isOpen, setIsOpen] = useState(false)
   const dropdownRef = useRef<HTMLDivElement>(null)
   const [expandedSection, setExpandedSection] = useState<string | null>(null)
+  useFreshModelCatalogs(isOpen)
 
   // Get aiSources config
   const aiSources: AISourcesConfig = config?.aiSources?.version === 2
     ? config.aiSources
     : { version: 2, currentId: null, sources: [] }
+  // What the app runs on. An override naming a removed account follows the
+  // global selection, as the main process resolves it.
+  const selected = resolveModelSelection(aiSources, { modelSourceId, modelId })
+  const hasOverride = selected.own
+  const overrideRemoved = !!modelSourceId && !selected.own
 
   // Close when clicking outside
   useEffect(() => {
@@ -144,12 +140,11 @@ export function AppModelSelector({
   // Auto-expand the currently selected source section when opening
   useEffect(() => {
     if (isOpen) {
-      setExpandedSection(modelSourceId || null)
+      setExpandedSection(selected.own ? selected.source.id : null)
     }
   }, [isOpen])
 
-  const selectionLabel = resolveSelectionLabel(aiSources, modelSourceId, modelId, t)
-  const hasOverride = !!modelSourceId
+  const selectionLabel = resolveSelectionLabel(aiSources, selected, t)
 
   const handleSelectGlobal = () => {
     onChange(undefined, undefined)
@@ -161,11 +156,6 @@ export function AppModelSelector({
     setIsOpen(false)
   }
 
-  const handleClearOverride = (e: React.MouseEvent) => {
-    e.stopPropagation()
-    onChange(undefined, undefined)
-  }
-
   if (!config || aiSources.sources.length === 0) {
     return null
   }
@@ -173,7 +163,7 @@ export function AppModelSelector({
   return (
     <div className="space-y-2">
       <div className="flex items-center gap-1.5">
-        <Sparkles className="w-3.5 h-3.5 text-muted-foreground" />
+        <Brain className="w-3.5 h-3.5 text-muted-foreground" />
         <span className="text-sm text-foreground">{t('Model')}</span>
       </div>
 
@@ -186,29 +176,34 @@ export function AppModelSelector({
 
       {/* Selector trigger */}
       <div className="relative" ref={dropdownRef}>
-        <button
-          type="button"
-          onClick={() => setIsOpen(!isOpen)}
-          className={`w-full flex items-center justify-between px-3 py-2 text-sm rounded-lg border transition-colors ${
+        <div
+          className={`w-full flex items-center text-sm rounded-lg border transition-colors ${
             hasOverride
               ? 'bg-primary/5 border-primary/30 text-foreground'
               : 'bg-secondary border-border text-muted-foreground'
           } hover:border-primary/50`}
         >
-          <span className="truncate">{selectionLabel}</span>
-          <div className="flex items-center gap-1 flex-shrink-0 ml-2">
-            {hasOverride && (
-              <button
-                onClick={handleClearOverride}
-                className="p-0.5 hover:bg-secondary rounded transition-colors"
-                title={t('Reset to global')}
-              >
-                <X className="w-3 h-3" />
-              </button>
-            )}
-            <ChevronDown className={`w-3.5 h-3.5 transition-transform ${isOpen ? 'rotate-180' : ''}`} />
-          </div>
-        </button>
+          <button
+            type="button"
+            onClick={() => setIsOpen(!isOpen)}
+            aria-expanded={isOpen}
+            className="flex min-w-0 flex-1 items-center justify-between gap-2 px-3 py-2 text-left"
+          >
+            <span className="truncate">{selectionLabel}</span>
+            <ChevronDown className={`w-3.5 h-3.5 shrink-0 transition-transform ${isOpen ? 'rotate-180' : ''}`} />
+          </button>
+          {hasOverride && (
+            <button
+              type="button"
+              onClick={handleSelectGlobal}
+              className="mr-2 shrink-0 p-1.5 hover:bg-secondary rounded transition-colors"
+              title={t('Reset to global')}
+              aria-label={t('Reset to global')}
+            >
+              <X className="w-3 h-3" />
+            </button>
+          )}
+        </div>
 
         {/* Dropdown */}
         {isOpen && (
@@ -229,38 +224,40 @@ export function AppModelSelector({
               </div>
             </button>
 
-            <div className="border-t border-border/50 my-0.5" />
+            <div className="border-t border-border-faint my-0.5" />
 
             {/* Per-source model lists */}
             {aiSources.sources.map(source => {
               const isExpanded = expandedSection === source.id
-              const isSelectedSource = modelSourceId === source.id
+              const isSelectedSource = hasOverride && selected.source?.id === source.id
               const models = getModelsForSource(source)
               const displayName = getSourceDisplayName(source, t)
 
               return (
                 <div key={source.id}>
-                  <div
-                    className={`px-3 py-2 text-xs font-medium flex items-center justify-between cursor-pointer hover:bg-secondary/50 transition-colors ${
+                  <button
+                    type="button"
+                    className={`w-full px-3 py-2 text-left text-xs font-medium flex items-center justify-between hover:bg-secondary/50 transition-colors ${
                       isSelectedSource ? 'text-primary' : 'text-muted-foreground'
                     }`}
+                    aria-expanded={isExpanded}
                     onClick={() => setExpandedSection(prev => prev === source.id ? null : source.id)}
                   >
                     <div className="flex items-center gap-2">
-                      <ChevronDown className={`w-3 h-3 transition-transform ${isExpanded ? 'rotate-180' : ''}`} />
+                      <ChevronDown className={`w-3 h-3 transition-transform ${isExpanded ? '' : '-rotate-90'}`} />
                       <span>{displayName}</span>
                     </div>
                     {isSelectedSource && (
                       <span className="w-2 h-2 rounded-full bg-primary flex-shrink-0" />
                     )}
-                  </div>
+                  </button>
 
                   {isExpanded && (
                     <div className="bg-secondary/10 pb-1">
                       {models.map(model => {
                         const mid = typeof model === 'string' ? model : model.id
                         const mname = typeof model === 'string' ? model : (model.name || model.id)
-                        const isSelected = isSelectedSource && (modelId || source.model) === mid
+                        const isSelected = isSelectedSource && selected.modelId === mid
 
                         return (
                           <button
@@ -278,7 +275,7 @@ export function AppModelSelector({
                     </div>
                   )}
 
-                  <div className="border-t border-border/50" />
+                  <div className="border-t border-border-faint" />
                 </div>
               )
             })}
@@ -288,9 +285,11 @@ export function AppModelSelector({
 
       {/* Description text */}
       <p className="text-xs text-muted-foreground">
-        {hasOverride
-          ? t('This app uses a dedicated model, independent of the global selection')
-          : t('Uses the globally selected model. Change in the header model selector.')}
+        {overrideRemoved
+          ? t('The account it was set to use was removed, so it follows the global selection.')
+          : hasOverride
+            ? t('This app uses a dedicated model, independent of the global selection')
+            : t('Uses the globally selected model. Change in the header model selector.')}
       </p>
     </div>
   )

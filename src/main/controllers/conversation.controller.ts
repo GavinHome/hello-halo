@@ -7,6 +7,7 @@ import {
   listConversations as serviceListConversations,
   createConversation as serviceCreateConversation,
   getConversation as serviceGetConversation,
+  getConversationFrom as serviceGetConversationFrom,
   updateConversation as serviceUpdateConversation,
   deleteConversation as serviceDeleteConversation,
   addMessage as serviceAddMessage,
@@ -15,6 +16,7 @@ import {
   toggleStarConversation as serviceToggleStarConversation
 } from '../services/conversation.service'
 import { closeV2Session } from '../services/agent'
+import { getTaskStateService } from '../platform/task-state'
 
 export interface ControllerResponse<T = unknown> {
   success: boolean
@@ -38,9 +40,14 @@ export function listConversations(spaceId: string): ControllerResponse {
 /**
  * Create a new conversation
  */
-export function createConversation(spaceId: string, title?: string): ControllerResponse {
+export function createConversation(
+  spaceId: string,
+  title?: string,
+  reasoningEffort?: unknown,
+  options?: { ephemeral?: boolean }
+): ControllerResponse {
   try {
-    const conversation = serviceCreateConversation(spaceId, title)
+    const conversation = serviceCreateConversation(spaceId, title, reasoningEffort, { ephemeral: options?.ephemeral === true })
     return { success: true, data: conversation }
   } catch (error: unknown) {
     const err = error as Error
@@ -51,9 +58,11 @@ export function createConversation(spaceId: string, title?: string): ControllerR
 /**
  * Get a specific conversation
  */
-export function getConversation(spaceId: string, conversationId: string): ControllerResponse {
+export function getConversation(spaceId: string, conversationId: string, fromMessageId?: string): ControllerResponse {
   try {
-    const conversation = serviceGetConversation(spaceId, conversationId)
+    const conversation = fromMessageId
+      ? serviceGetConversationFrom(spaceId, conversationId, fromMessageId)
+      : serviceGetConversation(spaceId, conversationId)
     if (conversation) {
       return { success: true, data: conversation }
     }
@@ -93,6 +102,7 @@ export function deleteConversation(spaceId: string, conversationId: string): Con
     // with the record instead of lingering until the 30-min idle sweep.
     closeV2Session(conversationId)
     const result = serviceDeleteConversation(spaceId, conversationId)
+    getTaskStateService()?.remove(conversationId)
     return { success: result }
   } catch (error: unknown) {
     const err = error as Error

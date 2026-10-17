@@ -34,78 +34,152 @@ import { getAppManager } from '../manager'
 import { analytics } from '../../services/analytics/analytics.service'
 import { AnalyticsEvents } from '../../services/analytics/types'
 import { resolvePermission } from '../../../shared/apps/app-types'
-import type { MemoryCallerScope } from '../../platform/memory'
+import { getTaskStateService } from '../../platform/task-state'
+import { resolveMemoryLayout, type MemoryCallerScope, type TopicsTree } from '../../platform/memory'
 import { getConfig } from '../../foundation/config.service'
 import {
-  getApiCredentials,
-  getApiCredentialsForSource,
+  getApiCredentialsForSelection,
   getWorkingDir,
   getHeadlessElectronPath,
   getDbMcpServers
 } from '../../services/agent/helpers'
 import { emitAgentEvent } from '../../services/agent/events'
-import { resolveCredentialsForSdk, buildBaseSdkOptions } from '../../services/agent/sdk-config'
-import { applyReasoningEffort } from '../../services/agent/reasoning-effort'
+import { resolveCredentialsForSdk, buildUserSessionSdkOptions, addSdkHooks } from '../../services/agent/sdk-config'
+import { toEngineSystemPrompt } from '../../services/agent/system-prompt'
+import { getEngineCapabilities } from '../../services/agent/resolved-sdk'
+import { applyReasoningEffort, pickReasoningEffort } from '../../services/agent/reasoning-effort'
+import type { ReasoningEffortLevel } from '../../../shared/constants/reasoning-effort'
 import { createCanUseTool } from '../../services/agent/permission-handler'
-import { getImPermissionContext } from './im-permission-registry'
-import type { GuestPolicy } from '../../../shared/types/im-channel'
-import { createAIBrowserMcpServer, createScopedBrowserContext } from '../../services/ai-browser'
+import { getImPermissionContext, type ImPermissionContext } from './im-permission-registry'
+import { currentGuestPolicy } from './im-sender-standing'
+import { createAIBrowserMcpServer } from '../../services/ai-browser'
 import { createTerminalMcpServer, getGlobalTerminalContext, isTerminalAvailable } from '../../services/ai-terminal'
-import type { BrowserContext } from '../../services/ai-browser/context'
-import { buildMessageContent } from '../../services/agent/message-utils'
+import { acquireChatBrowserContext, bindChatBrowserSession, endChatBrowserTurn, destroyChatBrowserContext } from './app-chat-browser'
+import { buildMessageContent, formatCanvasContext } from '../../services/agent/message-utils'
+import { acquireV2Session, formatTurnAttachments, workingDirErrorDetail, hasPendingSessionInput, hasLiveTurn, markMcpServerSettings, type V2SessionLease } from '../../services/agent'
+import type { CanvasContext } from '../../services/agent/types'
+import type { ContentReference } from '../../../shared/types/content-reference'
+import { messageSummaryText } from '../../../shared/content-reference'
 import { prepareNonVisionImageFallback } from '../../services/agent/image-attachments'
 import {
-  getOrCreateV2Session,
   closeV2Session,
   getConsumerHandle,
   getRunningConsumerIds,
-  markTurnDispatched,
   updateConsumerDisplayModel,
   v2Sessions
 } from '../../services/agent/session-manager'
-import { stopGeneration, getSessionState } from '../../services/agent/control'
+import { stopGeneration, getSessionState, type StopReason } from '../../services/agent/control'
 import {
   getAppChatSink,
-  hasActiveAppChatRound,
+  peekAppChatSink,
   getConversationsWithActiveRound,
   disposeAppChatSink,
   type AppChatRoundHandle,
 } from './app-chat-sink'
+import type { AppChatTurnEnding } from './turn-ending'
+import {
+  beginAppChatTurnStart,
+  cancelAppChatTurnStarts,
+  isAppChatConversationGenerating,
+  isAppChatTurnDispatched,
+  onAppChatConversationChange,
+  appChatMessageIdentity,
+  getAppChatTurnIdentity,
+  keepStoppedInputs,
+  type AppChatTurnStart,
+} from './app-chat-live-turn'
+// Re-exported, not defined here: the team runtime needs the same answer
+// synchronously and cannot import this module (app-chat imports the team
+// runtime accessor, so the edge back would close a cycle).
+export { isAppChatConversationGenerating, onAppChatConversationChange }
 import { assembleAppChatPrompt } from './prompt/assembler'
 import { buildIdentityFragments } from './prompt/identity'
 import { buildDisabledCapabilitiesGuidance, buildUnconfiguredCapabilitiesGuidance } from './prompt/capabilities'
 import { NATIVE_CHAT_ENTRY } from './prompt/entry-native'
 import { buildImEntry, buildImConstraints, type ImSessionContext } from './im-channels/im-prompt'
+import { buildRestrictionNotice, buildTeamEntry, buildTeamConstraints, buildTeamImBridge } from './team/team-prompt'
+import { getActiveTeamRuntime } from './team'
+import { consumeIntentionalStop } from './intentional-stop'
+import { createTeamMcpServer } from './team/team-tools'
+import { TEAM_MCP_SERVER_NAME } from '../../../shared/apps/team-types'
+import {
+  applyCapabilityPolicy,
+  describeAppliedPolicy,
+  describeWithheld,
+  isBorrowedTeamTurn,
+} from './capability-policy'
+import {
+  beginDelegatedTurn,
+  clearDelegation,
+  createDelegationAuditHooks,
+  createSkillGateHooks,
+  createTurnFileAccessHooks,
+  decideDelegatedTool,
+  turnFileExportRefusal,
+} from './delegation-gate'
+import { grantedSkillFolders, inertCommandText, turnSkillAccess, type TurnSkillAccess } from './turn-skills'
+import { listLoadableSkillCopies } from '../skill-discovery'
+import { allowsBuiltin, colleagueReach, intersectPolicies, SKILL_TOOL } from '../../../shared/apps/capability-policy'
+import type { CapabilityMode, CapabilityPolicy } from '../../../shared/apps/capability-policy'
+import type { TeamRequestOrigin, TeamTriggerContext } from '../../../shared/apps/team-types'
+import type { AvailableSkill } from '../../../shared/apps/app-types'
 import { createFileSendMcpServer } from './im-channels/file-send-mcp'
 import { mergeConfigWithDefaults } from './config-defaults'
 import { tmpdir as osTmpdir } from 'os'
 import { createNotifyToolServer } from './notify-tool'
+import { createRemindersMcpServer } from './reminders/tool'
 import { buildQuoteFromMessage } from './pending-relays'
 import { resolveNotifyAvailability } from './notify-availability'
 import { FileExportGate } from './file-export-gate'
 import { truncateUtf16Safe } from './text-truncate'
 import { getImSessionRegistry } from './im-session-registry'
-import { createHaloAppsMcpServer } from '../conversation-mcp'
-import { createOfficialDocsSession } from '../../services/official-docs-mcp'
-import { createWebSearchMcpServer } from '../../services/web-search'
+import { getActiveImChannelManager } from './im-channels'
+import {
+  collectAppConversationIds,
+  describeSelfInstance,
+  formatInstanceTag,
+  hasOtherAppExecution,
+} from './live-instances'
+import { buildBaseToolset } from '../../services/agent/toolsets/base'
 import { createOcrMcpServer } from '../../services/ocr'
 import { createApiRefMcpServer, HALO_API_TOOLSET_ID } from '../../services/api-ref'
 import { createEmailMcpServer } from '../../services/email-mcp'
-import { getSpace, getSpaceDir } from '../../services/space.service'
-import { readSessionMessages, loadChatSessionId, deleteChatSessionId, copySessionJsonl } from './session-store'
-import { getAppMemoryService } from './index'
-import { createMemoryStatusMcpServer } from '../../platform/memory/snapshot'
+import { createConversationCollabMcpServer, resolveConversationCollab } from './conversation-collab'
+import { getSpace, getSpaceDir, isSpaceMemoryEnabled } from '../../services/space.service'
+import { readSessionMessages, readSessionTranscript, readSessionMessageThoughts, saveChatSessionId, loadChatSessionId, deleteChatSessionId, copySessionJsonl } from './session-store'
+import type { Thought, TranscriptMessage, TranscriptPage, TranscriptPageRequest, TranscriptProvenance } from '../../../shared/types/transcript'
+import { getAppMemoryService, getActivityStore } from './index'
+import { resolveExecutionEnvironment, validateExecutionEnvironment, legacySessionEnvironmentKey, resolveChatEnvironment, appChatRunId, validateEnvironmentConnections } from './execution-environment'
+import { createPersonContextMcpServer, personContextPrompt } from './person-context-tool'
+import type { PersonContextCaller } from '../../../shared/apps/person-context'
+import {
+  prepareMemoryForTurn,
+  requestAppMemoryConsolidation,
+  memoryPromptOptions,
+  loadSpaceTopicsForTurn,
+  appMemoryGuard,
+  appMemorySettings,
+  appTurnFileAccess,
+} from './turn/memory-lifecycle'
+import { closedFolderDenyRules, FILE_TOOLS } from './turn-file-access'
+import { chatRecordPath } from './chat-record'
+import { buildMemorySection } from './prompt'
+import { createReportToolServer, type ReportToolContext } from './report-tool'
 // Key builders live in shared/ so the renderer can import them without
 // depending on main-process modules.
-import { getAppChatConversationId, buildImSessionKey, buildLocalSessionKey, parseAppChatKey } from '../../../shared/apps/im-keys'
-import { classifySessionSource, LOCAL_SESSION_CHANNEL } from '../../../shared/types/im-channel'
+import { getAppChatConversationId, buildImSessionKey, buildTeamSessionKey, parseTeamSessionKey, buildLocalSessionKey, parseAppChatKey, parseNativeChatKey, parseTeamChatKey } from '../../../shared/apps/im-keys'
+import { classifySessionSource, LOCAL_SESSION_CHANNEL, NATIVE_SESSION_CHANNEL, NATIVE_DEFAULT_CHAT_ID } from '../../../shared/types/im-channel'
 import type { ImSessionRecord } from '../../../shared/types/im-channel'
 import { sendToRenderer } from '../../foundation/window.service'
 import { broadcastToAll } from '../../http/websocket'
 import type { ProgressEvent } from '../../../shared/types/inbound-message'
-import type { ImageAttachment } from '../../services/agent/types'
-import { flushSupplementBuffer, clearSupplementBuffer } from './dispatch-inbound'
+import type { ImageAttachment } from '../../../shared/types/image-attachment'
+import { ProgressEventParser } from './progress-formatter'
+import { ReplyTextAccumulator } from './reply-accumulator'
+import { holdSupplementsAfterStop } from './dispatch-inbound'
+import { holdConversationAfterStop } from '../../services/conversation-interop'
 import { getImStreamHandle, clearImStreamHandle } from './im-stream-registry'
+import { createAppChatDelivery, isPersonRequest } from './app-chat-delivery'
 export { getAppChatConversationId, buildImSessionKey }
 
 // ============================================
@@ -113,111 +187,33 @@ export { getAppChatConversationId, buildImSessionKey }
 // ============================================
 
 /**
- * Complete list of SDK built-in tools (from SDK init event).
- *
- * Used to compute the guest disallowed list: ALL minus guest's whitelist = blacklist.
- * Must be kept in sync when upgrading the Claude Code SDK — if a new built-in tool
- * is added and not listed here, guests would have access to it by default.
- *
- * NOTE: SDK `tools` option (API-level whitelist) was tested and confirmed non-functional —
- * the SDK ignores it entirely. `disallowedTools` is the only working mechanism.
+ * The team's own coordination tools are the channel this turn arrives on, not a
+ * capability the owner lends out: withholding them would not restrict a teammate,
+ * it would cut the digital human off from the conversation it was woken for.
  */
-const ALL_BUILTIN_TOOLS = [
-  'AskUserQuestion',
-  'Bash',
-  'CronCreate',
-  'CronDelete',
-  'CronList',
-  'Edit',
-  'EnterPlanMode',
-  'EnterWorktree',
-  'ExitPlanMode',
-  'ExitWorktree',
-  'Glob',
-  'Grep',
-  'NotebookEdit',
-  'Read',
-  'Skill',
-  'Task',
-  'TaskOutput',
-  'TaskStop',
-  'TodoWrite',
-  'WebFetch',
-  'WebSearch',
-  'Write',
-]
+const TEAM_CHANNEL_MCP: ReadonlySet<string> = new Set([TEAM_MCP_SERVER_NAME, 'halo-report', 'halo-person-context'])
+
+/** Session creation context of a session whose hooks record its tool calls (delegation-gate). */
+const RECORDED_SESSION = 'delegation-audit'
 
 /**
- * Halo MCP servers that are always safe for guests (read-only, no side effects,
- * no local-filesystem reach). These are injected into guest sessions regardless
- * of GuestPolicy. OCR is deliberately NOT here: it reads arbitrary local file
- * paths, so it is host-controlled via GUEST_TOGGLEABLE_MCP below.
+ * The guest settings of the IM chat a team conversation serves, read the way
+ * the chat's own front desk reads them — undefined when the chat is not one of
+ * this machine's, no longer answered by this team, or has no guest access.
  */
-const GUEST_SAFE_MCP = new Set(['web-search', 'halo-memory'])
-
-/**
- * Halo MCP servers controlled by GuestPolicy toggle switches.
- * Maps MCP server name → GuestPolicy boolean field name.
- * If the toggle is not set (undefined/false), the MCP is not injected for guests.
- */
-const GUEST_TOGGLEABLE_MCP: Record<string, keyof GuestPolicy> = {
-  'ai-browser':   'allowAiBrowser',
-  'halo-email':   'allowEmail',
-  'halo-notify':  'allowNotify',
-  'halo-apps':    'allowApps',
-  'im-file-send': 'allowFileSend',
-  'ocr':          'allowOcr',
+function teamChatGuestPolicy(teamId: string, chatKey: string | null | undefined): CapabilityPolicy | undefined {
+  const chat = chatKey ? parseTeamChatKey(chatKey) : null
+  const channel = chat ? getActiveImChannelManager()?.getInstanceConfig(chat.instanceId) : undefined
+  return channel?.teamId === teamId ? currentGuestPolicy(channel) : undefined
 }
 
 /**
- * Build a filtered MCP servers map for guest sessions.
- *
- * Three-tier filtering:
- *   1. User-installed MCPs (from db) → only if listed in allowedUserMcp whitelist
- *   2. Halo safe MCPs → always injected (web-search, halo-memory)
- *   3. Halo toggleable MCPs → injected only if corresponding GuestPolicy flag is true
- *   4. Unknown MCPs (future additions) → NOT injected (conservative strategy)
- *
- * @param allMcpServers - Complete MCP servers map (already built for owner session)
- * @param dbMcpServers - User-installed MCP servers from database (null if none)
- * @param policy - Guest policy from channel instance config
+ * Whom each conversation's latest turn answers to, for its tools: a session's
+ * tool servers are made when it is created and serve every later turn, so they
+ * ask here instead of keeping the first turn's sender — or reading the chat's
+ * last sender, which another message may have replaced meanwhile.
  */
-export function buildGuestMcpServers(
-  allMcpServers: Record<string, any>,
-  dbMcpServers: Record<string, unknown> | null,
-  policy?: GuestPolicy
-): Record<string, any> {
-  const result: Record<string, any> = {}
-
-  for (const [name, server] of Object.entries(allMcpServers)) {
-    // User-installed MCP → whitelist control
-    if (dbMcpServers && name in dbMcpServers) {
-      if (policy?.allowedUserMcp?.includes(name)) {
-        result[name] = server
-      }
-      continue
-    }
-
-    // Halo safe MCP → always inject
-    if (GUEST_SAFE_MCP.has(name)) {
-      result[name] = server
-      continue
-    }
-
-    // Halo toggleable MCP → check policy switch
-    const toggleKey = GUEST_TOGGLEABLE_MCP[name]
-    if (toggleKey) {
-      if (policy?.[toggleKey]) {
-        result[name] = server
-      }
-      continue
-    }
-
-    // Unknown MCP (future additions) → NOT injected (conservative)
-  }
-
-  return result
-}
+const turnSenders = new Map<string, ImPermissionContext | undefined>()
 
 // ============================================
 // Types
@@ -233,8 +229,26 @@ export interface AppChatRequest {
   message: string
   /** Optional image attachments for multimodal input */
   images?: ImageAttachment[]
+  /**
+   * Local files the sender attached (IM media staged on disk). A restricted
+   * turn may read these even where its file access is otherwise narrowed.
+   */
+  attachedFiles?: string[]
   /** Enable extended thinking mode */
   thinkingEnabled?: boolean
+  /**
+   * Depth picked for this send; overrides thinkingEnabled and the model config,
+   * but not the digital human's own level, which applies to every turn.
+   */
+  reasoningEffort?: ReasoningEffortLevel
+  /** What the user has open in the canvas, so the agent can refer to it naturally. */
+  canvasContext?: CanvasContext
+  /**
+   * Places the user pointed at, in the order they added them; already checked at the
+   * transport boundary. Built-in tasks are not taken here: only space chat
+   * starts them (services/code-review).
+   */
+  references?: ContentReference[]
   /**
    * Optional callback invoked with each progress event during AI execution.
    * Used by IM channel adapters for real-time streaming progress to the IM channel.
@@ -242,12 +256,22 @@ export interface AppChatRequest {
    * Errors in this callback are caught and logged — they must not interrupt execution.
    */
   onProgress?: (event: ProgressEvent) => void
+  /** Releases this dispatch's mailbox reservation when its acquired engine retires. */
+  onSessionRetired?: () => void
   /**
    * Optional callback invoked with the AI's final response text.
    * Used by external bridges (e.g., WeCom Bot) to auto-reply
-   * the result back to the originating chat.
+   * the result back to the originating chat. `ending` says the turn stopped
+   * short (the step limit, or cut off); `finalContent` is then what was
+   * written, possibly nothing.
    */
-  onReply?: (finalContent: string) => void
+  onReply?: (finalContent: string, ending?: AppChatTurnEnding) => void
+  /**
+   * The final response text for a caller that needs the answer but delivers it
+   * nowhere. Unlike `onReply`, it fires even when this message joined a turn
+   * whose reply another caller delivers.
+   */
+  onResult?: (finalContent: string, ending?: AppChatTurnEnding) => void
   /**
    * Optional override for the conversation/session ID.
    * When provided, this is used instead of the default "app-chat:{appId}".
@@ -278,6 +302,22 @@ export interface AppChatRequest {
    */
   imSession?: ImSessionContext
   /**
+   * The IM sender's standing for this message, resolved by whoever received it
+   * and carried with it — never looked up later, when a message that arrived in
+   * between may have replaced the chat's last sender. Absent for a turn with no
+   * sender of its own (a team-fronted chat woken by a teammate), which takes the
+   * chat's last sender as the turn begins.
+   */
+  imPermission?: ImPermissionContext
+  /** Callers MUST set conversationId = buildTeamSessionKey(appId, teamId). */
+  teamContext?: TeamTriggerContext
+  /**
+   * The conversation's hold, taken by a caller that decided this turn before it
+   * had to wait for something (a team wake queued for a concurrency slot) — so
+   * the conversation read busy through that wait. Adopted as the turn's own.
+   */
+  turnStart?: AppChatTurnStart
+  /**
    * Origin facts recorded against any notify_bot push this run makes, so the
    * target session can later attribute the push and report an outcome back.
    *
@@ -297,6 +337,32 @@ export interface AppChatRequest {
    * before reaching the engine.
    */
   onMessageAccepted?: () => void
+  /** The human-readable message, without instructions appended only for the model. */
+  recorded?: { content: string; provenance?: TranscriptProvenance }
+  /** Original messages retained separately when one engine input combines deliveries. */
+  recordedMessages?: Array<{
+    content: string
+    images?: ImageAttachment[]
+    provenance?: TranscriptProvenance
+    references?: ContentReference[]
+    teamOrigin?: Pick<TeamTriggerContext, 'kind' | 'correlationId'>
+  }>
+  /** Taken back after a person's stop and delivered again: its record already stands where it first arrived. */
+  inputRecorded?: boolean
+  /**
+   * A person's stop held this message back before the engine got it; its sender
+   * decides what becomes of it. `records` are the transcript records written for
+   * it so far (none when it was stopped before they were written), in the order
+   * `recordedMessages` lists them. Without it, a person's own words stay in the
+   * record marked as never handled.
+   */
+  onHeldBack?: (records: readonly TranscriptMessage[]) => void
+  /** Repeating runtime notices replace older pending notices with the same key. */
+  coalescingKey?: string
+  /** Revalidate runtime-authored work immediately before delivery. */
+  canStart?: () => boolean
+  /** Resolve current destination and authority when a deferred runtime notice is actually delivered. */
+  refreshBeforeDelivery?: () => AppChatRequest | undefined
 }
 
 // ============================================
@@ -313,62 +379,109 @@ const CHAT_RUN_ID = 'chat'
  * - Halo native ("app-chat:{appId}") → "chat"
  * - IM channel ("app-chat:{appId}:wecom-bot:group:xxx") → "chat-wecom-bot-group-xxx"
  */
-function deriveRunId(conversationId: string, appId: string): string {
-  const defaultPrefix = `app-chat:${appId}`
-  if (conversationId === defaultPrefix) {
-    return CHAT_RUN_ID
-  }
-  // Strip "app-chat:{appId}:" prefix, replace colons with dashes
-  const suffix = conversationId.slice(defaultPrefix.length + 1)
-  return `chat-${suffix.replace(/:/g, '-')}`
+export function deriveRunId(conversationId: string, appId: string): string {
+  return appChatRunId(conversationId, appId)
+}
+
+/** Registry coordinates (channel/chatId/chatType) a conversationId maps to. */
+interface SessionRegistryTarget {
+  channel: string
+  chatId: string
+  chatType: 'direct' | 'group'
 }
 
 /**
- * Scoped browser contexts for app chat sessions.
- * Each app chat gets its own context so activeViewId is isolated
- * from the user's browser and other concurrent sessions.
- * Cleaned up when the V2 session is closed (on error) or explicitly.
+ * Resolve the registry coordinates for a conversationId, including the native
+ * default session (the 2-segment "app-chat:{appId}" key that
+ * {@link parseAppChatKey} deliberately returns null for). Returns null for
+ * keys that don't belong to this app at all.
  */
-const scopedContexts = new Map<string, BrowserContext>()
+function resolveSessionRegistryTarget(conversationId: string, appId: string): SessionRegistryTarget | null {
+  if (conversationId === getAppChatConversationId(appId)) {
+    return { channel: NATIVE_SESSION_CHANNEL, chatId: NATIVE_DEFAULT_CHAT_ID, chatType: 'direct' }
+  }
+  const parsed = parseAppChatKey(conversationId)
+  if (!parsed || parsed.appId !== appId) return null
+  return { channel: parsed.channel, chatId: parsed.chatId, chatType: parsed.chatType }
+}
 
 /**
- * Register an external (HTTP) app-chat session so it shows in the conversation
- * list and is readable via the same HTTP path as IM sessions.
- *
- * IM sessions are skipped: dispatch-inbound already registers them with a live
- * instanceId, and re-registering here with an empty instanceId would clobber
- * that binding and break IM push. Native chat keys parse to null and are ignored.
+ * Notify desktop + remote clients that a session's registry summary changed,
+ * so any conversation-list UI subscribed to `app:im-session-updated` refreshes
+ * in real time instead of waiting for its fallback poll.
  */
-function registerExternalChatSession(
-  conversationId: string,
+function emitSessionUpdated(
   appId: string,
-  opts?: { displayName?: string; lastSender?: string; lastMessage?: string }
+  target: SessionRegistryTarget,
+  opts?: { lastMessage?: string; lastSender?: string }
 ): void {
-  const parsed = parseAppChatKey(conversationId)
-  if (!parsed || parsed.appId !== appId) return
-  if (classifySessionSource(parsed.channel) === 'im') return
-
-  const registry = getImSessionRegistry()
-  if (!registry) return
-
-  registry.register(appId, parsed.channel, parsed.chatId, parsed.chatType, '', {
-    displayName: opts?.displayName,
-    lastSender: opts?.lastSender,
-    lastMessage: opts?.lastMessage,
-  })
-
-  // Notify desktop + remote clients so the session panel refreshes in real time.
   const sessionEvent = {
     appId,
-    channel: parsed.channel,
-    chatId: parsed.chatId,
-    chatType: parsed.chatType,
+    channel: target.channel,
+    chatId: target.chatId,
+    chatType: target.chatType,
     instanceId: '',
     lastMessage: opts?.lastMessage !== undefined ? truncateUtf16Safe(opts.lastMessage, 50) : undefined,
     lastSender: opts?.lastSender,
   }
   sendToRenderer('app:im-session-updated', sessionEvent)
   broadcastToAll('app:im-session-updated', sessionEvent)
+}
+
+/**
+ * The `## Memory` block a session opens with — the same block an automation run
+ * gets, because it is the same digital human with the same memory whether it is
+ * working alone, talking to its owner, or working inside a team. No `# History`
+ * heading is pre-inserted: a session spans many turns, and the heading marks a
+ * unit of work, not a turn (see MemoryPrepareOptions).
+ *
+ * Best-effort — a memory read fault must cost the turn its context, not the turn.
+ */
+async function buildSessionMemoryPreamble(
+  scope: MemoryCallerScope,
+  appId: string,
+  spaceTopics: TopicsTree | null
+): Promise<string> {
+  try {
+    const { snapshot } = await prepareMemoryForTurn(scope, { preInsertHistory: false })
+    return `${buildMemorySection(snapshot, spaceTopics)}\n\n`
+  } catch (err) {
+    console.error(`[AppChat][${appId}] Memory snapshot failed, continuing without it:`, err)
+    return ''
+  }
+}
+
+/**
+ * Register or refresh an app-chat session's registry record so it carries a
+ * message-activity summary (lastMessage/lastActiveAt/messageCount) for the
+ * conversation list, without the caller loading the full JSONL transcript.
+ *
+ * IM sessions are skipped: dispatch-inbound already registers them with a live
+ * instanceId, and re-registering here with an empty instanceId would clobber
+ * that binding and break IM push. The native default session is registered
+ * under a synthetic {@link NATIVE_SESSION_CHANNEL} coordinate (see
+ * {@link resolveSessionRegistryTarget}) purely for this summary — it has no
+ * channel adapter and is never pushable.
+ */
+function registerExternalChatSession(
+  conversationId: string,
+  appId: string,
+  opts?: { displayName?: string; lastSender?: string; lastMessage?: string }
+): void {
+  const target = resolveSessionRegistryTarget(conversationId, appId)
+  if (!target) return
+  if (classifySessionSource(target.channel) === 'im') return
+
+  const registry = getImSessionRegistry()
+  if (!registry) return
+
+  registry.register(appId, target.channel, target.chatId, target.chatType, '', {
+    displayName: opts?.displayName,
+    lastSender: opts?.lastSender,
+    lastMessage: opts?.lastMessage,
+  })
+
+  emitSessionUpdated(appId, target, { lastMessage: opts?.lastMessage, lastSender: opts?.lastSender })
 }
 
 // ============================================
@@ -378,6 +491,80 @@ function registerExternalChatSession(
 /**
  * Send a chat message to an automation App's AI agent.
  *
+ * Setup failures (the app is gone, services not up, credentials unusable) happen
+ * before the turn exists to report them, and every transport that calls this does
+ * so fire-and-forget — so they are reported on the same error channel a failed
+ * turn uses, then rethrown for the caller's own logging. Without it, sending to a
+ * digital human that no longer exists looks exactly like sending to one that does.
+ */
+interface ChatTurnContext {
+  browserHeld: boolean
+  failureHandled: boolean
+  /** This message's hold on the conversation until its round is queued. */
+  start: AppChatTurnStart
+  /** A person's stop held the message back and its sender was told; no turn of it ran. */
+  heldBack?: boolean
+}
+
+let chatDelivery: ReturnType<typeof createAppChatDelivery> | undefined
+
+export function disposeAppChatDelivery(): void {
+  chatDelivery?.dispose()
+  chatDelivery = undefined
+}
+
+export function sendAppChatMessage(request: AppChatRequest): Promise<void> {
+  if (request.turnStart) return startAppChatMessage(request)
+  chatDelivery ??= createAppChatDelivery(startAppChatMessage)
+  return chatDelivery.send(request)
+}
+
+async function startAppChatMessage(request: AppChatRequest): Promise<void> {
+  const conversationId = request.conversationId ?? getAppChatConversationId(request.appId)
+  // Taken before the first await, unless the caller already holds it: from
+  // here the conversation reads busy.
+  const turnContext: ChatTurnContext = {
+    browserHeld: false,
+    failureHandled: false,
+    start: request.turnStart ?? beginAppChatTurnStart(conversationId),
+  }
+  try {
+    await runAppChatTurn(request, turnContext)
+  } catch (error: unknown) {
+    // A failure while the turn was still being set up leaves the browser turn
+    // it took; returned, it no longer protects the context from reaping.
+    if (turnContext.browserHeld) {
+      turnContext.browserHeld = false
+      endChatBrowserTurn(conversationId)
+    }
+    const message = error instanceof Error ? error.message : String(error)
+    if (turnContext.start.cancelled && !turnContext.failureHandled) {
+      // Stopped on its way, then failed setting up: the stop already answered.
+      console.warn(`[AppChat][${request.appId}] A message stopped on its way then failed (not reported): ${message}`)
+      if (turnContext.start.stoppedBy === 'user' && request.onHeldBack && !turnContext.heldBack) {
+        turnContext.heldBack = true
+        handBackHeldMessage(request, conversationId, [])
+      }
+      emitAgentEvent('agent:complete', request.spaceId, conversationId, { type: 'complete', duration: 0 })
+      return
+    }
+    if (!turnContext.failureHandled) {
+      console.error(`[AppChat][${request.appId}] Chat could not start: ${message}`)
+      emitAgentEvent('agent:error', request.spaceId, conversationId, {
+        type: 'error', error: message, ...workingDirErrorDetail(error, request.spaceId),
+      })
+    }
+    throw error
+  } finally {
+    // Every exit lets go of the conversation; IM messages buffered behind this
+    // turn are released by that change (dispatch-inbound).
+    turnContext.start.end()
+  }
+}
+
+/**
+ * One chat turn against an automation App's AI agent.
+ *
  * This provides real-time streaming with the same capabilities as the main
  * conversation agent: thinking, tool use, token tracking, interruption.
  *
@@ -386,16 +573,40 @@ function registerExternalChatSession(
  *
  * @param request - Chat request parameters
  */
-export async function sendAppChatMessage(
-  request: AppChatRequest
+async function runAppChatTurn(
+  request: AppChatRequest,
+  turnContext: ChatTurnContext
 ): Promise<void> {
   const {
-    appId, spaceId, message, images, thinkingEnabled, onReply, onProgress,
-    imFileSend, senderIdentity, imSession, relayOrigin, onMessageAccepted,
+    appId, message, images, thinkingEnabled, reasoningEffort, onReply, onProgress,
+    imFileSend, senderIdentity, imSession, teamContext, relayOrigin, onMessageAccepted,
   } = request
   const conversationId = request.conversationId ?? getAppChatConversationId(appId)
+  const imStreamHandle = getImStreamHandle(conversationId)
 
   console.log(`[AppChat][${appId}] sendMessage: "${message.substring(0, 100)}"`)
+
+  // Who this turn answers to — fixed here, before the first await, and never
+  // read again. A message from an IM chat carries its sender with it. A turn with
+  // no sender of its own (a team-fronted chat woken by a teammate) takes the
+  // chat's last one, while this turn's hold on the conversation keeps any newer
+  // message from replacing it. A team session also serves its owner's own Halo
+  // window, whose turns carry no IM framing and are never the chat's sender.
+  const permCtx = request.imPermission
+    ?? (!teamContext || imSession ? getImPermissionContext(conversationId) : undefined)
+  turnSenders.set(conversationId, permCtx)
+
+  // The person's own message in a team-fronted chat is decided by the channel's
+  // rules alone, so what dispatch-inbound hands over must agree with itself: a
+  // sender it stamped as a guest is never one this turn reads as an owner.
+  // Refused rather than run with the reach of whichever reading is wrong.
+  if (imSession && teamContext?.kind === 'human_message' && teamContext.origin && permCtx?.isOwner !== false) {
+    console.error(
+      `[AppChat][${appId}] Refused a turn whose sender reads both as outside and as an owner: ` +
+      `conversation=${conversationId}, sender=${permCtx?.senderId ?? 'none on record'}`
+    )
+    throw new Error('This message could not be matched to its sender’s permissions, so it was not run.')
+  }
 
   // ── 1. Resolve app + credentials ─────────────────────
   const manager = getAppManager()
@@ -403,6 +614,10 @@ export async function sendAppChatMessage(
 
   const app = manager.getApp(appId)
   if (!app) throw new Error(`App not found: ${appId}`)
+  const activityStore = getActivityStore()
+  if (!activityStore) throw new Error('Session environment storage is unavailable')
+  const environment = resolveChatEnvironment(app, manager, activityStore, conversationId, teamContext?.teamId)
+  const spaceId = environment.spaceId!
 
   // Counted here, not at the IPC/HTTP handlers, so every entry point into
   // digital-human chat (desktop IPC, remote HTTP, IM inbound) is covered by
@@ -419,25 +634,28 @@ export async function sendAppChatMessage(
     hasImages: Array.isArray(images) && images.length > 0,
   })
 
-  // Register external (HTTP/API) sessions for UI visibility + HTTP read parity.
-  // No-op for native chat and for IM sessions (owned by dispatch-inbound).
+  // Keeps the conversation list's summary of this session current (IM sessions
+  // are kept by dispatch-inbound). A message of cards alone is named by the
+  // same rule as in a space conversation; one that names nothing keeps the last.
   registerExternalChatSession(conversationId, app.id, {
     displayName: senderIdentity?.name,
     lastSender: senderIdentity?.name,
-    lastMessage: message,
+    lastMessage: request.recorded?.content ?? (messageSummaryText(message, request.references) || undefined),
   })
 
   const memory = getAppMemoryService()
   if (!memory) throw new Error('Memory service not initialized')
 
   const config = getConfig()
-  const digitalHumansEnabled = config.agent?.enableDigitalHumans !== false
-  const credentials = app.userOverrides?.modelSourceId
-    ? await getApiCredentialsForSource(config, app.userOverrides.modelSourceId, app.userOverrides.modelId)
-    : await getApiCredentials(config)
-  const resolvedCreds = await resolveCredentialsForSdk(credentials)
+  // Its own account and model, or the global selection when it has none or
+  // its account was removed.
+  const credentials = await getApiCredentialsForSelection(app.userOverrides)
+  // The digital human's own level, on every entry (its Halo chat, IM, HTTP,
+  // team turns, reminders), wins over one the send carries.
+  const pickedEffort = pickReasoningEffort(app.userOverrides?.chatReasoningEffort, reasoningEffort)
+  const resolvedCreds = await resolveCredentialsForSdk(credentials, pickedEffort)
   const electronPath = getHeadlessElectronPath()
-  const workDir = getWorkingDir(spaceId)
+  const workDir = environment.workDir
 
   // Non-vision models can't receive image blocks: persist images to files and
   // inject their paths for the ocr_image tool (mirrors send-message.ts). No
@@ -452,13 +670,33 @@ export async function sendAppChatMessage(
   // ── 2. Build memory scope ────────────────────────────
   const memoryScope: MemoryCallerScope = {
     type: 'app',
-    spaceId: app.spaceId!, // Automation apps always have a spaceId
-    spacePath: getSpace(app.spaceId!)?.path ?? '',
+    spaceId,
+    spacePath: environment.spacePath,
     appId: app.id,
+    appDataPath: environment.memoryDir,
   }
 
+  // This turn's membership, resolved before the identity layer: the team Entry
+  // renders it below, and `selfIsDisposable` (see team-prompt.ts for the
+  // contract) decides which surfaces the turn mounts — a disposable member gets
+  // no memory and no digital-human management.
+  const teamPromptCtx = teamContext
+    ? getActiveTeamRuntime()?.buildPromptContext(teamContext.teamId, appId, teamContext.epochId) ?? null
+    : null
+  const disposableMember = teamPromptCtx?.selfIsDisposable === true
+  // A disposable member has no memory of its own; an owner can also turn it off.
+  const memorySettings = appMemorySettings(app)
+  const memoryActive = !disposableMember && memorySettings.enabled
+
   // ── 3. Build system prompt for interactive chat ──────
-  const memoryInstructions = memory.getPromptInstructions()
+  const selfInstance = describeSelfInstance({ conversationId, guest: permCtx?.isOwner === false })
+  const memoryInstructions = !memoryActive
+    ? ''
+    : memory.getPromptInstructions('session', {
+        ...memoryPromptOptions(appId, app.spec),
+        layout: resolveMemoryLayout(memoryScope, 'app'),
+        authorTag: formatInstanceTag(selfInstance),
+      })
   const usesAIBrowser = resolvePermission(app, 'ai-browser')
   const usesTerminal = resolvePermission(app, 'ai-terminal') && isTerminalAvailable()
   const usesEmail = resolvePermission(app, 'email') // gated on channel config downstream
@@ -476,20 +714,44 @@ export async function sendAppChatMessage(
   // ── Merge config_schema defaults into userConfig ────
   const mergedConfig = mergeConfigWithDefaults(app.userConfig, app.spec.config_schema)
 
-  // Read IM permission context early — needed for both system prompt (ownerIds)
-  // and SDK options (guest tool restrictions). null for native Halo chat.
-  const permCtx = getImPermissionContext(conversationId)
+  // Who this turn's request came from, when not the owner's own machine — read
+  // from this turn's trigger and nothing else (see TeamTriggerContext.origin).
+  const origin = teamContext?.origin
+  // Held to the member's delegated policy because of it; a person's own message
+  // in a chat a member fronts answers to the chat's rules instead.
+  const borrowedTeamTurn = !!teamContext && isBorrowedTeamTurn(teamContext, !!imSession)
+
+  // permCtx (fixed at the top) shapes both the system prompt (ownerIds) and the
+  // SDK options (guest tool restrictions); undefined for native Halo chat.
+  const personCaller: PersonContextCaller = {
+    appId,
+    capabilityMode: 'chat',
+    environmentSpaceId: spaceId,
+    authority: permCtx?.isOwner === false ? 'guest'
+      : teamContext && (!!origin || teamContext.kind !== undefined || !!imSession) ? 'team' : 'owner',
+    ...(teamContext ? { teamId: teamContext.teamId, epochId: teamContext.epochId } : {}),
+  }
 
   // Default OFF, unlike the other built-in capabilities: this one operates
   // Halo's own configuration and data, which is not a sensible default for a
   // digital human the user installed to do something else.
   //
-  // Never for guests. `buildGuestMcpServers` already withholds the server (it
-  // is in neither guest map, and unknown ids are not injected), so the
-  // credentials and the usage guide have to be withheld here too — otherwise
-  // an outside sender gets a prompt describing a tool the session does not have.
+  // Never on a request from outside, however much else it may use: the
+  // switches others are offered do not include it, and its credential governs
+  // all of Halo. `filterMcpServersByPolicy` already withholds the server from a
+  // restricted turn, so the credentials and the usage guide have to be
+  // withheld here too — otherwise an outside sender gets a prompt describing a
+  // tool the session does not have.
   const usesHaloApi =
-    resolvePermission(app, HALO_API_TOOLSET_ID, false) && permCtx?.isOwner !== false
+    resolvePermission(app, HALO_API_TOOLSET_ID, false) && permCtx?.isOwner !== false && !origin
+
+  // Off unless the owner switched it on, and never on someone else's turn (an IM
+  // guest, a request from outside), in a team channel, or in an IM/HTTP session.
+  const conversationCollab = resolveConversationCollab(app, {
+    conversationId,
+    delegated: permCtx?.isOwner === false || borrowedTeamTurn,
+    team: !!teamContext,
+  })
 
   // Three-layer prompt assembly. The assembler is channel-agnostic;
   // this call site is the only place that knows whether the entry is
@@ -505,55 +767,117 @@ export async function sendAppChatMessage(
     usesHaloApi,
     workDir,
     modelInfo: resolvedCreds.displayModel,
+    withholdDigitalHumans: disposableMember,
     disabledCapabilities: buildDisabledCapabilitiesGuidance(app) ?? undefined,
     unconfiguredCapabilities: buildUnconfiguredCapabilitiesGuidance(app, {
       emailChannelConfigured: notifyAvail.emailChannelConfigured,
       imContactsAvailable: notifyAvail.imContactsAvailable,
     }) ?? undefined,
   })
-  const entry = imSession
-    ? buildImEntry(imSession, permCtx?.ownerIds, {
-        channelsConfigured: notifyAvail.channelsConfigured,
-        notifyBotAvailable: notifyAvail.notifyBotAvailable,
-      })
-    : NATIVE_CHAT_ENTRY
-  const constraints = imSession
-    ? buildImConstraints(imSession, permCtx?.ownerIds)
-    : []
+  if (personCaller.authority !== 'guest') identity.push(personContextPrompt(personCaller))
+
+  if (teamContext) {
+    // Every team turn (user/IM/teammate) stamps the epoch's activity, and wakes
+    // it when hibernated so coordination resumes and member replies route back.
+    const fromHuman = !teamContext.kind || teamContext.kind === 'human_message'
+    if (getActiveTeamRuntime()?.noteEpochTurn(teamContext.teamId, teamContext.epochId, fromHuman) === false) throw new Error('This task is closed; a human must resume it.')
+    // Auto-name a native "New session" from the person's first message (parity
+    // with the space chat). A teammate-driven turn's input is a relayed
+    // envelope, never the user's words.
+    getActiveTeamRuntime()?.maybeAutoNameConversation(teamContext.teamId, teamContext.epochId, fromHuman, message)
+  }
+  let entry: string
+  let constraints: string[]
+  if (teamPromptCtx) {
+    // Team turns take precedence over IM. When a team turn ALSO arrives over an
+    // IM channel (a team-backed IM instance), the bound member keeps its team
+    // identity + tools and gains a front-desk bridge so it replies to the
+    // person in-chat — and the chat's owner/guest rules, as any IM chat has.
+    entry = imSession
+      ? `${buildTeamEntry(teamPromptCtx)}\n\n${buildTeamImBridge(imSession, teamPromptCtx.selfIsLead)}`
+      : buildTeamEntry(teamPromptCtx)
+    constraints = imSession
+      ? [...buildTeamConstraints(teamPromptCtx), ...buildImConstraints(imSession, permCtx?.ownerIds)]
+      : buildTeamConstraints(teamPromptCtx)
+  } else if (imSession) {
+    entry = buildImEntry(imSession, permCtx?.ownerIds, {
+      channelsConfigured: notifyAvail.channelsConfigured,
+      notifyBotAvailable: notifyAvail.notifyBotAvailable,
+    })
+    constraints = buildImConstraints(imSession, permCtx?.ownerIds)
+  } else {
+    entry = NATIVE_CHAT_ENTRY
+    constraints = []
+  }
   const systemPrompt = assembleAppChatPrompt({ identity, entry, constraints })
 
   // ── 4. Build MCP servers ─────────────────────────────
-  const memoryMcpServer = createMemoryStatusMcpServer(memoryScope)
-
-  // Include user-installed external MCPs (same as regular space chat), minus
-  // any this digital human has explicitly disabled (requires.mcps[].enabled ===
-  // false) so the per-app switch is consistent between chat and automation runs.
+  validateEnvironmentConnections(environment, app, manager, 'chat')
   const disabledMcpIds = new Set(
-    (app.spec.requires?.mcps ?? [])
-      .filter(d => d.enabled === false)
-      .map(d => d.id)
+    (app.spec.requires?.mcps ?? []).filter(dependency => dependency.enabled === false).map(dependency => dependency.id)
   )
   const dbMcpServersRaw = getDbMcpServers(spaceId)
   const dbMcpServers = dbMcpServersRaw && disabledMcpIds.size > 0
     ? Object.fromEntries(Object.entries(dbMcpServersRaw).filter(([id]) => !disabledMcpIds.has(id)))
     : dbMcpServersRaw
 
-  // Get or create scoped browser context for this chat session
-  let scopedBrowserCtx: BrowserContext | undefined
-  if (usesAIBrowser) {
-    scopedBrowserCtx = scopedContexts.get(conversationId)
-    if (!scopedBrowserCtx) {
-      scopedBrowserCtx = createScopedBrowserContext()
-      scopedContexts.set(conversationId, scopedBrowserCtx)
-      console.log(`[AppChat][${appId}] Created scoped browser context`)
-    }
+  // ── What somebody OTHER than the owner may make this digital human do ──
+  //
+  // An IM guest is held to the chat's guest policy. A request from outside
+  // reaching a team member is held to that member's delegated policy: a
+  // colleague's reads an unsaved policy, or one granting everything, as the
+  // owner's own reach (still recorded, still a turn of its own); a guest's is
+  // read strictly and capped by that chat's guest settings, so no setting made
+  // for colleagues ever widens what a stranger can reach. The owner's own
+  // digital humans and the runtime are held to nothing.
+  let skillCopies: AvailableSkill[] | undefined
+  const loadableSkills = (): AvailableSkill[] => (skillCopies ??= listLoadableSkillCopies(spaceId))
+  const delegatedPolicy = borrowedTeamTurn && teamContext
+    ? getActiveTeamRuntime()?.getDelegatedPolicy(teamContext.teamId, appId) ?? null
+    : null
+  let delegation: { policy: CapabilityPolicy | undefined; mode: CapabilityMode } | null = null
+  let colleagueFullReach = false
+  if (permCtx && !permCtx.isOwner) {
+    delegation = { policy: permCtx.guestPolicy, mode: 'strict' }
+  } else if (borrowedTeamTurn && teamContext && origin === 'guest') {
+    const chatCap = teamChatGuestPolicy(teamContext.teamId, teamPromptCtx?.chatKey)
+    delegation = { policy: intersectPolicies(delegatedPolicy ?? {}, chatCap ?? {}), mode: 'strict' }
+  } else if (borrowedTeamTurn) {
+    const reach = delegatedPolicy
+      ? colleagueReach(delegatedPolicy, {
+          // Opens every skill's file, so read only when the switches leave the answer to it.
+          get skills() { return loadableSkills().map(skill => skill.dirName) },
+          userMcp: Object.keys(dbMcpServers ?? {}),
+        })
+      : 'full'
+    if (reach === 'full') colleagueFullReach = true
+    else delegation = { policy: delegatedPolicy ?? undefined, mode: 'strict' }
   }
+  // Whose request this turn serves: a turn held to a chat guest's standing
+  // serves that guest, whatever woke it. While it runs restricted, the checks
+  // it sets and the questions it asks carry that on, and so do its messages
+  // when it is a guest's (team-tools). A turn with the owner's reach hands
+  // nothing on.
+  const servedOrigin: TeamRequestOrigin | undefined = permCtx?.isOwner === false ? 'guest' : origin
+  const relayedOrigin = delegation ? servedOrigin : undefined
+
+  // The chat's own browser context (native chats keep it between turns; see
+  // app-chat-browser). Losing the permission ends it: a context nobody may use
+  // would otherwise keep its pages alive until the idle reaper finds it.
+  const scopedBrowserCtx = usesAIBrowser
+    ? acquireChatBrowserContext(conversationId, appId, spaceId)
+    : undefined
+  turnContext.browserHeld = !!scopedBrowserCtx
+  if (!usesAIBrowser) destroyChatBrowserContext(conversationId, 'ai-browser-disabled')
 
   // Notify tool: allows AI to send notifications to channels and IM contacts.
   // FileExportGate roots = the space's working directory (matches the AI's
   // cwd) + tmpdir. Not the same as memoryScope.spacePath, which targets
   // space.path (internal storage) — see getSpaceDir().
-  const exportGate = new FileExportGate([getSpaceDir(app.spaceId!), osTmpdir()])
+  const exportGate = new FileExportGate(
+    [environment.workDir, osTmpdir()],
+    realPath => turnFileExportRefusal(conversationId, realPath)
+  )
   const notifyMcpServer = createNotifyToolServer({
     appId: app.id,
     appName: app.spec.name,
@@ -569,44 +893,149 @@ export async function sendAppChatMessage(
       contact: imSession?.sessionId,
       subject: relayOrigin?.subject ?? senderIdentity,
       isOwner: permCtx ? permCtx.isOwner : true,
+      permissionIdentity: () => getAppChatTurnIdentity(conversationId),
       quote: relayOrigin?.quote ?? buildQuoteFromMessage(message, senderIdentity?.name),
     },
   })
-  // NOTE: report_to_user (halo-report) is intentionally NOT injected in chat/IM
-  // mode. It writes to activity_entries, whose run_id has a FK to automation_runs.
-  // Chat sessions have no automation_runs row, so any call fails with a FOREIGN
-  // KEY constraint and the model retries in a loop (see issue #200). Chat replies
-  // reach the user directly as text, so the Activity Thread is not needed here.
+  // report_to_user is injected ONLY for team turns (escalation routing to the
+  // lead / user). It is deliberately NOT injected in plain chat/IM: it writes to
+  // activity_entries whose run_id FKs automation_runs, which chat sessions lack,
+  // so a call there fails the FK constraint and the model retries in a loop
+  // (issue #200). Plain chat replies reach the user directly as text.
+  const reportContext: ReportToolContext = {
+    appId: app.id,
+    appName: app.spec.name,
+    runId: CHAT_RUN_ID,
+    sessionKey: conversationId,
+    notificationLevel: app.userOverrides?.notificationLevel,
+    // Team turns route report() to the team runtime instead of the inbox. A
+    // question asked while serving a request from outside persists that
+    // request's origin, so the turn its answer resumes serves it too (see
+    // resumeFromEscalation).
+    ...(teamContext ? { teamContext: { ...teamContext, origin: relayedOrigin } } : {}),
+  }
+
   // Built-in server ids below are mirrored in shared/apps/builtin-mcp.ts — keep in sync.
-  // Documentation is unconditional: the digital-humans switch decides whether
-  // apps can be managed here, not whether Halo can describe itself.
-  const { server: docsMcpServer, guideConsulted } = createOfficialDocsSession()
+  // Starts from the base toolset. Excluded: `halo-apps` for a disposable member,
+  // whose digital-human tools would create artifacts that outlive the team
+  // (see `disposableMember`). An IM guest keeps `halo-apps` here; the capability
+  // policy below decides whether the guest may use it.
   const mcpServers: Record<string, any> = {
     ...(dbMcpServers ?? {}),
-    'halo-memory': memoryMcpServer,
     'halo-notify': notifyMcpServer,
-    'halo-docs': docsMcpServer,
-    ...(digitalHumansEnabled ? { 'halo-apps': createHaloAppsMcpServer(spaceId, guideConsulted) } : {}),
-    'web-search': createWebSearchMcpServer(),
+    ...(personCaller.authority !== 'guest' ? { 'halo-person-context': createPersonContextMcpServer(personCaller) } : {}),
+    ...buildBaseToolset({
+      spaceId,
+      exclude: disposableMember ? ['halo-apps'] : [],
+      // Mounted above for the caller's own authority.
+      omitPersonContext: true,
+    }),
     'ocr': createOcrMcpServer(),
+    // A reminder returns to the conversation it was set in. A team turn has its
+    // periodic checks instead; IM guests lose it to the guest filter below,
+    // which keeps no server the owner was never offered a switch for.
+    ...(!teamContext
+      ? {
+          'halo-reminders': createRemindersMcpServer({
+            appId: app.id,
+            conversationId,
+            // The turn the reminder is set in, whoever wrote in the chat since.
+            currentSetter: () => {
+              const sender = turnSenders.get(conversationId)
+              return sender ? { id: sender.senderId, name: sender.senderName } : undefined
+            },
+          }),
+        }
+      : {}),
     ...(usesAIBrowser ? { 'ai-browser': createAIBrowserMcpServer(scopedBrowserCtx, workDir) } : {}),
     ...(usesTerminal
       ? { 'ai-terminal': createTerminalMcpServer(getGlobalTerminalContext(workDir), { spaceId, workDir }) }
       : {}),
     ...(usesHaloApi ? { 'halo-api-ref': createApiRefMcpServer() } : {}),
+    ...(conversationCollab
+      ? { 'halo-conversations': await createConversationCollabMcpServer({ spaceId, conversationId }, conversationCollab) }
+      : {}),
     ...(usesEmail && config.notificationChannels?.email?.enabled
-      ? { 'halo-email': createEmailMcpServer(config.notificationChannels.email) }
+      ? {
+          'halo-email': createEmailMcpServer(config.notificationChannels.email, {
+            refuseAttachment: filePath => turnFileExportRefusal(conversationId, filePath),
+          }),
+        }
       : {}),
     // Inject file-send tool when the originating IM channel supports file delivery
-    ...(imFileSend ? { 'im-file-send': createFileSendMcpServer(imFileSend) } : {}),
+    ...(imFileSend
+      ? {
+          'im-file-send': createFileSendMcpServer((filePath, filename) => {
+            const refusal = turnFileExportRefusal(conversationId, filePath)
+            return refusal ? Promise.reject(new Error(refusal)) : imFileSend(filePath, filename)
+          }),
+        }
+      : {}),
+    // report_to_user for team turns only (escalation routing); see reportContext note.
+    // A question to the user ends the turn that asked it — the sink is looked up
+    // when the tool fires rather than captured here, because it is created later
+    // in this same call and outlives the session underneath it.
+    ...(teamContext && activityStore
+      ? {
+          'halo-report': createReportToolServer(activityStore, reportContext, () => {
+            peekAppChatSink(conversationId)?.noteAskedUser()
+          }),
+        }
+      : {}),
+    // Team coordination tools (team-channel turns only).
+    // Marked with the origin it stamps: a session's tool servers serve every
+    // later turn, so a turn handing on another origin needs a session of its own.
+    ...(teamContext && teamPromptCtx && getActiveTeamRuntime()
+      ? {
+          [TEAM_MCP_SERVER_NAME]: markMcpServerSettings(createTeamMcpServer({
+            teamId: teamContext.teamId,
+            epochId: teamContext.epochId,
+            callerAppId: app.id,
+            collabMode: teamPromptCtx.collabMode,
+            selfIsLead: teamPromptCtx.selfIsLead,
+            // The agent's own cwd: published refs are resolved against it, so it
+            // must be the very directory this turn runs in.
+            callerWorkDir: workDir,
+            // The same folder the Entry above points the member at.
+            callerTeamFolder: teamPromptCtx.teamFolder,
+            teamFolders: getActiveTeamRuntime()!.teamFolders,
+            bus: getActiveTeamRuntime()!.bus,
+            blackboard: getActiveTeamRuntime()!.blackboard,
+            // Location-transparent artifact read (wired by bootstrap); absent →
+            // the tool reports the capability is unavailable.
+            ...(getActiveTeamRuntime()!.readArtifact
+              ? { readArtifact: getActiveTeamRuntime()!.readArtifact }
+              : {}),
+            ...(getActiveTeamRuntime()!.readMemberRecord
+              ? { readMemberRecord: getActiveTeamRuntime()!.readMemberRecord }
+              : {}),
+            checks: getActiveTeamRuntime()!.checks,
+            digest: getActiveTeamRuntime()!.digest,
+            archive: getActiveTeamRuntime()!.archive,
+            // Stamped onto the messages this turn sends, so the circuit
+            // breaker's depth limit spans hops.
+            forwardDepth: teamContext.forwardDepth,
+            // Same reasoning, different property of the chain: whose request it serves.
+            ...(relayedOrigin ? { origin: relayedOrigin } : {}),
+            ...(permCtx?.isOwner === false ? { servesGuest: true } : {}),
+            // Lead-only team_complete → deferred seal after the lead's turn ends.
+            requestComplete: (summary) =>
+              getActiveTeamRuntime()!.requestSeal(teamContext.teamId, teamContext.epochId, summary),
+          }), { origin: relayedOrigin ?? null }),
+        }
+      : {}),
   }
+  // `disposableMember` rides this line rather than one of its own: when a member
+  // has no memory and no digital-human tools, this is the record that says the
+  // absence was the rule and not a mount that failed.
   console.log(
     `[AppChat][${appId}] MCP servers: [${Object.keys(mcpServers).join(', ')}], ` +
-    `aiBrowser=${usesAIBrowser}, email=${usesEmail}, fileSend=${imFileSend ? 'yes' : 'no'}`
+    `aiBrowser=${usesAIBrowser}, email=${usesEmail}, fileSend=${imFileSend ? 'yes' : 'no'}, ` +
+    `disposableMember=${disposableMember}`
   )
 
   // ── 5. Build SDK options ─────────────────────────────
-  const sdkOptions = await buildBaseSdkOptions({
+  const sdkOptions = await buildUserSessionSdkOptions({
     selfApiAccess: usesHaloApi,
     credentials: resolvedCreds,
     workDir,
@@ -617,57 +1046,135 @@ export async function sendAppChatMessage(
       console.error(`[AppChat][${appId}] CLI stderr:`, data)
     },
     mcpServers,
+    memoryGuard: appMemoryGuard(memoryScope, `chat:${conversationId.slice(0, 8)}`, memorySettings),
   })
 
-  const thinkingBudget = applyReasoningEffort(sdkOptions, thinkingEnabled, resolvedCreds.capabilities)
+  const thinkingBudget = applyReasoningEffort(
+    sdkOptions, thinkingEnabled, resolvedCreds.capabilities, pickedEffort
+  )
 
   // Override for app chat context
-  sdkOptions.systemPrompt = systemPrompt
+  sdkOptions.systemPrompt = toEngineSystemPrompt(systemPrompt)
 
   // Non-native sessions (IM channels, etc.) are non-interactive — the user
-  // cannot respond to interactive tool prompts, so deny them preemptively
+  // cannot respond to interactive tool prompts, so deny them preemptively.
+  //
+  // The per-call gate is installed on every non-native session, not only the
+  // ones currently restricted: it reads what the turn in flight registered, and
+  // a session outlives the turn that created it. Without it a session built for
+  // one caller would keep answering for the next, whoever that turns out to be.
+  // It is inert while nothing is registered, so an unrestricted turn is
+  // unaffected.
   const defaultConvId = getAppChatConversationId(appId)
   if (conversationId !== defaultConvId) {
     sdkOptions.canUseTool = createCanUseTool({
       spaceId,
       conversationId,
       nonInteractive: true,
+      gate: (toolName, toolInput) => decideDelegatedTool(conversationId, toolName, toolInput),
     })
   }
 
-  // ── IM guest permission control ────────────────────────────────
-  // For non-owner senders in IM sessions, restrict available tools via SDK options.
-  // Two layers:
-  //   1. disallowedTools (built-in) — blacklist computed by inverting the guest's whitelist.
-  //      ALL_BUILTIN_TOOLS minus guest's allowed tools = disallowed. The SDK removes
-  //      these from the model's visible tool pool entirely (API-level removal).
-  //   2. MCP injection control — filter which MCP servers are injected for guests.
-  //      Not injected = model can't see the tool at all. Replaces old allowedTools MCP approach.
-  // Owner sessions are unaffected (bypassPermissions, full tool access).
-  // permCtx was read earlier (before system prompt build) for ownerIds injection.
-  if (permCtx && !permCtx.isOwner) {
-    const guestAllowed = permCtx.guestPolicy?.allowedTools ?? []
-    // Split: built-in tools only (mcp__ entries are legacy, ignored here)
-    const builtinAllowedSet = new Set(guestAllowed.filter(t => !t.startsWith('mcp__')))
-    // Invert whitelist → blacklist for built-in tools
-    const disallowed = ALL_BUILTIN_TOOLS.filter(t => !builtinAllowedSet.has(t))
-    sdkOptions.disallowedTools = disallowed
-    sdkOptions.allowedTools = []
-    if (sdkOptions.extraArgs) {
-      delete sdkOptions.extraArgs['dangerously-skip-permissions']
+  // The delegation decided above becomes engine options here. Where a strict
+  // turn's file tools may reach is the turn's file boundary (turn-file-access).
+  const strictFiles = delegation?.mode === 'strict'
+  const turnFileAccess = appTurnFileAccess(memoryScope, {
+    memoryActive,
+    spaceMemoryOffered: app.userOverrides?.spaceMemoryAccess === true && isSpaceMemoryEnabled(spaceId),
+    workDir,
+    attachedFiles: [...(request.attachedFiles ?? []), ...(imageFallback?.filePaths ?? [])],
+  })
+
+  let applied: ReturnType<typeof applyCapabilityPolicy> | null = null
+  let turnSkills: TurnSkillAccess | undefined
+  if (delegation) {
+    applied = applyCapabilityPolicy(sdkOptions, {
+      policy: delegation.policy,
+      mode: delegation.mode,
+      mcpServers,
+      dbMcpServers,
+      // The team's own coordination tools are the channel this turn happens on,
+      // not a capability: withholding them isolates the member instead of
+      // restricting the caller — a guest of a team-fronted chat included, whose
+      // request carries its origin on to any teammate it reaches. A digital
+      // human's own IM guest has no such channel.
+      alwaysKeep: teamContext ? TEAM_CHANNEL_MCP : undefined,
+      keepFileTools: strictFiles,
+    })
+    if (applied.enforced) {
+      // A restriction the engine would accept and ignore is worse than one the
+      // owner is told they cannot have: it reads as protection while the
+      // request runs with everything. An engine that cannot be asked is read
+      // the same way as one that says no.
+      const engine = getEngineCapabilities()
+      if (!engine?.features.permissionRules) {
+        throw new Error(
+          `"${app.spec.name}" is running on ${engine?.displayName ?? 'an engine'}, which cannot hold ` +
+          `someone else's request to what you allowed, so the request was not started. ` +
+          `Switch Halo's agent engine to Claude Code to let teammates put your digital humans to work.`
+        )
+      }
+      addSdkHooks(sdkOptions, createDelegationAuditHooks(conversationId))
+      addSdkHooks(sdkOptions, createSkillGateHooks(conversationId))
+      if (strictFiles) {
+        addSdkHooks(sdkOptions, createTurnFileAccessHooks(conversationId))
+        sdkOptions.disallowedTools = [...(sdkOptions.disallowedTools ?? []), ...closedFolderDenyRules(turnFileAccess)]
+      }
+      // Which skills this turn may load, measured against what the engine now
+      // settles without asking — only where the skill tool exists for it at all.
+      if (allowsBuiltin(delegation.policy, SKILL_TOOL, delegation.mode)) {
+        turnSkills = turnSkillAccess(loadableSkills(), delegation.policy, delegation.mode, {
+          allowedRules: sdkOptions.allowedTools ?? [],
+          disallowed: sdkOptions.disallowedTools ?? [],
+          hooked: strictFiles ? [SKILL_TOOL, ...FILE_TOOLS] : [SKILL_TOOL],
+        })
+      }
     }
-    sdkOptions.permissionMode = 'default'
-    // MCP injection control: only inject servers the guest is allowed to see
-    sdkOptions.mcpServers = buildGuestMcpServers(mcpServers, dbMcpServers, permCtx.guestPolicy)
     console.log(
-      `[AppChat][${appId}] Guest session: sender=${permCtx.senderId}, ` +
-      `allowed=[${Array.from(builtinAllowedSet)}], disallowed=${disallowed.length} tools, ` +
-      `mcpServers=[${Object.keys(sdkOptions.mcpServers).join(', ')}]`
+      `[AppChat][${appId}] Borrowed turn ` +
+      `(${permCtx && !permCtx.isOwner ? `guest=${permCtx.senderId}` : `teammate=${teamContext?.fromAppId ?? 'person'}, origin=${origin}`}): ` +
+      describeAppliedPolicy(applied, delegation.policy, delegation.mode)
     )
+  } else if (colleagueFullReach) {
+    // Nothing withheld, but the owner's record still says what ran — and the
+    // record is the engine's hooks, so an engine without them is refused the
+    // way one without permission rules is above.
+    const engine = getEngineCapabilities()
+    if (!engine?.features.hooks) {
+      throw new Error(
+        `"${app.spec.name}" is running on ${engine?.displayName ?? 'an engine'}, which cannot keep a record ` +
+        `of what someone else's request has it do, so the request was not started. ` +
+        `Switch Halo's agent engine to Claude Code to let teammates put your digital humans to work.`
+      )
+    }
+    addSdkHooks(sdkOptions, createDelegationAuditHooks(conversationId))
+    console.log(`[AppChat][${appId}] Borrowed turn (teammate=${teamContext?.fromAppId ?? 'person'}, origin=${origin}): full reach, recorded`)
   }
+  // Recorded calls come from the session's hooks, fixed when it was built.
+  const recordsCalls = !!applied?.enforced || colleagueFullReach
+
+  // Told to the digital human with the request, so a missing tool reads as the
+  // owner's setting rather than a fault (team-prompt `buildRestrictionNotice`).
+  // A turn held to a chat guest's standing is told by the chat's own rules.
+  const restrictionNotice = applied?.enforced && borrowedTeamTurn && origin && permCtx?.isOwner !== false
+    ? buildRestrictionNotice(
+        origin === 'guest'
+          ? { origin }
+          : { origin, member: teamPromptCtx?.roster.find(member => member.appId === teamContext?.fromAppId) },
+        describeWithheld({
+          policy: delegation?.policy,
+          mode: delegation!.mode,
+          applied,
+          offered: mcpServers,
+          dbMcpServers,
+          skills: turnSkills,
+          fileBoundary: strictFiles,
+        })
+      )
+    : ''
 
   // ── Resolve space path and run ID early (needed for both session resume and JSONL) ──
-  const spacePath = getSpace(spaceId)?.path ?? ''
+  const spacePath = environment.spacePath
   const chatRunId = deriveRunId(conversationId, appId)
 
   // Peek a pending resume-and-fork marker for native local sessions (set when
@@ -683,9 +1190,174 @@ export async function sendAppChatMessage(
   // The sink outlives individual V2 sessions: it owns the transcript writer and
   // the queue of messages awaiting an answer, so a session rebuild underneath it
   // never orphans a caller.
-  const sink = getAppChatSink({ appId, conversationId, runId: chatRunId, spacePath })
+  const sink = getAppChatSink({ appId, conversationId, runId: chatRunId, spacePath, spaceId })
+  const instanceId = imSession?.sessionId?.split(':', 1)[0]
+  const imChatId = instanceId && imSession ? imSession.sessionId.slice(instanceId.length + 1) : undefined
+  const authorizationRevision = instanceId ? getActiveImChannelManager()?.getAuthorizationRevision(instanceId) : undefined
+  const imSessionRevision = imSession && imChatId ? getImSessionRegistry()?.getSessionRevision(appId, imSession.channel, imChatId) : undefined
+  const isImEnvelopeCurrent = () => !imSession || (instanceId && imChatId && authorizationRevision !== undefined && imSessionRevision !== undefined &&
+    getActiveImChannelManager()?.getAuthorizationRevision(instanceId) === authorizationRevision &&
+    getImSessionRegistry()?.getSessionRevision(appId, imSession.channel, imChatId) === imSessionRevision)
+  const imStandingConfiguration = () => {
+    const channel = instanceId ? getActiveImChannelManager()?.getInstanceConfig(instanceId) : undefined
+    return channel ? [channel.enabled, channel.appId, channel.teamId, channel.permissionEnabled, channel.owners, channel.guestPolicy, channel.replyScope] : null
+  }
+  const delegatedConfiguration = () => permCtx?.isOwner !== false && borrowedTeamTurn && teamContext
+    ? [
+        getActiveTeamRuntime()?.getDelegatedPolicy(teamContext.teamId, appId) ?? null,
+        origin === 'guest' ? teamChatGuestPolicy(teamContext.teamId, teamPromptCtx?.chatKey) ?? null : null,
+      ]
+    : null
+  // Only what decides who may do what. A model, reasoning-effort or notification
+  // edit leaves the running turn's permissions intact, so it must not stop
+  // additions from joining it (they did not before live delivery either).
+  const permissionEnvelope = (target: typeof app) => JSON.stringify([
+    target.permissions, target.userOverrides?.spaceMemoryAccess === true, imStandingConfiguration(), delegatedConfiguration(),
+  ])
+  const configurationAtStart = permissionEnvelope(app)
+  const stampTurnIdentity = () => sink.setTurnIdentity(appChatMessageIdentity(permCtx, borrowedTeamTurn ? origin : undefined), () => {
+    const current = manager.getApp(appId)
+    return !!current && !!isImEnvelopeCurrent() && permissionEnvelope(current) === configurationAtStart
+  }, (text, liveImages) => {
+    const fallback = prepareNonVisionImageFallback({
+      scope: { spaceId, conversationId, workDir }, credentials, images: liveImages,
+    })
+    if (applied?.enforced && fallback?.filePaths.length) return false
+    const input = (fallback?.contextBlock ?? '') + text
+    return { text: applied?.enforced ? inertCommandText(input) : input, images: fallback ? undefined : liveImages }
+  })
+  stampTurnIdentity()
+
+  // Put this turn's terms in force for the per-call gate and the owner's
+  // record. Registered before the session is touched: a session build can
+  // itself fail, and the terms must already be the ones a tool call would be
+  // judged by if it somehow got that far.
+  //
+  // Registered for an unrestricted turn too, with nothing to withhold — that is
+  // what replaces the terms a previous, restricted turn left on the same
+  // conversation, so the owner does not inherit a teammate's limits.
+  if (conversationId !== defaultConvId) {
+    beginDelegatedTurn(conversationId, {
+      policy: applied?.enforced ? delegation?.policy : undefined,
+      mode: applied?.enforced ? delegation!.mode : 'permissive',
+      ...(applied?.enforced && strictFiles
+        ? { files: { ...turnFileAccess, skillFolders: grantedSkillFolders(turnSkills) } }
+        : {}),
+      ...(applied?.enforced && turnSkills ? { skills: turnSkills } : {}),
+      ...(recordsCalls && borrowedTeamTurn && teamContext
+        ? {
+            audit: {
+              teamId: teamContext.teamId,
+              epochId: teamContext.epochId,
+              appId,
+              actorAppId: teamContext.fromAppId,
+              external: true,
+              sink: (entry) => getActiveTeamRuntime()?.recordToolAudit(entry),
+            },
+          }
+        : {}),
+    })
+  }
 
   let round: AppChatRoundHandle | undefined
+  let sessionLease: V2SessionLease | undefined
+  let stopObservingRetirement: (() => void) | undefined
+  let sessionRetired = false
+  const retireSession = () => {
+    if (sessionRetired) return
+    sessionRetired = true
+    turnContext.start.releaseSession()
+    turnContext.failureHandled = true
+    if (sessionLease?.isCurrent && !sessionLease.isUsable) sessionLease.close()
+    turnContext.start.end()
+    sessionLease?.release()
+    if (turnContext.browserHeld) {
+      turnContext.browserHeld = false
+      endChatBrowserTurn(conversationId)
+    }
+    try { request.onSessionRetired?.() } catch (error) {
+      console.error(`[AppChat][${appId}] Retired dispatch could not release its mailbox: conversation=${conversationId}`, error)
+    }
+  }
+  // Carried to the finally below, which is where a team turn's ending is
+  // reported: the block runs for every exit, but only the catch knows which one.
+  let turnFailure: string | null = null
+  let finalReply: string | undefined
+  let stoppedOnTheWay = false
+  const endStoppedOnTheWay = (): void => {
+    stoppedOnTheWay = true
+    imStreamHandle?.dispose?.()
+    emitAgentEvent('agent:complete', spaceId, conversationId, { type: 'complete', duration: 0 })
+    // A reset that stopped this message replaced the chat's session, browser
+    // context and sink under it. A session acquired after that rests on what
+    // the reset removed and, left registered, would serve the next message
+    // with a destroyed browser context and a dropped sink until it idled out.
+    // One the reset itself closed is no longer current here.
+    if (turnContext.start.reset && sessionLease?.isCurrent) {
+      console.warn(`[AppChat][${appId}] Closing a session built while the chat was being reset: ${conversationId}`)
+      sessionLease.close()
+    }
+  }
+  let dispatchAttempted = false
+  let dispatchAccepted = false
+  let userMessageRecorded = false
+  const userRecords: TranscriptMessage[] = []
+  const recordUserMessage = () => {
+    if (userMessageRecorded) return
+    userMessageRecorded = true
+    if (request.inputRecorded) return
+    if (request.recordedMessages) {
+      for (const original of request.recordedMessages) {
+        userRecords.push(sink.writeUserMessage(original.content, original.images, original.teamOrigin, original.provenance, original.references))
+      }
+      return
+    }
+    userRecords.push(sink.writeUserMessage(
+      request.recorded?.content ?? message,
+      images,
+      teamContext ? { kind: teamContext.kind ?? 'human_message', correlationId: teamContext.correlationId } : undefined,
+      request.recorded?.provenance,
+      request.references
+    ))
+  }
+  // Held back on its way by a person's stop: its sender decides what becomes of
+  // it; a person's own words with nobody to tell stay in the record, marked.
+  let stoppedHandled = false
+  const holdBackStopped = (): void => {
+    if (turnContext.start.stoppedBy !== 'user' || stoppedHandled) return
+    stoppedHandled = true
+    if (request.onHeldBack) {
+      turnContext.heldBack = true
+      handBackHeldMessage(request, conversationId, userRecords)
+      return
+    }
+    if (!isPersonRequest(request)) {
+      console.warn(`[AppChat][${appId}] A message held back by a stop has no sender to return to: conversation=${conversationId}`)
+      return
+    }
+    recordUserMessage()
+    sink.markInputsStopped(userRecords)
+  }
+  let failureReported = false
+  const reportFailure = (error: unknown): void => {
+    if (failureReported) return
+    failureReported = true
+    const err = error as Error
+    console.error(`[AppChat][${appId}] Error:`, error)
+    emitAgentEvent('agent:error', spaceId, conversationId, {
+      type: 'error', error: err.message || 'Unknown error during app chat', ...workingDirErrorDetail(error, spaceId),
+    })
+  }
+  const reportPreInitFailure = (error: Error): void => {
+    if (failureReported) return
+    reportFailure(error)
+    try {
+      recordUserMessage()
+      sink.writePreInitFailure(error)
+    } finally {
+      emitAgentEvent('agent:complete', spaceId, conversationId, { type: 'complete', duration: 0 })
+    }
+  }
   try {
     const t0 = Date.now()
 
@@ -710,19 +1382,50 @@ export async function sendAppChatMessage(
       console.log(`[AppChat][${appId}] Forking new local session from source SDK session ${forkResumeSessionId}`)
     }
 
-    const v2Session = await getOrCreateV2Session(
+    sessionLease = await acquireV2Session(
       spaceId,
       conversationId,
       sdkOptions,
       resumeSessionId,
       workDir,
-      { displayModel: resolvedCreds.displayModel, sink }
+      { displayModel: resolvedCreds.displayModel, contextWindow: resolvedCreds.capabilities?.contextWindow, sink },
+      undefined,
+      undefined,
+      undefined,
+      // Busy reuse must not hand this turn another caller's permissions or
+      // memory author tag; require the current inputs instead of a deferred rebuild.
+      // A session records calls only if it was built to.
+      applied?.enforced || memoryActive || borrowedTeamTurn
+        ? { requireFreshInputs: true, ...(recordsCalls ? { creationContext: RECORDED_SESSION } : {}) }
+        : undefined,
+      reportPreInitFailure
     )
+    const v2Session = sessionLease.session
+    // The session's browser tools hold this chat's context from here on,
+    // whether the session was just built around it or is reused from an
+    // earlier turn (see app-chat-browser).
+    if (turnContext.browserHeld) bindChatBrowserSession(conversationId, sessionLease)
+    stopObservingRetirement = sessionLease.onRetired(retireSession)
+    turnContext.start.bindSession(sessionLease, retireSession)
+    if (!sessionLease.isUsable) throw new Error('The acquired session is no longer available')
+    stampTurnIdentity()
 
     // A reused session keeps the consumer it was created with; refresh the model
     // label so thought parsing stays correct after a model switch that did not
     // force a rebuild.
-    updateConsumerDisplayModel(conversationId, resolvedCreds.displayModel)
+    updateConsumerDisplayModel(conversationId, resolvedCreds.displayModel, resolvedCreds.capabilities?.contextWindow)
+
+    // Member status is derived from the ledger registered above, so the pulse
+    // must follow that write — an earlier one re-reads the member as idle.
+    const startedTeamSession = parseTeamSessionKey(conversationId)
+    if (startedTeamSession) {
+      const runtime = getActiveTeamRuntime()
+      runtime?.noteMemberStatusChanged(startedTeamSession.teamId)
+      // Opens the window this turn's board writes and messages are counted in,
+      // so the report at the other end can say the member filed nothing without
+      // guessing (see apps/runtime/team/turn-report.ts).
+      runtime?.noteMemberTurnStarted(startedTeamSession)
+    }
 
     // Set thinking tokens dynamically
     if (typeof v2Session.setMaxThinkingTokens === 'function') {
@@ -735,34 +1438,76 @@ export async function sendAppChatMessage(
 
     console.log(`[AppChat][${appId}] V2 session ready: ${Date.now() - t0}ms`)
 
+    if (!sessionLease.isCurrent) throw new Error('The acquired session is no longer available')
+
     // ── 7. Persist the user message for reload recovery ──
     // Original images are persisted regardless of the vision fallback — they
     // feed the chat bubble display, not the model.
-    sink.writeUserMessage(message, images)
+    recordUserMessage()
 
     // ── 8. Dispatch and wait for this message's turn ────
+    // Every session opens with the digital human's memory, the same way an
+    // automation run does — otherwise it works for days, in a team or with its
+    // owner, never seeing what it recorded before. Only on the first turn: the
+    // V2 session carries the conversation forward, so the block stays in context
+    // without being resent. Kept out of the JSONL trigger — the transcript shows
+    // what was actually said, not our preamble. A disposable member has no
+    // memory to open with (see `disposableMember`) — reading one would also
+    // teach it that it has a file to maintain.
+    const memoryPreamble = resumeSessionId || !memoryActive
+      ? ''
+      : await buildSessionMemoryPreamble(
+          memoryScope,
+          appId,
+          await loadSpaceTopicsForTurn(memoryScope, {
+            enabledForApp: app.userOverrides?.spaceMemoryAccess === true,
+          })
+        )
+
     // With the non-vision fallback active, image blocks are replaced by the
     // injected attachment-paths block.
+    const messageText = memoryPreamble + formatCanvasContext(request.canvasContext)
+      + formatTurnAttachments({ references: request.references, workDir })
+      + (imageFallback?.contextBlock ?? '') + (restrictionNotice ? `${restrictionNotice}\n\n` : '') + message
+    // A borrowed turn's message never runs as a command (turn-skills).
     const messageContent = buildMessageContent(
-      (imageFallback?.contextBlock ?? '') + message,
+      applied?.enforced ? inertCommandText(messageText) : messageText,
       imageFallback ? undefined : images
     )
 
+    if (!sessionLease.isCurrent) throw new Error('The acquired session is no longer available')
+
+    // Stopped while still on its way: the last moment it can be held back. It
+    // sends nothing, so nothing is owed — a stop means send nothing.
+    if (turnContext.start.cancelled) {
+      console.log(`[AppChat][${appId}] Stopped before reaching the engine: ${conversationId}`)
+      holdBackStopped()
+      endStoppedOnTheWay()
+      return
+    }
+
     // Claim the next turn for this message. Enqueued immediately before send so
     // the window in which an autonomous turn could start first — and therefore
-    // claim this round — is as narrow as the SDK allows.
-    round = sink.beginRound({ onProgress, onReply, onMessageAccepted })
+    // claim this round — is as narrow as the SDK allows. From here the queued
+    // round, not the start, is what holds the conversation.
+    round = sink.beginRound({
+      onProgress, onMessageAccepted, onResult: request.onResult,
+      onReply: (content, ending) => {
+        finalReply = content
+        if (ending) onReply?.(content, ending)
+        else onReply?.(content)
+      },
+    })
+    turnContext.start.end()
 
-    // Mark the dispatch BEFORE send: from here until system:init the consumer
-    // looks idle, and an unguarded rebuild in that window would destroy this
-    // message.
-    markTurnDispatched(conversationId)
+    dispatchAttempted = true
     try {
       if (typeof messageContent === 'string') {
-        v2Session.send(messageContent)
+        await sessionLease.send(messageContent, error => reportPreInitFailure(error as Error))
       } else {
-        v2Session.send({ type: 'user', message: { role: 'user', content: messageContent } } as any)
+        await sessionLease.send({ type: 'user', message: { role: 'user', content: messageContent } } as any, error => reportPreInitFailure(error as Error))
       }
+      dispatchAccepted = true
     } catch (sendErr) {
       // Nothing reached CC, so no turn will arrive to settle this round.
       round.cancel()
@@ -770,88 +1515,161 @@ export async function sendAppChatMessage(
     }
 
     await round.done
+    while (hasPendingSessionInput(conversationId)) await sink.observeLiveTurn({}).done
 
     console.log(`[AppChat][${appId}] Chat message processed successfully`)
   } catch (error: unknown) {
     const err = error as Error
+    // A stop already answered the person; a failure of the message it held
+    // back is not news to them.
+    if (turnContext.start.cancelled && !dispatchAttempted) {
+      console.warn(`[AppChat][${appId}] A message stopped on its way then failed (not reported): ${err.message}`)
+      holdBackStopped()
+      endStoppedOnTheWay()
+      return
+    }
+    turnFailure = err.message || 'Unknown error during app chat'
 
-    console.error(`[AppChat][${appId}] Error:`, error)
-    emitAgentEvent('agent:error', spaceId, conversationId, {
-      type: 'error',
-      error: err.message || 'Unknown error during app chat'
-    })
-
-    // Destroy scoped browser context on error for IM sessions only.
-    // The native app-chat context (defaultConvId) is reused across messages — preserve it
-    // so the next message can resume with the same browser state (cookies, session storage).
-    // IM session contexts are per-conversation and can be recreated cheaply.
-    const defaultConvId = getAppChatConversationId(appId)
-    if (conversationId !== defaultConvId) {
-      const ctx = scopedContexts.get(conversationId)
-      if (ctx) {
-        ctx.destroy()
-        scopedContexts.delete(conversationId)
-        console.log(`[AppChat][${appId}] IM scoped browser context destroyed (error)`)
+    turnContext.failureHandled = true
+    if (!dispatchAttempted || dispatchAccepted) {
+      if (!sessionLease || sessionLease.isCurrent) {
+        if (!dispatchAttempted) reportPreInitFailure(err)
+        else reportFailure(error)
+      } else {
+        console.warn(`[AppChat][${appId}][${conversationId}] Discarded retired session's turn failure; original caller still receives it`)
       }
     }
 
     // Let the caller close out its transport (IM stream, HTTP client).
     throw err
   } finally {
-    // For IM sessions (not the native app-chat key), destroy scoped browser context
-    // on successful completion. The native app-chat key reuses its context across messages,
-    // but IM sessions can accumulate unboundedly — clean up to prevent memory leaks.
+    stopObservingRetirement?.()
+    turnContext.start.releaseSession()
+    sessionLease?.release()
+    // Native chats keep their pages for the next message, failed turn or not;
+    // every other session's pages close with the turn. The context itself
+    // stays with the engine session whose tools hold it (app-chat-browser).
+    if (turnContext.browserHeld) {
+      turnContext.browserHeld = false
+      endChatBrowserTurn(conversationId)
+    }
+
     const defaultConvId = getAppChatConversationId(appId)
     if (conversationId !== defaultConvId) {
       // Round is over — drop the streaming handle registered by dispatch-inbound
       // so stopImSession can no longer reach it. Stale handles left from a prior
       // round would let stop() finish/dispose a stream that's already complete.
-      clearImStreamHandle(conversationId)
-
-      const ctx = scopedContexts.get(conversationId)
-      if (ctx) {
-        ctx.destroy()
-        scopedContexts.delete(conversationId)
-        console.log(`[AppChat][${appId}] IM scoped browser context destroyed (completion)`)
+      if (imStreamHandle && getImStreamHandle(conversationId) === imStreamHandle) {
+        clearImStreamHandle(conversationId)
       }
     }
 
-    // Flush buffered IM supplements (deferred so busy lock is released first)
-    if (conversationId !== defaultConvId) {
+    console.log(`[AppChat][${appId}] Active session cleaned up`)
+
+    // A TEAM-session turn ended — bus-driven, human 1:1, or IM alike.
+    const endedTeamSession = parseTeamSessionKey(conversationId)
+    if (endedTeamSession) {
+      // Whether this member still owes its own person an answer is recomputed
+      // here, not pushed from wherever the escalation was routed: this is the one
+      // point every team-turn path converges on, and most of them (a teammate's
+      // wake landing from another machine, an IM-backed turn, a 1:1 chat) never
+      // touch that routing at all.
+      try {
+        getActiveTeamRuntime()?.reconcileAwaitingDecision(endedTeamSession.appId)
+      } catch (err) {
+        console.error(`[AppChat][${appId}] awaiting-decision reconcile failed:`, err)
+      }
+      // Only bus-driven turns get orchestration's own pulse, and only a HOSTED
+      // office is re-baselined periodically, so a 1:1 turn would otherwise leave
+      // the member's own machine showing it as working forever.
+      getActiveTeamRuntime()?.noteMemberStatusChanged(endedTeamSession.teamId)
+      // Tell the lead the member stopped. Nothing else will: the member's own
+      // words reach no teammate, so a turn that ends without a team_send — the
+      // ordinary shape of a model that quit early, crashed, or was stopped by
+      // hand — otherwise leaves the run frozen with nobody woken to notice.
+      // A message a stop held back ran no turn; it is reported once it has run.
+      try {
+        if (!turnContext.heldBack) getActiveTeamRuntime()?.noteMemberTurnEnded({
+          ...endedTeamSession,
+          // A hard stop (team mode kills the CC subprocess outright — see
+          // control.ts's stopGeneration) lands in the same unconditional-
+          // reject path a genuine crash does; consumeIntentionalStop is the
+          // only thing that tells them apart (see intentional-stop.ts).
+          fate: turnFailure
+            ? consumeIntentionalStop(conversationId)
+              ? { kind: 'stopped' }
+              : { kind: 'error', message: turnFailure }
+            : stoppedOnTheWay ? { kind: 'stopped' } : { kind: 'ended' },
+          ...(teamContext?.correlationId ? { correlationId: teamContext.correlationId } : {}),
+          triggerKind: teamContext?.personalChat ? 'human_message' : teamContext?.kind ?? 'human_message',
+          ...(servedOrigin ? { origin: servedOrigin } : {}),
+          ...(teamContext?.kind && teamContext.kind !== 'human_message' && !teamContext.personalChat ? {
+            requestSummary: message.replace(/^\[[^\]\n]+\]\s*/, ''),
+            requestFromAppId: teamContext.fromAppId,
+            finalReply,
+          } : {}),
+        })
+      } catch (err) {
+        console.error(`[AppChat][${appId}] turn-end report failed:`, err)
+      }
+      // Nudge the bus mailbox: only bus-driven turns pass through completeTurn's
+      // drain, so without this a lead kept busy by human 1:1 chat on the same
+      // session key strands its teammates' buffered completions forever.
+      // Deferred so the busy probe reads idle when the drain runs.
       setImmediate(() => {
         try {
-          flushSupplementBuffer(conversationId)
+          getActiveTeamRuntime()?.bus.drainMailbox(conversationId)
         } catch (err) {
-          console.error(`[AppChat][${appId}] flushSupplementBuffer failed:`, err)
+          console.error(`[AppChat][${appId}] team mailbox drain failed:`, err)
         }
       })
+    }
+
+    // A session grows memory.md just like a run does, so it gets the same
+    // consolidation — a memory only automation runs kept in check would still
+    // bloat for a digital human that mostly works in chats and teams. Costs
+    // nothing until the threshold is crossed; detached, not part of the turn.
+    // Skipped for a disposable member: it has no memory to keep in check.
+    if (memoryActive) {
+      requestAppMemoryConsolidation(memoryScope, {
+        appName: app.spec.name,
+        settings: memorySettings,
+        resolveCredentials: async () => resolvedCreds,
+        isBusy: () => hasOtherAppExecution(appId),
+      }, chatRunId)
     }
   }
 }
 
+/** Tell a held-back message's sender; it decides what becomes of the message. */
+function handBackHeldMessage(request: AppChatRequest, conversationId: string, records: readonly TranscriptMessage[]): void {
+  if (!request.onHeldBack) return
+  try {
+    request.onHeldBack(records)
+  } catch (error) {
+    console.error(`[AppChat][${request.appId}] A held-back message could not be returned to its sender: conversation=${conversationId}`, error)
+  }
+}
+
 /**
- * Abort one conversation's turn and release the resources that would otherwise
- * outlive it. The single stop path for every caller — every entry point below
- * delegates here so no route can forget a step.
+ * A person stops one conversation's turn, and the resources that would otherwise
+ * outlive it are released. The single stop path for every person's stop — every
+ * entry point below delegates here so no route can forget a step.
  *
- * Three things must happen together, in this order:
- *   1. Drop buffered supplements. `sendAppChatMessage`'s finally block flushes
- *      them, so leaving them queued restarts a round right after the stop.
- *   2. Dispose (not finish) the IM stream. Stop means "send nothing"; finish()
+ * Two things must happen together, in this order:
+ *   1. Dispose (not finish) the IM stream. Stop means "send nothing"; finish()
  *      would push a final message into the chat.
- *   3. Abort the generation.
+ *   2. Abort as a person's stop: their own unsent words are void (kept in the
+ *      record, marked), what others sent waits for the next turn instead of
+ *      starting one right after the stop, and the engine withdraws what it had
+ *      accepted and not yet read.
  *
- * Steps 1–2 run even when nothing is generating: a crashed round can leave a
- * buffer entry or stream handle behind, and the next inbound message would pick
- * it up. Both are no-ops for native conversations, which never register either.
+ * Both run even when nothing is generating: a crashed round can leave a buffer
+ * entry or stream handle behind, and the next inbound message would pick it up.
  *
  * @returns whether a generation was actually running
  */
 async function stopConversation(conversationId: string): Promise<boolean> {
-  const wasActive = isAppChatConversationGenerating(conversationId)
-
-  clearSupplementBuffer(conversationId)
-
   const streamHandle = getImStreamHandle(conversationId)
   if (streamHandle) {
     try {
@@ -862,8 +1680,46 @@ async function stopConversation(conversationId: string): Promise<boolean> {
   }
   clearImStreamHandle(conversationId)
 
-  if (wasActive) await stopGeneration(conversationId)
-  return wasActive
+  return abortAppChatTurn(conversationId, 'user')
+}
+
+/**
+ * Stop whatever turn this conversation has in flight, wherever it is: a message
+ * still on its way is held back before it reaches the engine, and a turn the
+ * engine already has is stopped there. Callers decide what happens to open
+ * streams.
+ *
+ * `reason` says who stopped it. A person (`'user'`): their own waiting messages
+ * are void, what others sent waits for the next turn, and the engine withdraws
+ * what it had not read. The system (`'internal'`: clear, restart, closing a
+ * task): waiting messages from others stay queued as before, and the engine
+ * runs unread input after the stop.
+ *
+ * @returns whether anything was in flight
+ */
+export async function abortAppChatTurn(conversationId: string, reason: StopReason): Promise<boolean> {
+  if (reason === 'user') holdAfterPersonStop(conversationId)
+  else chatDelivery?.discard(conversationId)
+  const starting = cancelAppChatTurnStarts(conversationId, reason)
+  const dispatched = isAppChatTurnDispatched(conversationId)
+  if (dispatched) {
+    await stopGeneration(conversationId, { reason })
+    // Withdrawing a continuation nothing had started leaves no turn end to answer its waiters.
+    if (reason === 'user' && !hasLiveTurn(conversationId)) peekAppChatSink(conversationId)?.releaseLiveObservers()
+  }
+  return starting || dispatched
+}
+
+/** Every mailbox that holds messages for this conversation, held as a person's stop requires. */
+function holdAfterPersonStop(conversationId: string): void {
+  chatDelivery?.holdAfterStop(conversationId)
+  holdSupplementsAfterStop(conversationId)
+  // Other conversations' mail; the engine's own stop signal never fires when
+  // only a message on its way was stopped.
+  holdConversationAfterStop(conversationId)
+  if (!parseTeamSessionKey(conversationId)) return
+  const voided = getActiveTeamRuntime()?.holdSessionAfterStop(conversationId) ?? []
+  keepStoppedInputs(conversationId, [], voided.map(({ text, teamOrigin }) => ({ content: text, teamOrigin })))
 }
 
 /**
@@ -879,24 +1735,6 @@ export async function stopAppChat(appId: string): Promise<void> {
     await stopConversation(convId)
   }
   console.log(`[AppChat][${appId}] Generation stopped (${toStop.length} session(s))`)
-}
-
-/**
- * Every conversation of this app that currently exists in memory: one that has
- * a message awaiting an answer, and one whose consumer is alive. Covers the
- * native default, native local, IM, and HTTP sessions; cross-app keys never
- * match the prefix.
- */
-function collectAppConversationIds(appId: string): string[] {
-  const prefix = getAppChatConversationId(appId)
-  const ids = new Set<string>()
-  for (const id of getConversationsWithActiveRound()) {
-    if (id === prefix || id.startsWith(prefix + ':')) ids.add(id)
-  }
-  for (const id of getRunningConsumerIds()) {
-    if (id === prefix || id.startsWith(prefix + ':')) ids.add(id)
-  }
-  return Array.from(ids)
 }
 
 /**
@@ -923,21 +1761,6 @@ export function isAppChatGenerating(appId: string): boolean {
 }
 
 /**
- * Whether a single conversation is generating, for the HTTP status endpoint's
- * per-conversation polling. (isAppChatGenerating reports across all sessions.)
- *
- * Two windows count as generating, and both matter: a message dispatched but
- * not yet acknowledged by CC (round queued, no turn running), and a turn the
- * consumer is currently processing — including an autonomous one, which occupies
- * the session just as much as a solicited turn.
- */
-export function isAppChatConversationGenerating(conversationId: string): boolean {
-  if (hasActiveAppChatRound(conversationId)) return true
-  const consumer = getConsumerHandle(conversationId)
-  return !!(consumer?.isRunning && consumer.getActiveSessionState())
-}
-
-/**
  * Load persisted chat messages for an app.
  *
  * Reads the JSONL file and converts to renderer-compatible Message[] format.
@@ -947,7 +1770,8 @@ export function isAppChatConversationGenerating(conversationId: string): boolean
  * @param appId - App ID
  */
 export function loadAppChatMessages(spacePath: string, appId: string): any[] {
-  return readSessionMessages(spacePath, appId, CHAT_RUN_ID)
+  const path = chatRecordPath(appId, getAppChatConversationId(appId), spacePath)
+  return readSessionMessages(path, appId, CHAT_RUN_ID)
 }
 
 /**
@@ -971,7 +1795,45 @@ export function loadImChatMessages(
 ): any[] {
   const conversationId = buildImSessionKey(appId, channel, chatType, chatId)
   const runId = deriveRunId(conversationId, appId)
+  const path = chatRecordPath(appId, conversationId, spacePath)
+  return readSessionMessages(path, appId, runId)
+}
+
+/**
+ * Load a member's team-channel chat history for ONE run (epoch).
+ *
+ * The member's space is resolved from the installed app itself — the renderer
+ * roster does not always carry a spaceId (the blackboard roster leaves it null),
+ * so the app's installed spaceId is the authoritative source. Returns an empty
+ * array when the space or its path cannot be resolved.
+ *
+ * Single source of truth for the team-channel read, shared by the
+ * `team:chat-messages` IPC handler and the team read-only HTTP route.
+ */
+export function readTeamMemberMessages(appId: string, teamId: string, epochId: string): any[] {
+  const spaceId = getAppManager()?.getApp(appId)?.spaceId ?? null
+  if (!spaceId) return []
+  const conversationId = buildTeamSessionKey(appId, teamId, epochId)
+  const spacePath = chatRecordPath(appId, conversationId, getSpace(spaceId)?.path ?? '')
+  if (!spacePath) return []
+  const runId = deriveRunId(conversationId, appId)
   return readSessionMessages(spacePath, appId, runId)
+}
+
+/**
+ * A locally-owned member's team-channel history as rows stamped with `seq`
+ * (1-based ordinal in the append-only transcript, the same numbering the
+ * owner-side federation serializer uses), only those after `sinceSeq` when
+ * given — so a viewer that already holds the history receives just the tail.
+ */
+export function readTeamMemberHistory(
+  appId: string,
+  teamId: string,
+  epochId: string,
+  sinceSeq?: number
+): Array<Record<string, unknown> & { seq: number }> {
+  const rows = readTeamMemberMessages(appId, teamId, epochId).map((m, i) => ({ ...m, seq: i + 1 }))
+  return sinceSeq !== undefined && sinceSeq > 0 ? rows.slice(sinceSeq) : rows
 }
 
 /**
@@ -989,7 +1851,33 @@ export function loadChatMessagesForConversation(
   appId: string,
   conversationId: string
 ): any[] {
-  return readSessionMessages(spacePath, appId, deriveRunId(conversationId, appId))
+  const path = chatRecordPath(appId, conversationId, spacePath)
+  return readSessionMessages(path, appId, deriveRunId(conversationId, appId))
+}
+
+/**
+ * One page of an app-chat conversation's transcript, newest first. Messages
+ * carry `thoughts: null` + `thoughtsSummary`; see loadChatMessageThoughts.
+ */
+export function loadChatTranscriptForConversation(
+  spacePath: string,
+  appId: string,
+  conversationId: string,
+  request?: TranscriptPageRequest
+): TranscriptPage {
+  const path = chatRecordPath(appId, conversationId, spacePath)
+  return readSessionTranscript(path, appId, deriveRunId(conversationId, appId), request)
+}
+
+/** The thought process of one message of an app-chat conversation. */
+export function loadChatMessageThoughts(
+  spacePath: string,
+  appId: string,
+  conversationId: string,
+  messageId: string
+): Thought[] {
+  const path = chatRecordPath(appId, conversationId, spacePath)
+  return readSessionMessageThoughts(path, appId, deriveRunId(conversationId, appId), messageId)
 }
 
 /**
@@ -1008,27 +1896,11 @@ export function getAppChatSessionState(appId: string, conversationId?: string): 
   const convId = conversationId ?? getAppChatConversationId(appId)
   const state = getSessionState(convId)
   return {
-    // A queued round has no turn state yet, but the client is already waiting
-    // on it and must not be told the session went idle.
-    isActive: state.isActive || hasActiveAppChatRound(convId),
+    // A message still starting or a queued round has no turn state yet, but the
+    // client is already waiting on it and must not be told the session went idle.
+    isActive: state.isActive || isAppChatConversationGenerating(convId),
     thoughts: state.thoughts,
     spaceId: state.spaceId,
-  }
-}
-
-/**
- * Clean up scoped browser context for an app chat session.
- * Call when deleting an app, resetting chat, or shutting down.
- *
- * @param appId - App ID
- */
-export function cleanupAppChatBrowserContext(appId: string): void {
-  const conversationId = getAppChatConversationId(appId)
-  const ctx = scopedContexts.get(conversationId)
-  if (ctx) {
-    ctx.destroy()
-    scopedContexts.delete(conversationId)
-    console.log(`[AppChat][${appId}] Scoped browser context cleaned up`)
   }
 }
 
@@ -1045,6 +1917,11 @@ export function cleanupAppChatBrowserContext(appId: string): void {
  * 3. Destroy scoped browser context (if any)
  * 4. Empty the JSONL persistence file
  * 5. Drop the sink so the next message starts with a fresh transcript writer
+ * 6. Zero the registry's message-activity summary, if any
+ *
+ * From the abort to the last step the conversation is held, so it reads busy:
+ * a reminder waiting for it, or a message, starts once the clear is complete,
+ * in the fresh conversation, not between its steps (they await).
  *
  * Idempotent: safe to call even if the session doesn't exist.
  */
@@ -1056,9 +1933,19 @@ async function clearSessionByConversationId(
   // 1. Abort active generation (if any) before closing
   if (isAppChatConversationGenerating(conversationId)) {
     console.log(`[AppChat][${appId}] Session is generating, aborting first...`)
-    await stopGeneration(conversationId)
+    await abortAppChatTurn(conversationId, 'internal')
   }
+  // Taken after the abort, which would mark it stopped as well.
+  const hold = beginAppChatTurnStart(conversationId)
+  try {
+    await clearHeldSession(conversationId, appId, spaceId)
+  } finally {
+    hold.end()
+  }
+}
 
+/** The steps of {@link clearSessionByConversationId} after the abort, while the conversation is held. */
+async function clearHeldSession(conversationId: string, appId: string, spaceId: string): Promise<void> {
   // Drop the IM stream handle so subsequent stop() calls are idempotent;
   // the stream itself is finalized by clearImSession's tear-down below.
   clearImStreamHandle(conversationId)
@@ -1067,30 +1954,43 @@ async function clearSessionByConversationId(
   closeV2Session(conversationId)
 
   // 3. Clean up scoped browser context
-  const ctx = scopedContexts.get(conversationId)
-  if (ctx) {
-    ctx.destroy()
-    scopedContexts.delete(conversationId)
-    console.log(`[AppChat][${appId}] Scoped browser context cleaned up`)
-  }
+  destroyChatBrowserContext(conversationId, 'session-cleared')
 
   // 4. Clear the JSONL file and saved sessionId
-  const space = getSpace(spaceId)
-  if (space?.path) {
+  const spacePath = chatRecordPath(appId, conversationId, getSpace(spaceId)?.path ?? '')
+  if (spacePath) {
     const runId = deriveRunId(conversationId, appId)
-    const filePath = join(space.path, '.halo', 'apps', appId, 'runs', `${runId}.jsonl`)
+    const filePath = join(spacePath, '.halo', 'apps', appId, 'runs', `${runId}.jsonl`)
     try {
       await writeFile(filePath, '', 'utf8')
-    } catch {
-      // File may not exist yet, that's fine
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
+        console.error(`[AppChat][${appId}] Failed to clear transcript for ${conversationId}:`, error)
+        throw error
+      }
     }
     // Remove saved sessionId so next session starts truly fresh
-    deleteChatSessionId(space.path, appId, runId)
+    deleteChatSessionId(spacePath, appId, runId)
   }
+  getActivityStore()?.deleteSessionEnvironment(conversationId)
+  getActivityStore()?.deleteSessionEnvironment(legacySessionEnvironmentKey(appId, deriveRunId(conversationId, appId)))
 
   // 5. Drop the sink. Its rounds were already settled when closeV2Session
   //    stopped the consumer; the next message builds a fresh one.
   disposeAppChatSink(conversationId)
+  // The terms and the sender the last turn left belong to a thread of work that
+  // no longer exists.
+  clearDelegation(conversationId)
+  turnSenders.delete(conversationId)
+
+  // 6. Zero the registry's activity summary so the conversation list preview
+  //    matches the now-empty transcript (no-op if the session was never
+  //    registered — e.g. a default session that never received a message).
+  const target = resolveSessionRegistryTarget(conversationId, appId)
+  if (target) {
+    getImSessionRegistry()?.resetActivity(appId, target.channel, target.chatId)
+    emitSessionUpdated(appId, target, {})
+  }
 }
 
 /**
@@ -1121,7 +2021,27 @@ export async function clearAppChat(appId: string, spaceId: string, conversationI
     }
   }
   await clearSessionByConversationId(convId, appId, spaceId)
+  // A cleared conversation has nothing left to come back to.
+  getTaskStateService()?.remove(convId)
   console.log(`[AppChat][${appId}] Chat history cleared: ${convId}`)
+}
+
+/**
+ * Rename a session and notify listeners. Lives here rather than in the IPC/HTTP
+ * handlers so both transports emit the update event — a rename that only the
+ * calling client learns about leaves every other surface showing the old name
+ * until its next poll.
+ *
+ * @returns false when the session isn't registered.
+ */
+export function renameChatSession(appId: string, channel: string, chatId: string, name: string): boolean {
+  const registry = getImSessionRegistry()
+  if (!registry) return false
+  if (!registry.setCustomName(appId, channel, chatId, name)) return false
+
+  const session = registry.findSession(appId, channel, chatId)
+  emitSessionUpdated(appId, { channel, chatId, chatType: session?.chatType ?? 'direct' }, {})
+  return true
 }
 
 // ============================================
@@ -1151,7 +2071,7 @@ export async function clearAppChat(appId: string, spaceId: string, conversationI
  *     changed, so the very next message rebuilds it with the new wiring. Only
  *     idle sessions are torn down eagerly.
  *   - true (manual "Restart agent" only): a mid-generation session is aborted
- *     via `stopGeneration()` first — the UI banner warns that work in progress
+ *     via `abortAppChatTurn()` first — the UI banner warns that work in progress
  *     is stopped.
  *
  * Idempotent: returns `sessionsClosed: 0` when nothing is active.
@@ -1190,21 +2110,18 @@ export async function restartAppChat(
 
       // 1. Abort any in-flight generation before closing the underlying session.
       if (isActive) {
-        await stopGeneration(convId)
+        await abortAppChatTurn(convId, 'internal')
       }
 
       // 2. Close the V2 session — next message will create a fresh CC process
       //    with the up-to-date system prompt; saved sessionId resumes history.
       closeV2Session(convId)
 
-      // 3. Destroy any per-session browser context. The next message rebuilds
-      //    it on demand; keeping a stale context tied to a dead CC process is
-      //    pointless and wastes resources.
-      const ctx = scopedContexts.get(convId)
-      if (ctx) {
-        ctx.destroy()
-        scopedContexts.delete(convId)
-      }
+      // 3. A manual restart is a reset, so the chat's browser pages go too and
+      //    the next message rebuilds them on demand. Automatic config-change
+      //    restarts leave them: pages are independent of the CC process, and
+      //    the user may be watching one.
+      if (interruptActive) destroyChatBrowserContext(convId, 'manual-restart')
 
       closed++
     } catch (err) {
@@ -1272,6 +2189,29 @@ export async function clearImSession(
   console.log(`[AppChat][${appId}] IM session cleared: ${conversationId}`)
 }
 
+/**
+ * Tear down a member's team-channel session (process, V2 session, browser ctx)
+ * but PRESERVE the JSONL transcript + saved sessionId so the run stays a
+ * retrievable history record. Contrast clearAppChat/clearImSession, which wipe.
+ */
+export async function closeTeamSession(
+  appId: string,
+  teamId: string,
+  epochId: string
+): Promise<void> {
+  const conversationId = buildTeamSessionKey(appId, teamId, epochId)
+
+  // Abort any in-flight generation before tearing down the underlying session.
+  if (isAppChatConversationGenerating(conversationId)) {
+    try { await abortAppChatTurn(conversationId, 'internal') } catch { /* best-effort */ }
+  }
+  // Close the V2 process; the saved sessionId on disk allows SDK resume later.
+  closeV2Session(conversationId)
+  // Drop the per-session browser context (rebuilt on demand if the run resumes).
+  destroyChatBrowserContext(conversationId, 'team-session-closed')
+  console.log(`[AppChat][${appId}] Team session closed (history preserved): ${conversationId}`)
+}
+
 // ============================================
 // Native Multi-Session Lifecycle
 // ============================================
@@ -1302,9 +2242,15 @@ export function createNativeChatSession(appId: string): NativeSessionResult {
   const registry = getImSessionRegistry()
   if (!registry) throw new Error('IM session registry not initialized')
 
+  const manager = getAppManager()
+  const app = manager?.getApp(appId)
+  const store = getActivityStore()
+  if (!app || !manager || !store) throw new Error('App services not initialized')
   const sessionUuid = randomUUID()
-  const record = registry.createLocalSession(appId, sessionUuid)
   const conversationId = buildLocalSessionKey(appId, sessionUuid)
+  resolveChatEnvironment(app, manager, store, conversationId)
+  const record = registry.createLocalSession(appId, sessionUuid)
+  emitSessionUpdated(appId, { channel: LOCAL_SESSION_CHANNEL, chatId: sessionUuid, chatType: 'direct' }, {})
   console.log(`[AppChat][${appId}] Native local session created: ${conversationId}`)
   return { conversationId, record }
 }
@@ -1324,7 +2270,7 @@ export function createNativeChatSession(appId: string): NativeSessionResult {
  */
 export function forkNativeChatSession(
   appId: string,
-  spaceId: string,
+  _spaceId: string,
   sourceConversationId: string
 ): NativeSessionResult {
   const registry = getImSessionRegistry()
@@ -1343,12 +2289,18 @@ export function forkNativeChatSession(
     }
   }
 
-  const spacePath = getSpace(spaceId)?.path ?? ''
+  const manager = getAppManager()
+  const app = manager?.getApp(appId)
+  const store = getActivityStore()
+  if (!app || !manager || !store) throw new Error('App services not initialized')
+  const sourceEnvironment = resolveChatEnvironment(app, manager, store, sourceConversationId, parseTeamSessionKey(sourceConversationId)?.teamId)
+  const spacePath = sourceEnvironment.spacePath
   const sessionUuid = randomUUID()
   const conversationId = buildLocalSessionKey(appId, sessionUuid)
 
   const sourceRunId = deriveRunId(sourceConversationId, appId)
   const newRunId = deriveRunId(conversationId, appId)
+  store.pinSessionEnvironment(conversationId, appId, sourceEnvironment)
 
   // Copy the source transcript for immediate display, and read the source SDK
   // session id to seed the resume-and-fork on first message. Both are
@@ -1365,6 +2317,7 @@ export function forkNativeChatSession(
     pendingResumeSessionId: sourceSdkSessionId,
   })
 
+  emitSessionUpdated(appId, { channel: LOCAL_SESSION_CHANNEL, chatId: sessionUuid, chatType: 'direct' }, {})
   console.log(
     `[AppChat][${appId}] Forked native local session ${conversationId} from ${sourceConversationId} ` +
     `(transcript ${copied ? 'copied' : 'absent'}, resume ${sourceSdkSessionId ? 'seeded' : 'none'})`
@@ -1390,5 +2343,24 @@ export async function deleteNativeChatSession(
 
   await clearSessionByConversationId(conversationId, appId, spaceId)
   getImSessionRegistry()?.removeSession(appId, parsed.channel, parsed.chatId)
+  getTaskStateService()?.remove(conversationId)
+  emitSessionUpdated(appId, { channel: parsed.channel, chatId: parsed.chatId, chatType: parsed.chatType }, {})
   console.log(`[AppChat][${appId}] Native local session deleted: ${conversationId}`)
+}
+
+/**
+ * Whether a chat-board conversation is known to no longer exist: its digital
+ * human is gone or uninstalled, or (a local session) its record was deleted.
+ * False while the manager or registry is not up yet — that proves nothing.
+ */
+export function isNativeChatGone(conversationId: string): boolean {
+  const ref = parseNativeChatKey(conversationId)
+  if (!ref) return false
+  const manager = getAppManager()
+  if (!manager) return false
+  const app = manager.getApp(ref.appId)
+  if (!app || app.status === 'uninstalled') return true
+  if (ref.kind === 'default') return false
+  const registry = getImSessionRegistry()
+  return !!registry && !registry.findSession(ref.appId, LOCAL_SESSION_CHANNEL, ref.chatId)
 }

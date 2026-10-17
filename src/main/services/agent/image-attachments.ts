@@ -19,6 +19,7 @@ import { createHash } from 'crypto'
 import { existsSync, mkdirSync, writeFileSync } from 'fs'
 import { join } from 'path'
 import { supportsVisionById } from '../../../shared/constants/model-capabilities'
+import { toHaloFileUrl } from '../../../shared/halo-file-url'
 import { getSpace } from '../space.service'
 import type { ApiCredentials, ImageAttachment, ImageMediaType } from './types'
 import type { ToolsetScope } from './toolsets/types'
@@ -86,6 +87,8 @@ To read their text content, call the ocr_image tool with these absolute paths (o
 export interface NonVisionImageFallback {
   /** Prompt block to prepend to the outbound user message */
   contextBlock: string
+  /** Where the images were written — files this turn was handed */
+  filePaths: string[]
 }
 
 /**
@@ -142,5 +145,40 @@ export function prepareNonVisionImageFallback(params: {
   if (entries.length === 0) return null
 
   console.log(`[Agent][${scope.conversationId}] Non-vision fallback: ${entries.length}/${images.length} image(s) persisted for OCR (model=${credentials.model})`)
-  return { contextBlock: formatImageAttachmentBlock(entries, images.length - entries.length) }
+  return {
+    contextBlock: formatImageAttachmentBlock(entries, images.length - entries.length),
+    filePaths: entries.map(e => e.path),
+  }
+}
+
+/** Desktop input deltas use file URLs; remote clients retain the original portable payload. */
+export function withInputImageFiles(
+  spaceId: string,
+  messages: import('../../../shared/types/transcript').TranscriptMessage[],
+): import('../../../shared/types/transcript').TranscriptMessage[] {
+  if (!messages.some(message => message.images?.some(image => image.data))) return messages
+  const space = getSpace(spaceId)
+  if (!space) {
+    console.warn(`[Agent] Live input images kept inline: space=${spaceId} is unavailable`)
+    return messages
+  }
+  const dir = space.isTemp ? join(space.path, 'attachments') : join(space.path, '.halo', 'attachments')
+  return messages.map(message => {
+    if (!message.images?.some(image => image.data)) return message
+    const images = message.images.map(image => {
+      if (!image.data) return image
+      try {
+        const filePath = join(dir, attachmentFileName(image))
+        if (!existsSync(filePath)) {
+          mkdirSync(dir, { recursive: true })
+          writeFileSync(filePath, Buffer.from(image.data, 'base64'))
+        }
+        return { ...image, data: '', url: toHaloFileUrl(filePath) }
+      } catch (error) {
+        console.error(`[Agent] Live input image could not be materialized: space=${spaceId} image=${image.id}`, error)
+        return image
+      }
+    })
+    return { ...message, images }
+  })
 }

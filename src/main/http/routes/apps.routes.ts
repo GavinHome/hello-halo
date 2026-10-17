@@ -25,13 +25,15 @@ import {
   loadAppChatMessages,
   loadImChatMessages,
   loadChatMessagesForConversation,
+  loadChatTranscriptForConversation,
+  loadChatMessageThoughts,
   createNativeChatSession,
   forkNativeChatSession,
   deleteNativeChatSession,
   patchTouchesMcp,
-  readSessionMessages,
   rejectIfRemoteMcpForbidden,
   restartAppChat,
+  injectIntoAppChatWhenLive,
   sendAppChatMessage,
   stopAppChat,
   stopAppChatConversation,
@@ -40,14 +42,26 @@ import {
 } from './_shared'
 import type {
   ActivityQueryOptions,
-  AppChatRequest,
   AppErrorCode,
   AppListFilter,
   EscalationResponse,
   InstalledApp,
   UninstallOptions,
 } from './_shared'
-import { resolveHttpConversationId } from '../../../shared/apps/im-keys'
+import { resolveAppChatTarget, resolveUserInjectTarget, type AppChatTarget } from '../../controllers/app-chat-target.controller'
+import type { EscalationAnswerPayload } from '../../../shared/apps/app-types'
+import { resolveHttpImChat } from '../../../shared/apps/im-keys'
+import { parseTurnReferences, toAppChatRequest } from '../../controllers/chat-turn-input'
+import { getStudioSummary, listPeopleDirectory, getAppCapabilityInventory, getAppSpaceChangePreview, moveAppDefaultSpace, readAppRunMessages, RunProcessClearedError, getDigitalHumanMemoryStatus, consolidateDigitalHumanMemoryNow, listAppReminders, cancelAppReminder, countClearableChats, clearAllChats } from '../../apps/runtime'
+
+async function respondOperation(res: Response, name: string, operation: () => unknown | Promise<unknown>): Promise<void> {
+  try {
+    res.json({ success: true, data: await operation() })
+  } catch (error) {
+    console.error(`[HTTP][Apps] ${name} failed:`, error)
+    res.json({ success: false, error: error instanceof Error ? error.message : String(error) })
+  }
+}
 
 export function registerAppsRoutes(app: Express): void {
   // ===== Apps Routes =====
@@ -61,6 +75,30 @@ export function registerAppsRoutes(app: Express): void {
     return manager
   }
 
+  // Helper: resolve a caller-supplied conversationId, or answer with the
+  // rejection the controller chose. Every chat route that takes a
+  // conversationId goes through it, so there is exactly one description of
+  // what a remote caller may address by key.
+  function resolveTargetOrFail(appId: string, conversationId: unknown, res: Response): AppChatTarget | null {
+    const target = resolveAppChatTarget(appId, conversationId)
+    if (!target.ok) {
+      res.status(target.status).json({ success: false, error: target.error })
+      return null
+    }
+    return target
+  }
+
+  // The IM session an im-chat route names by its parts, or a 400 when a part
+  // could not address one.
+  function resolveImChatOrFail(channel: unknown, chatType: unknown, chatId: unknown, res: Response) {
+    const chat = resolveHttpImChat(channel, chatType, chatId)
+    if (!chat.ok) {
+      res.status(400).json({ success: false, error: chat.error })
+      return null
+    }
+    return chat
+  }
+
   // Helper: get runtime or return 503
   function getRuntimeOrFail(res: Response): ReturnType<typeof getAppRuntime> {
     const runtime = getAppRuntime()
@@ -69,6 +107,97 @@ export function registerAppsRoutes(app: Express): void {
     }
     return runtime
   }
+
+  app.get('/api/apps/states', async (_req: Request, res: Response) => {
+    const runtime = getRuntimeOrFail(res)
+    if (!runtime) return
+    await respondOperation(res, 'states', () => runtime.getAllAppStates())
+  })
+  app.get('/api/apps/studio-summary', async (req: Request, res: Response) => {
+    await respondOperation(res, 'studio-summary', () => getStudioSummary(typeof req.query.language === 'string' ? req.query.language : undefined))
+  })
+  app.get('/api/apps/people', async (req: Request, res: Response) => {
+    await respondOperation(res, 'list-people', () => listPeopleDirectory({
+      q: typeof req.query.q === 'string' ? req.query.q : undefined,
+      language: typeof req.query.language === 'string' ? req.query.language : undefined,
+      spaceId: typeof req.query.spaceId === 'string' ? req.query.spaceId : undefined,
+      teamId: typeof req.query.teamId === 'string' ? req.query.teamId : undefined,
+      attention: req.query.attention === 'true', removed: req.query.removed === 'true',
+      limit: req.query.limit === undefined ? undefined : Number(req.query.limit),
+      offset: req.query.offset === undefined ? undefined : Number(req.query.offset),
+    }))
+  })
+  app.get('/api/apps/pending-inbox', async (req: Request, res: Response) => {
+    const runtime = getRuntimeOrFail(res)
+    if (!runtime) return
+    await respondOperation(res, 'pending-inbox', () => runtime.getPendingInbox({
+      limit: req.query.limit !== undefined ? Number(req.query.limit) : undefined,
+      afterTs: req.query.afterTs !== undefined ? Number(req.query.afterTs) : undefined,
+      afterId: typeof req.query.afterId === 'string' ? req.query.afterId : undefined,
+    }))
+  })
+  app.get('/api/apps/capability-inventory', async (_req: Request, res: Response) => {
+    const manager = getManagerOrFail(res)
+    if (!manager) return
+    await respondOperation(res, 'capability-inventory', () => getAppCapabilityInventory())
+  })
+  app.get('/api/apps/:appId/pending-entries', async (req: Request, res: Response) => {
+    const runtime = getRuntimeOrFail(res)
+    if (!runtime) return
+    await respondOperation(res, 'pending-entries', () => runtime.getPendingEntries(req.params.appId, {
+      limit: req.query.limit !== undefined ? Number(req.query.limit) : undefined,
+      afterTs: req.query.afterTs !== undefined ? Number(req.query.afterTs) : undefined,
+      afterId: typeof req.query.afterId === 'string' ? req.query.afterId : undefined,
+    }))
+  })
+  app.get('/api/apps/:appId/activity/:entryId', async (req: Request, res: Response) => {
+    const runtime = getRuntimeOrFail(res)
+    if (!runtime) return
+    await respondOperation(res, 'activity-entry', () => runtime.getActivityEntry(req.params.appId, req.params.entryId))
+  })
+  app.post('/api/apps/:appId/activity/:entryId/adopt-author-version', async (req: Request, res: Response) => {
+    const runtime = getRuntimeOrFail(res)
+    if (!runtime) return
+    await respondOperation(res, 'adopt-author-version', () => runtime.adoptAuthorVersion(req.params.appId, req.params.entryId, req.body?.fields))
+  })
+  app.get('/api/apps/:appId/author-spec', async (req: Request, res: Response) => {
+    const manager = getManagerOrFail(res)
+    if (!manager) return
+    await respondOperation(res, 'author-spec', () => manager.getAuthorSpec(req.params.appId))
+  })
+  app.post('/api/apps/:appId/space-preview', async (req: Request, res: Response) => {
+    await respondOperation(res, 'space-preview', () => getAppSpaceChangePreview(req.params.appId, req.body.newSpaceId))
+  })
+  app.post('/api/apps/:appId/escalation/:entryId/retry', async (req: Request, res: Response) => {
+    const runtime = getRuntimeOrFail(res)
+    if (!runtime) return
+    await respondOperation(res, 'retry-continuation', () => runtime.retryEscalationContinuation(req.params.appId, req.params.entryId))
+  })
+  app.post('/api/apps/:appId/escalation/:entryId/deadline', async (req: Request, res: Response) => {
+    const runtime = getRuntimeOrFail(res)
+    if (!runtime) return
+    await respondOperation(res, 'confirm-deadline', () => runtime.confirmEscalationDeadline(req.params.appId, req.params.entryId, req.body.deadlineAt))
+  })
+  app.post('/api/apps/:appId/escalation/:entryId/dismiss', async (req: Request, res: Response) => {
+    const runtime = getRuntimeOrFail(res)
+    if (!runtime) return
+    await respondOperation(res, 'dismiss-escalation', () => runtime.dismissEscalation(req.params.appId, req.params.entryId))
+  })
+  app.post('/api/apps/:appId/runs/:runId/close', async (req: Request, res: Response) => {
+    const runtime = getRuntimeOrFail(res)
+    if (!runtime) return
+    await respondOperation(res, 'close-run', () => runtime.closeRun(req.params.appId, req.params.runId))
+  })
+  app.post('/api/apps/:appId/runs/start', async (req: Request, res: Response) => {
+    const runtime = getRuntimeOrFail(res)
+    if (!runtime) return
+    await respondOperation(res, 'start-run', () => runtime.startManually(req.params.appId))
+  })
+  app.post('/api/apps/:appId/runs/:runId/stop', async (req: Request, res: Response) => {
+    const runtime = getRuntimeOrFail(res)
+    if (!runtime) return
+    await respondOperation(res, 'stop-run', () => runtime.stopRun(req.params.appId, req.params.runId))
+  })
 
   // GET /api/apps — list all installed Apps, optional ?spaceId= and ?status=
   app.get('/api/apps', async (req: Request, res: Response) => {
@@ -135,6 +264,22 @@ export function registerAppsRoutes(app: Express): void {
     res.status(status).json(result)
   })
 
+  // GET /api/apps/overview — batched card-wall first paint (state + latest
+  // summary + recent runs per automation App). Registered before the
+  // single-segment /api/apps/:appId route below so "overview" is never
+  // captured as an appId.
+  app.get('/api/apps/overview', async (req: Request, res: Response) => {
+    try {
+      const runtime = getRuntimeOrFail(res)
+      if (!runtime) return
+      const spaceId = typeof req.query.spaceId === 'string' ? req.query.spaceId : undefined
+      const overview = runtime.getOverview(spaceId)
+      res.json({ success: true, data: overview })
+    } catch (error) {
+      res.json({ success: false, error: (error as Error).message })
+    }
+  })
+
   // GET /api/apps/:appId — get a single App
   app.get('/api/apps/:appId', async (req: Request, res: Response) => {
     try {
@@ -173,6 +318,38 @@ export function registerAppsRoutes(app: Express): void {
     }
   })
 
+  // GET /api/spaces/:spaceId/available-skills — same disk scan, keyed by space
+  // directly (space resource rail has a space, not a digital human, in hand).
+  app.get('/api/spaces/:spaceId/available-skills', async (req: Request, res: Response) => {
+    try {
+      const { spaceId } = req.params
+      if (!spaceId) {
+        res.status(400).json({ success: false, error: 'Missing spaceId' })
+        return
+      }
+      res.json({ success: true, data: listAvailableSkills(spaceId) })
+    } catch (error) {
+      res.json({ success: false, error: (error as Error).message })
+    }
+  })
+
+  // GET /api/spaces/:spaceId/effective-mcp-apps — space-scoped ∪ global MCP
+  // apps, for read-only display (not one digital human's declared deps).
+  app.get('/api/spaces/:spaceId/effective-mcp-apps', async (req: Request, res: Response) => {
+    try {
+      const { spaceId } = req.params
+      if (!spaceId) {
+        res.status(400).json({ success: false, error: 'Missing spaceId' })
+        return
+      }
+      const manager = getManagerOrFail(res)
+      if (!manager) return
+      res.json({ success: true, data: manager.listEffectiveMcpApps(spaceId) })
+    } catch (error) {
+      res.json({ success: false, error: (error as Error).message })
+    }
+  })
+
   // GET /api/skills/command-name — preview the identifier a skill would install
   // under. Kept off the /api/apps/:appId branch so it is not shadowed by it.
   app.get('/api/skills/command-name', async (req: Request, res: Response) => {
@@ -201,7 +378,7 @@ export function registerAppsRoutes(app: Express): void {
 
       const options: UninstallOptions = {}
       if (req.query.purge === 'true') options.purge = true
-      await manager.uninstall(appId, options)
+      await manager.uninstall(appId, { ...options, reason: 'user' })
       console.log('[HTTP] DELETE /api/apps/%s', appId)
       res.json({ success: true })
     } catch (error) {
@@ -265,35 +442,15 @@ export function registerAppsRoutes(app: Express): void {
         return
       }
 
-      // For automation apps that are active: deactivate before moving so the
-      // scheduler and event router don't hold stale space references, then
-      // re-activate after the move completes.
-      const isAutomation = appData.spec.type === 'automation'
-      const wasActive = appData.status === 'active'
-      const runtime = getAppRuntime()
-
-      if (isAutomation && wasActive && runtime) {
-        await runtime.deactivate(appId).catch((err: Error) => {
-          console.warn(`[HTTP] POST /api/apps/:appId/move-space -- runtime deactivate failed (non-fatal): ${err.message}`)
-        })
-      }
-
-      await manager.moveToSpace(appId, newSpaceId ?? null)
-
-      // Re-activate automation apps that were running before the move
-      let activationWarning: string | undefined
-      if (isAutomation && wasActive && runtime) {
-        try {
-          await runtime.activate(appId)
-        } catch (err) {
-          const errMsg = err instanceof Error ? err.message : String(err)
-          console.warn(`[HTTP] POST /api/apps/:appId/move-space -- runtime activate failed: ${errMsg}`)
-          activationWarning = errMsg
-        }
+      if (appData.spec.type === 'automation') {
+        if (!newSpaceId) throw new Error('Digital humans require a work space')
+        await moveAppDefaultSpace(appId, newSpaceId)
+      } else {
+        await manager.moveToSpace(appId, newSpaceId ?? null)
       }
 
       console.log('[HTTP] POST /api/apps/%s/move-space: newSpaceId=%s', appId, newSpaceId ?? 'global')
-      res.json({ success: true, data: { activationWarning } })
+      res.json({ success: true, data: {} })
     } catch (error) {
       res.json({ success: false, error: (error as Error).message })
     }
@@ -313,6 +470,47 @@ export function registerAppsRoutes(app: Express): void {
       const filesRemoved = manager.clearAppMemory(appId)
       console.log('[HTTP] POST /api/apps/%s/clear-memory: filesRemoved=%d', appId, filesRemoved)
       res.json({ success: true, data: { filesRemoved } })
+    } catch (error) {
+      res.json({ success: false, error: (error as Error).message })
+    }
+  })
+
+  // GET /api/apps/:appId/memory — memory size, last consolidation, whether one is running
+  app.get('/api/apps/:appId/memory', async (req: Request, res: Response) => {
+    try {
+      const status = await getDigitalHumanMemoryStatus(req.params.appId)
+      res.json(status ? { success: true, data: status } : { success: false, error: 'App not found' })
+    } catch (error) {
+      res.json({ success: false, error: (error as Error).message })
+    }
+  })
+
+  // POST /api/apps/:appId/memory/consolidate — consolidate now (returns once started)
+  app.post('/api/apps/:appId/memory/consolidate', async (req: Request, res: Response) => {
+    try {
+      const result = consolidateDigitalHumanMemoryNow(req.params.appId)
+      console.log('[HTTP] POST /api/apps/%s/memory/consolidate: started=%s', req.params.appId, result.started)
+      res.json({ success: true, data: result })
+    } catch (error) {
+      res.json({ success: false, error: (error as Error).message })
+    }
+  })
+
+  // GET /api/apps/:appId/reminders — reminders the digital human set in its conversations
+  app.get('/api/apps/:appId/reminders', async (req: Request, res: Response) => {
+    try {
+      res.json({ success: true, data: listAppReminders(req.params.appId) })
+    } catch (error) {
+      res.json({ success: false, error: (error as Error).message })
+    }
+  })
+
+  // DELETE /api/apps/:appId/reminders/:reminderId — cancel one
+  app.delete('/api/apps/:appId/reminders/:reminderId', async (req: Request, res: Response) => {
+    try {
+      const cancelled = cancelAppReminder(req.params.appId, req.params.reminderId)
+      console.log('[HTTP] DELETE /api/apps/%s/reminders/%s: cancelled=%s', req.params.appId, req.params.reminderId, cancelled)
+      res.json(cancelled ? { success: true } : { success: false, error: 'Reminder not found' })
     } catch (error) {
       res.json({ success: false, error: (error as Error).message })
     }
@@ -428,8 +626,52 @@ export function registerAppsRoutes(app: Express): void {
       const options: ActivityQueryOptions = {}
       if (req.query.limit) options.limit = Number(req.query.limit)
       if (req.query.before) options.since = Number(req.query.before)
+      if (typeof req.query.beforeId === 'string') options.beforeId = req.query.beforeId
+      if (req.query.offset) options.offset = Number(req.query.offset)
+      const entryTypes = ['run_complete', 'run_skipped', 'run_error', 'milestone', 'escalation', 'output']
+      if (typeof req.query.type === 'string' && entryTypes.includes(req.query.type)) options.type = req.query.type as ActivityQueryOptions['type']
+      if (typeof req.query.teamId === 'string') options.teamId = req.query.teamId
+      if (typeof req.query.epochId === 'string') options.epochId = req.query.epochId
       const entries = runtime.getActivityEntries(appId, options)
       res.json({ success: true, data: entries })
+    } catch (error) {
+      res.json({ success: false, error: (error as Error).message })
+    }
+  })
+
+  // GET /api/apps/:appId/runs — run history, with each run's last activity summary
+  app.get('/api/apps/:appId/runs', async (req: Request, res: Response) => {
+    try {
+      const { appId } = req.params
+      if (!appId) {
+        res.status(400).json({ success: false, error: 'Missing appId' })
+        return
+      }
+      const runtime = getRuntimeOrFail(res)
+      if (!runtime) return
+      const options: { limit?: number; offset?: number } = {}
+      if (req.query.limit) options.limit = Number(req.query.limit)
+      if (req.query.offset) options.offset = Number(req.query.offset)
+      const runs = runtime.getRunsForAppWithSummary(appId, options)
+      res.json({ success: true, data: runs })
+    } catch (error) {
+      res.json({ success: false, error: (error as Error).message })
+    }
+  })
+
+  // GET /api/apps/:appId/run-stats — aggregate outcome/token/duration stats
+  app.get('/api/apps/:appId/run-stats', async (req: Request, res: Response) => {
+    try {
+      const { appId } = req.params
+      if (!appId) {
+        res.status(400).json({ success: false, error: 'Missing appId' })
+        return
+      }
+      const runtime = getRuntimeOrFail(res)
+      if (!runtime) return
+      const window = req.query.window ? Number(req.query.window) : undefined
+      const stats = runtime.getRunStats(appId, window)
+      res.json({ success: true, data: stats })
     } catch (error) {
       res.json({ success: false, error: (error as Error).message })
     }
@@ -445,15 +687,16 @@ export function registerAppsRoutes(app: Express): void {
       }
       const runtime = getRuntimeOrFail(res)
       if (!runtime) return
-      const { choice, text } = req.body as { choice?: string; text?: string }
+      const { choice, text, answers } = req.body as EscalationAnswerPayload
       const response: EscalationResponse = {
         ts: Date.now(),
         choice,
         text,
+        answers,
       }
-      await runtime.respondToEscalation(appId, entryId, response)
+      const entry = await runtime.respondToEscalation(appId, entryId, response)
       console.log('[HTTP] POST /api/apps/%s/escalation/%s/respond', appId, entryId)
-      res.json({ success: true })
+      res.json({ success: true, data: entry })
     } catch (error) {
       res.json({ success: false, error: (error as Error).message })
     }
@@ -481,14 +724,19 @@ export function registerAppsRoutes(app: Express): void {
   app.post('/api/apps/:appId/runs/:runId/inject', async (req: Request, res: Response) => {
     try {
       const { appId, runId } = req.params
-      const { text } = req.body as { text?: string }
-      if (!appId || !runId || !text) {
+      const { text, references: rawReferences } = (req.body ?? {}) as { text?: string; references?: unknown }
+      const references = parseTurnReferences(rawReferences)
+      if (!references.ok) {
+        res.status(400).json({ success: false, error: references.error })
+        return
+      }
+      if (!appId || !runId || (!text && !references.references)) {
         res.status(400).json({ success: false, error: 'Missing appId, runId, or text' })
         return
       }
       const runtime = getRuntimeOrFail(res)
       if (!runtime) return
-      await runtime.injectIntoRun(appId, runId, text)
+      await runtime.injectIntoRun(appId, runId, text ?? '', references.references)
       console.log('[HTTP] POST /api/apps/%s/runs/%s/inject', appId, runId)
       res.json({ success: true })
     } catch (error) {
@@ -513,16 +761,10 @@ export function registerAppsRoutes(app: Express): void {
         return
       }
 
-      const space = appData.spaceId ? getSpace(appData.spaceId) : null
-      if (!space?.path) {
-        res.status(404).json({ success: false, error: `Space not found for app: ${appId}` })
-        return
-      }
-
-      const messages = readSessionMessages(space.path, appId, runId)
+      const messages = readAppRunMessages(appId, runId)
       res.json({ success: true, data: messages })
     } catch (error) {
-      res.json({ success: false, error: (error as Error).message })
+      res.json({ success: false, error: (error as Error).message, ...(error instanceof RunProcessClearedError ? { code: error.code } : {}) })
     }
   })
 
@@ -807,16 +1049,18 @@ export function registerAppsRoutes(app: Express): void {
       }
       const runtime = getRuntimeOrFail(res)
       if (!runtime) return
-      // Trust boundary for the caller-supplied conversationId: rejects malformed
-      // ids, forbids addressing IM sessions over HTTP, and constrains chatId to a
-      // filename-safe charset (it flows into the JSONL filename).
-      const resolved = resolveHttpConversationId(appId, req.body?.conversationId)
-      if (!resolved.ok) {
-        res.status(400).json({ success: false, error: resolved.error })
+
+      // Built field by field rather than spread from the body (shared with IPC):
+      // the request shape carries identity (teamContext, senderIdentity,
+      // relayOrigin) that decides how a turn is attributed and what it may do.
+      // Everything identity-bearing is derived server-side.
+      const built = toAppChatRequest(appId, req.body)
+      if (!built.ok) {
+        res.status(built.status).json({ success: false, error: built.error })
         return
       }
-      const conversationId = resolved.conversationId
-      const request: AppChatRequest = { ...req.body, appId, conversationId }
+      const request = built.request
+      const conversationId = request.conversationId
       sendAppChatMessage(request).catch((error: unknown) => {
         const err = error as Error
         console.error(`[HTTP] POST /api/apps/:appId/chat/send background error:`, err.message)
@@ -832,6 +1076,37 @@ export function registerAppsRoutes(app: Express): void {
     }
   })
 
+  // POST /api/apps/:appId/chat/inject — the user adds a message to the turn a
+  // digital human is running, or is about to run (a starting turn is waited for).
+  // Native chats and locally owned team sessions accept owner additions.
+  // The runtime keeps them separate from a turn with different permissions.
+  app.post('/api/apps/:appId/chat/inject', async (req: Request, res: Response) => {
+    try {
+      const { appId } = req.params
+      const { conversationId, message, references: rawReferences } = (req.body ?? {}) as { conversationId?: unknown; message?: unknown; references?: unknown }
+      const references = parseTurnReferences(rawReferences)
+      if (!references.ok) {
+        res.status(400).json({ success: false, error: references.error })
+        return
+      }
+      if (typeof conversationId !== 'string' || typeof message !== 'string' || (!message.trim() && !references.references)) {
+        res.status(400).json({ success: false, error: 'Missing required fields: conversationId, message' })
+        return
+      }
+      const target = resolveUserInjectTarget(appId, conversationId)
+      if (!target.ok) {
+        res.status(target.status).json({ success: false, error: target.error })
+        return
+      }
+      const outcome = await injectIntoAppChatWhenLive(target.conversationId, message.trim(), { source: 'injection' }, references.references)
+      console.log('[HTTP] POST /api/apps/%s/chat/inject (conversationId=%s, outcome=%s)', appId, conversationId, outcome)
+      res.json({ success: true, data: { delivered: outcome === 'delivered', ...(outcome === 'stopped' ? { stopped: true } : {}) } })
+    } catch (error) {
+      console.error('[HTTP] POST /api/apps/:appId/chat/inject failed:', error)
+      res.json({ success: false, error: (error as Error).message })
+    }
+  })
+
   // POST /api/apps/:appId/chat/stop — stop an active app chat generation
   app.post('/api/apps/:appId/chat/stop', async (req: Request, res: Response) => {
     try {
@@ -840,21 +1115,25 @@ export function registerAppsRoutes(app: Express): void {
         res.status(400).json({ success: false, error: 'Missing appId' })
         return
       }
-      // Same trust boundary as send: a supplied conversationId is validated
-      // (rejects IM keys / bad chatIds) before it can stop a session; absent,
-      // stop every session of this app.
+      // Stopping every session of a digital human is a much bigger act than
+      // stopping the one the caller is looking at — for a team lead it cuts off
+      // the run it is coordinating — so it must be asked for, never inferred
+      // from an omitted field.
       const rawConvId = (req.body ?? {}).conversationId
       if (typeof rawConvId === 'string' && rawConvId) {
-        const resolved = resolveHttpConversationId(appId, rawConvId)
-        if (!resolved.ok) {
-          res.status(400).json({ success: false, error: resolved.error })
-          return
-        }
-        await stopAppChatConversation(resolved.conversationId)
-        console.log('[HTTP] POST /api/apps/%s/chat/stop (conversationId=%s)', appId, resolved.conversationId)
-      } else {
+        const target = resolveTargetOrFail(appId, rawConvId, res)
+        if (!target) return
+        await stopAppChatConversation(target.conversationId)
+        console.log('[HTTP] POST /api/apps/%s/chat/stop (conversationId=%s)', appId, target.conversationId)
+      } else if ((req.body ?? {}).all === true) {
         await stopAppChat(appId)
         console.log('[HTTP] POST /api/apps/%s/chat/stop (conversationId=%s)', appId, '(all)')
+      } else {
+        res.status(400).json({
+          success: false,
+          error: 'Missing conversationId. Pass { "all": true } to stop every session of this app.',
+        })
+        return
       }
       res.json({ success: true })
     } catch (error) {
@@ -871,20 +1150,17 @@ export function registerAppsRoutes(app: Express): void {
         return
       }
       // Optional conversationId narrows the check to one session; validated
-      // through the same trust boundary as send (rejects IM keys / bad chatIds).
-      // Without it, report whether ANY of the app's sessions is generating.
+      // through the same trust boundary as send. Without it, report whether ANY
+      // of the app's sessions is generating.
       const rawConvId = typeof req.query.conversationId === 'string' ? req.query.conversationId : ''
       if (rawConvId) {
-        const resolved = resolveHttpConversationId(appId, rawConvId)
-        if (!resolved.ok) {
-          res.status(400).json({ success: false, error: resolved.error })
-          return
-        }
+        const target = resolveTargetOrFail(appId, rawConvId, res)
+        if (!target) return
         res.json({
           success: true,
           data: {
-            isGenerating: isAppChatConversationGenerating(resolved.conversationId),
-            conversationId: resolved.conversationId,
+            isGenerating: isAppChatConversationGenerating(target.conversationId),
+            conversationId: target.conversationId,
           }
         })
         return
@@ -921,21 +1197,73 @@ export function registerAppsRoutes(app: Express): void {
         res.json({ success: true, data: [] })
         return
       }
-      // Optional conversationId loads a specific native/local session; validated
-      // through the same trust boundary as send (rejects IM keys / bad chatIds).
+      // Optional conversationId loads a specific session; validated through the
+      // same trust boundary as send.
       const rawConvId = req.query.conversationId
       if (typeof rawConvId === 'string' && rawConvId) {
-        const resolved = resolveHttpConversationId(appId, rawConvId)
-        if (!resolved.ok) {
-          res.status(400).json({ success: false, error: resolved.error })
-          return
-        }
-        const messages = loadChatMessagesForConversation(space.path, appId, resolved.conversationId)
+        const target = resolveTargetOrFail(appId, rawConvId, res)
+        if (!target) return
+        const messages = loadChatMessagesForConversation(space.path, appId, target.conversationId)
         res.json({ success: true, data: messages })
         return
       }
       const messages = loadAppChatMessages(space.path, appId)
       res.json({ success: true, data: messages })
+    } catch (error) {
+      res.json({ success: false, error: (error as Error).message })
+    }
+  })
+
+  // GET /api/apps/:appId/chat/transcript — one page of the transcript, newest
+  // first, thought processes left out (see chat/messages/:messageId/thoughts).
+  app.get('/api/apps/:appId/chat/transcript', async (req: Request, res: Response) => {
+    try {
+      const { appId } = req.params
+      const manager = getManagerOrFail(res)
+      if (!manager) return
+      const appData = manager.getApp(appId)
+      if (!appData) {
+        res.status(404).json({ success: false, error: `App not found: ${appId}` })
+        return
+      }
+      const space = appData.spaceId ? getSpace(appData.spaceId) : null
+      if (!space?.path) {
+        res.json({ success: true, data: { messages: [], hasMoreBefore: false, cursor: null, total: 0 } })
+        return
+      }
+      const target = resolveTargetOrFail(appId, req.query.conversationId, res)
+      if (!target) return
+      const limit = Number(req.query.limit)
+      const data = loadChatTranscriptForConversation(space.path, appId, target.conversationId, {
+        before: typeof req.query.before === 'string' && req.query.before ? req.query.before : undefined,
+        limit: Number.isFinite(limit) ? limit : undefined,
+        through: typeof req.query.through === 'string' && req.query.through ? req.query.through : undefined,
+      })
+      res.json({ success: true, data })
+    } catch (error) {
+      res.json({ success: false, error: (error as Error).message })
+    }
+  })
+
+  // GET /api/apps/:appId/chat/messages/:messageId/thoughts — one message's thought process
+  app.get('/api/apps/:appId/chat/messages/:messageId/thoughts', async (req: Request, res: Response) => {
+    try {
+      const { appId, messageId } = req.params
+      const manager = getManagerOrFail(res)
+      if (!manager) return
+      const appData = manager.getApp(appId)
+      if (!appData) {
+        res.status(404).json({ success: false, error: `App not found: ${appId}` })
+        return
+      }
+      const space = appData.spaceId ? getSpace(appData.spaceId) : null
+      if (!space?.path) {
+        res.json({ success: true, data: [] })
+        return
+      }
+      const target = resolveTargetOrFail(appId, req.query.conversationId, res)
+      if (!target) return
+      res.json({ success: true, data: loadChatMessageThoughts(space.path, appId, target.conversationId, messageId) })
     } catch (error) {
       res.json({ success: false, error: (error as Error).message })
     }
@@ -950,16 +1278,13 @@ export function registerAppsRoutes(app: Express): void {
         return
       }
       // Optional conversationId is validated through the same trust boundary as
-      // send (rejects IM keys / bad chatIds) before reading session state.
+      // send before reading session state.
       let conversationId: string | undefined
       const rawConvId = typeof req.query.conversationId === 'string' ? req.query.conversationId : ''
       if (rawConvId) {
-        const resolved = resolveHttpConversationId(appId, rawConvId)
-        if (!resolved.ok) {
-          res.status(400).json({ success: false, error: resolved.error })
-          return
-        }
-        conversationId = resolved.conversationId
+        const target = resolveTargetOrFail(appId, rawConvId, res)
+        if (!target) return
+        conversationId = target.conversationId
       }
       const state = getAppChatSessionState(appId, conversationId)
       res.json({ success: true, data: state })
@@ -976,14 +1301,14 @@ export function registerAppsRoutes(app: Express): void {
         res.status(400).json({ success: false, error: 'Missing appId' })
         return
       }
-      const channel = typeof req.query.channel === 'string' ? req.query.channel : ''
-      const chatType = req.query.chatType === 'group' ? 'group' as const : 'direct' as const
-      const chatId = typeof req.query.chatId === 'string' ? req.query.chatId : ''
       const spaceId = typeof req.query.spaceId === 'string' ? req.query.spaceId : ''
-      if (!channel || !chatId || !spaceId) {
+      if (!req.query.channel || !req.query.chatId || !spaceId) {
         res.status(400).json({ success: false, error: 'Missing required query params: channel, chatId, spaceId' })
         return
       }
+      const chat = resolveImChatOrFail(req.query.channel, req.query.chatType, req.query.chatId, res)
+      if (!chat) return
+      const { channel, chatType, chatId } = chat
       const manager = getManagerOrFail(res)
       if (!manager) return
       const appData = manager.getApp(appId)
@@ -993,12 +1318,16 @@ export function registerAppsRoutes(app: Express): void {
       }
       const space = getSpace(appData.spaceId ?? spaceId)
       if (!space?.path) {
+        // No space yet means nothing was ever transcribed here, which is an
+        // empty history — not a failure the caller has to handle separately.
+        console.warn('[AppsHTTP] IM history space unavailable; reporting empty history', { appId, spaceId: appData.spaceId ?? spaceId })
         res.json({ success: true, data: [] })
         return
       }
       const messages = loadImChatMessages(space.path, appId, channel, chatType, chatId)
       res.json({ success: true, data: messages })
     } catch (error) {
+      console.error('[AppsHTTP] IM history failed', { appId: req.params.appId, error })
       res.json({ success: false, error: (error as Error).message })
     }
   })
@@ -1016,16 +1345,13 @@ export function registerAppsRoutes(app: Express): void {
         res.status(400).json({ success: false, error: 'Missing spaceId in body' })
         return
       }
-      // Optional conversationId clears a specific native/local session, validated
-      // through the same trust boundary as send.
+      // Optional conversationId clears a specific session, validated through the
+      // same trust boundary as send.
       let resolvedConvId: string | undefined
       if (typeof conversationId === 'string' && conversationId) {
-        const resolved = resolveHttpConversationId(appId, conversationId)
-        if (!resolved.ok) {
-          res.status(400).json({ success: false, error: resolved.error })
-          return
-        }
-        resolvedConvId = resolved.conversationId
+        const target = resolveTargetOrFail(appId, conversationId, res)
+        if (!target) return
+        resolvedConvId = target.conversationId
       }
       await clearAppChat(appId, spaceId, resolvedConvId)
       console.log('[HTTP] POST /api/apps/%s/chat/clear (conversationId=%s)', appId, resolvedConvId ?? '(default)')
@@ -1054,6 +1380,26 @@ export function registerAppsRoutes(app: Express): void {
     }
   })
 
+  // GET /api/apps/:appId/chats/clearable — how many conversations a clear-all would clear
+  app.get('/api/apps/:appId/chats/clearable', async (req: Request, res: Response) => {
+    try {
+      res.json({ success: true, data: countClearableChats(req.params.appId) })
+    } catch (error) {
+      res.json({ success: false, error: (error as Error).message })
+    }
+  })
+
+  // POST /api/apps/:appId/chats/clear-all — clear every conversation as /clear clears each
+  app.post('/api/apps/:appId/chats/clear-all', async (req: Request, res: Response) => {
+    try {
+      const result = await clearAllChats(req.params.appId)
+      console.log('[HTTP] POST /api/apps/%s/chats/clear-all: cleared=%d failed=%d', req.params.appId, result.cleared, result.failed)
+      res.json({ success: true, data: result })
+    } catch (error) {
+      res.json({ success: false, error: (error as Error).message })
+    }
+  })
+
   // POST /api/apps/:appId/im-chat/clear — clear an IM session
   app.post('/api/apps/:appId/im-chat/clear', async (req: Request, res: Response) => {
     try {
@@ -1069,9 +1415,10 @@ export function registerAppsRoutes(app: Express): void {
         res.status(400).json({ success: false, error: 'Missing required body params: spaceId, channel, chatType, chatId' })
         return
       }
-      const resolvedChatType = chatType === 'group' ? 'group' as const : 'direct' as const
-      await clearImSession(appId, spaceId, channel, resolvedChatType, chatId)
-      console.log('[HTTP] POST /api/apps/%s/im-chat/clear channel=%s chatId=%s', appId, channel, chatId)
+      const chat = resolveImChatOrFail(channel, chatType, chatId, res)
+      if (!chat) return
+      await clearImSession(appId, spaceId, chat.channel, chat.chatType, chat.chatId)
+      console.log('[HTTP] POST /api/apps/%s/im-chat/clear channel=%s chatId=%s', appId, chat.channel, chat.chatId)
       res.json({ success: true })
     } catch (error) {
       res.json({ success: false, error: (error as Error).message })
@@ -1095,9 +1442,10 @@ export function registerAppsRoutes(app: Express): void {
         res.status(400).json({ success: false, error: 'Missing required body params: channel, chatType, chatId' })
         return
       }
-      const resolvedChatType = chatType === 'group' ? 'group' as const : 'direct' as const
-      const result = await stopImSession(appId, channel, resolvedChatType, chatId)
-      console.log('[HTTP] POST /api/apps/%s/im-chat/stop channel=%s chatId=%s stopped=%s', appId, channel, chatId, result.stopped)
+      const chat = resolveImChatOrFail(channel, chatType, chatId, res)
+      if (!chat) return
+      const result = await stopImSession(appId, chat.channel, chat.chatType, chat.chatId)
+      console.log('[HTTP] POST /api/apps/%s/im-chat/stop channel=%s chatId=%s stopped=%s', appId, chat.channel, chat.chatId, result.stopped)
       res.json({ success: true, data: result })
     } catch (error) {
       res.json({ success: false, error: (error as Error).message })

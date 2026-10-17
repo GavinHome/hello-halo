@@ -2,14 +2,13 @@
  * Browser IPC Handlers
  *
  * Handles IPC communication for the embedded browser functionality.
- * Connects the renderer process to the BrowserView manager.
+ * Connects the renderer to browser page operations; attachment has its own transport.
  */
 
 import { ipcMain, BrowserWindow, Menu, clipboard, nativeImage, shell, nativeTheme, MenuItemConstructorOptions } from 'electron'
-import { browserViewManager, type BrowserViewBounds, type DeviceMode } from '../services/browser-view.service'
-// Import the lightweight context module directly (NOT the ai-browser index,
-// which pulls the Agent SDK) to keep this startup-path handler cheap.
-import { browserContext } from '../services/ai-browser/context'
+import { clearBrowserData, browserViewManager, type BrowserViewBounds, type DeviceMode } from '../services/browser-view.service'
+import { browserRpc } from '../../shared/rpc/contracts/browser.contract'
+import { registerRpcHandlers } from './rpc'
 import { resolveUserAgent } from '../services/user-agent-resolver'
 import { getConfig } from '../foundation/config.service'
 import { getDefaultBrowserHomepage } from '../services/browser-policy.service'
@@ -39,23 +38,19 @@ export function registerBrowserHandlers(mainWindow: BrowserWindow | null) {
     return
   }
 
-  // Initialize the BrowserView manager
+  // Initialize the browser page manager
   browserViewManager.initialize(mainWindow)
+  registerRpcHandlers(browserRpc, { clearBrowserData }, 'Browser IPC')
 
   // ============================================
   // Lifecycle
   // ============================================
 
-  /**
-   * Create a new BrowserView
-   */
   ipcMain.handle(
     'browser:create',
     async (_event, { viewId, url }: { viewId: string; url?: string }) => {
-      console.log(`[Browser IPC] >>> browser:create received - viewId: ${viewId}, url: ${url}`)
       try {
         const state = await browserViewManager.create(viewId, url)
-        console.log(`[Browser IPC] <<< browser:create success`)
         return { success: true, data: state }
       } catch (error) {
         console.error('[Browser IPC] Create failed:', error)
@@ -65,15 +60,11 @@ export function registerBrowserHandlers(mainWindow: BrowserWindow | null) {
     }
   )
 
-  /**
-   * Destroy a BrowserView
-   */
   ipcMain.handle('browser:destroy', async (_event, { viewId }: { viewId: string }) => {
     try {
+      // Every AI context pointing at it is reconciled, and the renderer told
+      // once, by the manager's view-destroyed hook (services/ai-browser).
       browserViewManager.destroy(viewId)
-      // Keep the AI Browser singleton in sync: if this was the AI's active view,
-      // clear it and announce the removal so the renderer drops the live session.
-      browserContext.handleViewDestroyed(viewId)
       return { success: true }
     } catch (error) {
       console.error('[Browser IPC] Destroy failed:', error)
@@ -81,16 +72,11 @@ export function registerBrowserHandlers(mainWindow: BrowserWindow | null) {
     }
   })
 
-  /**
-   * Show a BrowserView at specified bounds
-   */
   ipcMain.handle(
     'browser:show',
     async (_event, { viewId, bounds }: { viewId: string; bounds: BrowserViewBounds }) => {
-      console.log(`[Browser IPC] >>> browser:show received - viewId: ${viewId}, bounds:`, bounds)
       try {
         const result = browserViewManager.show(viewId, bounds)
-        console.log(`[Browser IPC] <<< browser:show result: ${result}`)
         return { success: result }
       } catch (error) {
         console.error('[Browser IPC] Show failed:', error)
@@ -99,9 +85,6 @@ export function registerBrowserHandlers(mainWindow: BrowserWindow | null) {
     }
   )
 
-  /**
-   * Hide a BrowserView
-   */
   ipcMain.handle('browser:hide', async (_event, { viewId }: { viewId: string }) => {
     try {
       const result = browserViewManager.hide(viewId)
@@ -113,13 +96,12 @@ export function registerBrowserHandlers(mainWindow: BrowserWindow | null) {
   })
 
   /**
-   * Switch device emulation mode (pc | h5) for a BrowserView.
+   * Switch device emulation mode (pc | h5) for a browser page.
    * Applies full CDP emulation and reloads the page.
    */
   ipcMain.handle(
     'browser:set-device-mode',
     async (_event, { viewId, mode }: { viewId: string; mode: DeviceMode }) => {
-      console.log(`[Browser IPC] browser:set-device-mode - viewId: ${viewId}, mode: ${mode}`)
       try {
         const result = await browserViewManager.setDeviceMode(viewId, mode)
         return { success: result }
@@ -130,9 +112,6 @@ export function registerBrowserHandlers(mainWindow: BrowserWindow | null) {
     }
   )
 
-  /**
-   * Resize a BrowserView
-   */
   ipcMain.handle(
     'browser:resize',
     async (_event, { viewId, bounds }: { viewId: string; bounds: BrowserViewBounds }) => {
@@ -302,7 +281,7 @@ export function registerBrowserHandlers(mainWindow: BrowserWindow | null) {
 
   /**
    * Show native context menu for browser
-   * Uses Electron Menu.popup() which renders above BrowserView
+   * Uses the native menu above embedded browser content.
    */
   ipcMain.handle(
     'browser:show-context-menu',
@@ -377,8 +356,7 @@ export function registerBrowserHandlers(mainWindow: BrowserWindow | null) {
       ]
 
       const menu = Menu.buildFromTemplate(menuTemplate)
-      menu.popup({ window: mainWindow || undefined })
-
+      await new Promise<void>(resolve => menu.popup({ window: mainWindow || undefined, callback: () => resolve() }))
       return { success: true }
     }
   )
@@ -397,7 +375,7 @@ export function registerBrowserHandlers(mainWindow: BrowserWindow | null) {
 
   /**
    * Show native context menu for canvas tabs
-   * Uses Electron Menu.popup() which renders above BrowserView
+   * Uses the native menu above embedded browser content.
    */
   ipcMain.handle(
     'canvas:show-tab-context-menu',
@@ -405,15 +383,12 @@ export function registerBrowserHandlers(mainWindow: BrowserWindow | null) {
       const { tabId, tabIndex, tabTitle, tabPath, tabCount, hasTabsToRight } = options
       const hasOtherTabs = tabCount > 1
 
-      console.log('[Browser IPC] canvas:show-tab-context-menu received:', { tabId, tabIndex, tabTitle })
-
       // Build menu template
       const menuTemplate: MenuItemConstructorOptions[] = [
         {
           label: 'Close',
           accelerator: 'CmdOrCtrl+W',
           click: () => {
-            console.log('[Browser IPC] Menu click: close tab', tabId)
             mainWindow?.webContents.send('canvas:tab-action', { action: 'close', tabId })
           }
         }
@@ -471,7 +446,7 @@ export function registerBrowserHandlers(mainWindow: BrowserWindow | null) {
 
   /**
    * Open a standalone login browser window.
-   * Uses the same session partition as BrowserView ('persist:browser')
+   * Shares the embedded browser partition ('persist:browser').
    * so cookies/auth state is shared with AI Browser automation.
    *
    * Flow:

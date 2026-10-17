@@ -4,14 +4,26 @@
  */
 
 import { useEffect, useState } from 'react'
-import { AlertTriangle, ChevronDown, ChevronUp, Cpu, Puzzle, RefreshCw, Terminal } from 'lucide-react'
+import { AlertTriangle, ChevronDown, ChevronRight, Cpu, Puzzle, RefreshCw, Terminal } from 'lucide-react'
 import { useTranslation } from '../../i18n'
 import { api } from '../../api'
 import type { EngineAvailabilityReport, EngineId, HaloConfig } from '../../types'
 import { CLIConfigSection } from './CLIConfigSection'
-import { Switch } from '../ui/Switch'
+import { Switch, switchRowHover } from '../ui/Switch'
 import { useConfirmDialog } from '../../hooks/useConfirmDialog'
 import { DEFAULT_DISABLED_TOOLS } from '../../../shared/constants/disabled-tools'
+import { DEFAULT_MAX_TURNS } from '../../../shared/constants/agent-limits'
+import {
+  DEFAULT_MAX_RESIDENT_SESSIONS,
+  MAX_MAX_RESIDENT_SESSIONS,
+  MIN_MAX_RESIDENT_SESSIONS,
+  clampMaxResidentSessions,
+} from '../../../shared/constants/session-budget'
+import {
+  TEAM_CIRCUIT_DEFAULTS,
+  TEAM_DEFAULT_TURN_TIMEOUT_MS,
+  TEAM_DEFAULT_MAX_CONCURRENT_TURNS,
+} from '../../../shared/apps/team-types'
 
 // ─── Agent SDK Engine ───────────────────────────────────────────────────────────
 
@@ -20,7 +32,7 @@ import { DEFAULT_DISABLED_TOOLS } from '../../../shared/constants/disabled-tools
  * render site as `t()` literals — i18next-parser only extracts literal keys,
  * so moving the copy into this table would drop the existing translations.
  */
-const ENGINE_IDS: readonly EngineId[] = ['anthropic', 'halo', 'codex']
+const ENGINE_IDS: readonly EngineId[] = ['anthropic', 'halo', 'codex', 'dsh']
 
 // ─── Built-in MCP Extensions ────────────────────────────────────────────────────
 
@@ -41,19 +53,12 @@ interface CapabilityGroup {
   /** CC SDK tools to add/remove from disabledTools (empty for MCP-only capabilities) */
   tools: readonly string[]
   /** Optional: dedicated AgentConfig boolean flag (for MCP servers, env vars, etc.) */
-  configKey?: 'enableTeams' | 'enableDigitalHumans'
+  configKey?: 'enableDigitalHumans' | 'enableConversationInterop' | 'enableConversationSend'
   /** Default value when configKey is not set in config (default: false) */
   configDefault?: boolean
 }
 
 const CAPABILITY_GROUPS: readonly CapabilityGroup[] = [
-  {
-    id: 'teams',
-    labelKey: 'Agent Teams',
-    descKey: 'Multi-agent collaboration. Agents can spawn teammates to work in parallel.',
-    tools: ['TeamCreate', 'TeamDelete', 'SendMessage'],
-    configKey: 'enableTeams',
-  },
   {
     id: 'planMode',
     labelKey: 'Plan Mode',
@@ -86,6 +91,22 @@ const CAPABILITY_GROUPS: readonly CapabilityGroup[] = [
     configKey: 'enableDigitalHumans',
     configDefault: true,
   },
+  {
+    id: 'conversationInterop',
+    labelKey: 'Cross-Conversation Interop',
+    descKey: 'Let this conversation list, read, and message other conversations in the same space.',
+    tools: [],
+    configKey: 'enableConversationInterop',
+    configDefault: true,
+  },
+  {
+    id: 'conversationInteropSend',
+    labelKey: 'Cross-Conversation Sending',
+    descKey: 'Also allow delivering messages to other conversations, not just reading them. Only applies when Cross-Conversation Interop above is on.',
+    tools: [],
+    configKey: 'enableConversationSend',
+    configDefault: true,
+  },
 ]
 
 // ─── Component ──────────────────────────────────────────────────────────────────
@@ -99,16 +120,16 @@ export function AdvancedSection({ config, setConfig }: AdvancedSectionProps) {
   const { t } = useTranslation()
   const { showConfirm, DialogComponent: RestartDialogComponent } = useConfirmDialog()
 
-  const [maxTurns, setMaxTurnsState] = useState(config?.agent?.maxTurns ?? 50)
-  const [sdkEngine, setSdkEngineState] = useState<'anthropic' | 'halo' | 'codex'>(
+  const [maxTurns, setMaxTurnsState] = useState(config?.agent?.maxTurns ?? DEFAULT_MAX_TURNS)
+  const [sdkEngine, setSdkEngineState] = useState<EngineId>(
     config?.agent?.sdkEngine ?? 'anthropic'
   )
   // Track whether the SDK engine was changed from the initial value (needs restart)
-  const [sdkEngineInitial] = useState<'anthropic' | 'halo' | 'codex'>(
+  const [sdkEngineInitial] = useState<EngineId>(
     config?.agent?.sdkEngine ?? 'anthropic'
   )
   const [disabledTools, setDisabledToolsState] = useState<string[]>(
-    config?.agent?.disabledTools ?? DEFAULT_DISABLED_TOOLS
+    config?.agent?.disabledTools ?? [...DEFAULT_DISABLED_TOOLS]
   )
   // Track dedicated config flags for capabilities that use configKey
   const [configFlags, setConfigFlags] = useState<Record<string, boolean>>(() => {
@@ -121,6 +142,20 @@ export function AdvancedSection({ config, setConfig }: AdvancedSectionProps) {
     return flags
   })
   const [developerMode, setDeveloperModeState] = useState(config?.agent?.developerMode ?? false)
+  const [teamTurnTimeoutMinutes, setTeamTurnTimeoutMinutesState] = useState(
+    Math.round((config?.agent?.teamTurnTimeoutMs ?? TEAM_DEFAULT_TURN_TIMEOUT_MS) / 60000)
+  )
+  const [teamCircuitLimits, setTeamCircuitLimitsState] = useState({
+    maxMessages: config?.agent?.teamCircuitLimits?.maxMessages ?? TEAM_CIRCUIT_DEFAULTS.maxMessages,
+    maxForwardDepth:
+      config?.agent?.teamCircuitLimits?.maxForwardDepth ?? TEAM_CIRCUIT_DEFAULTS.maxForwardDepth,
+  })
+  const [teamMaxConcurrentTurns, setTeamMaxConcurrentTurnsState] = useState(
+    config?.agent?.teamMaxConcurrentTurns ?? TEAM_DEFAULT_MAX_CONCURRENT_TURNS
+  )
+  const [maxResidentSessions, setMaxResidentSessionsState] = useState(
+    config?.agent?.maxResidentSessions ?? DEFAULT_MAX_RESIDENT_SESSIONS
+  )
   const [capsPanelOpen, setCapsPanelOpen] = useState(false)
   const [engineAvailability, setEngineAvailability] = useState<EngineAvailabilityReport | null>(null)
 
@@ -146,6 +181,30 @@ export function AdvancedSection({ config, setConfig }: AdvancedSectionProps) {
     return engineAvailability.engines.find(e => e.engineId === engineId)?.available ?? false
   }
 
+  const engineUnavailableReason = (engineId: EngineId) =>
+    engineAvailability?.engines.find(e => e.engineId === engineId)?.reason
+
+  // Built inside the component so every string stays a literal `t(...)` call
+  // and reaches the extractor.
+  const ENGINE_COPY: Record<EngineId, { title: string; description: string }> = {
+    anthropic: {
+      title: t('Claude Code SDK'),
+      description: t('Powered by the official Anthropic Claude Code engine. Works with a wide range of frontier models. (Default)'),
+    },
+    halo: {
+      title: t('Halo SDK'),
+      description: t('The official Halo agent engine. Lightweight on resources, faster startup, optimized for open-source models. Experimental.'),
+    },
+    codex: {
+      title: t('Codex SDK'),
+      description: t('Powered by the official OpenAI Codex SDK. Better suited for GPT-family models. Experimental.'),
+    },
+    dsh: {
+      title: t('DeepSeek dsh'),
+      description: t('Powered by the open-source DeepSeek dsh runtime, which upstream is still changing and has not stabilized. Best used with DeepSeek models. Experimental.'),
+    },
+  }
+
   // ─── Helpers ────────────────────────────────────────────────────────────────
 
   const isCapabilityEnabled = (group: CapabilityGroup) => {
@@ -167,7 +226,7 @@ export function AdvancedSection({ config, setConfig }: AdvancedSectionProps) {
 
   // ─── Handlers ───────────────────────────────────────────────────────────────
 
-  const handleSdkEngineChange = async (engine: 'anthropic' | 'halo' | 'codex') => {
+  const handleSdkEngineChange = async (engine: EngineId) => {
     if (engine === sdkEngine) return
     setSdkEngineState(engine)
     try {
@@ -201,7 +260,59 @@ export function AdvancedSection({ config, setConfig }: AdvancedSectionProps) {
       await saveAgentConfig({ maxTurns: clamped })
     } catch (error) {
       console.error('[AdvancedSection] Failed to update maxTurns:', error)
-      setMaxTurnsState(config?.agent?.maxTurns ?? 50)
+      setMaxTurnsState(config?.agent?.maxTurns ?? DEFAULT_MAX_TURNS)
+    }
+  }
+
+  const handleTeamTurnTimeoutChange = async (minutes: number) => {
+    const clamped = Math.max(5, Math.min(1440, minutes))
+    setTeamTurnTimeoutMinutesState(clamped)
+    try {
+      await saveAgentConfig({ teamTurnTimeoutMs: clamped * 60000 })
+    } catch (error) {
+      console.error('[AdvancedSection] Failed to update teamTurnTimeoutMs:', error)
+      setTeamTurnTimeoutMinutesState(
+        Math.round((config?.agent?.teamTurnTimeoutMs ?? TEAM_DEFAULT_TURN_TIMEOUT_MS) / 60000)
+      )
+    }
+  }
+
+  const handleTeamCircuitLimitChange = async (patch: Partial<typeof teamCircuitLimits>) => {
+    const previous = teamCircuitLimits
+    const next = { ...previous, ...patch }
+    setTeamCircuitLimitsState(next)
+    try {
+      await saveAgentConfig({
+        teamCircuitLimits: {
+          maxMessages: next.maxMessages,
+          maxForwardDepth: next.maxForwardDepth,
+        },
+      })
+    } catch (error) {
+      console.error('[AdvancedSection] Failed to update teamCircuitLimits:', error)
+      setTeamCircuitLimitsState(previous)
+    }
+  }
+
+  const handleTeamMaxConcurrentTurnsChange = async (value: number) => {
+    const clamped = Math.max(1, Math.min(100, value))
+    setTeamMaxConcurrentTurnsState(clamped)
+    try {
+      await saveAgentConfig({ teamMaxConcurrentTurns: clamped })
+    } catch (error) {
+      console.error('[AdvancedSection] Failed to update teamMaxConcurrentTurns:', error)
+      setTeamMaxConcurrentTurnsState(config?.agent?.teamMaxConcurrentTurns ?? TEAM_DEFAULT_MAX_CONCURRENT_TURNS)
+    }
+  }
+
+  const handleMaxResidentSessionsChange = async (value: number) => {
+    const clamped = clampMaxResidentSessions(value)
+    setMaxResidentSessionsState(clamped)
+    try {
+      await saveAgentConfig({ maxResidentSessions: clamped })
+    } catch (error) {
+      console.error('[AdvancedSection] Failed to update maxResidentSessions:', error)
+      setMaxResidentSessionsState(config?.agent?.maxResidentSessions ?? DEFAULT_MAX_RESIDENT_SESSIONS)
     }
   }
 
@@ -234,7 +345,7 @@ export function AdvancedSection({ config, setConfig }: AdvancedSectionProps) {
       await saveAgentConfig({ disabledTools: newDisabled, ...extraPatch })
     } catch (error) {
       console.error('[AdvancedSection] Failed to update capability:', error)
-      setDisabledToolsState(config?.agent?.disabledTools ?? DEFAULT_DISABLED_TOOLS)
+      setDisabledToolsState(config?.agent?.disabledTools ?? [...DEFAULT_DISABLED_TOOLS])
       if (key) {
         setConfigFlags(prev => ({
           ...prev,
@@ -257,7 +368,7 @@ export function AdvancedSection({ config, setConfig }: AdvancedSectionProps) {
   // ─── Render ─────────────────────────────────────────────────────────────────
 
   return (
-    <section id="advanced" className="bg-card rounded-xl border border-border p-4 sm:p-6">
+    <section id="advanced" className="bg-card rounded-xl border border-border-faint p-4 sm:p-6">
       <h2 className="text-lg font-medium mb-4">{t('Advanced')}</h2>
 
       {/* Warning banner */}
@@ -291,7 +402,10 @@ export function AdvancedSection({ config, setConfig }: AdvancedSectionProps) {
 
           <div className="space-y-2">
             {ENGINE_IDS.map(engineId => {
-              const available = isEngineAvailable(engineId)
+              const copy = ENGINE_COPY[engineId]
+              // The active engine stays selectable even if its runtime went
+              // missing, so the user is never locked out of their own setting.
+              const available = isEngineAvailable(engineId) || sdkEngine === engineId
               return (
                 <label
                   key={engineId}
@@ -308,22 +422,19 @@ export function AdvancedSection({ config, setConfig }: AdvancedSectionProps) {
                     onChange={() => handleSdkEngineChange(engineId)}
                     className="mt-0.5 accent-primary"
                   />
-                  <div>
+                  <div className="min-w-0">
                     <p className="font-medium text-sm">
-                      {engineId === 'anthropic' && t('Claude Code SDK')}
-                      {engineId === 'halo' && t('Halo SDK')}
-                      {engineId === 'codex' && t('Codex SDK')}
+                      {copy.title}
                       {!available && (
                         <span className="ml-2 text-xs font-normal text-muted-foreground">
                           {t('Not included in this build')}
                         </span>
                       )}
                     </p>
-                    <p className="text-xs text-muted-foreground">
-                      {engineId === 'anthropic' && t('Powered by the official Anthropic Claude Code engine. Works with a wide range of frontier models. (Default)')}
-                      {engineId === 'halo' && t('The official Halo agent engine. Lightweight on resources, faster startup, optimized for open-source models. Experimental.')}
-                      {engineId === 'codex' && t('Powered by the official OpenAI Codex SDK. Better suited for GPT-family models. Experimental.')}
-                    </p>
+                    <p className="text-xs text-muted-foreground">{copy.description}</p>
+                    {!available && engineUnavailableReason(engineId) && (
+                      <p className="mt-1 text-xs text-muted-foreground">{engineUnavailableReason(engineId)}</p>
+                    )}
                   </div>
                 </label>
               )
@@ -366,8 +477,8 @@ export function AdvancedSection({ config, setConfig }: AdvancedSectionProps) {
                 <span className="font-medium text-sm">{t('Built-in MCP Extensions')}</span>
               </div>
               {capsPanelOpen
-                ? <ChevronUp className="w-4 h-4 text-muted-foreground" />
-                : <ChevronDown className="w-4 h-4 text-muted-foreground" />
+                ? <ChevronDown className="w-4 h-4 text-muted-foreground" />
+                : <ChevronRight className="w-4 h-4 text-muted-foreground" />
               }
             </button>
 
@@ -383,21 +494,18 @@ export function AdvancedSection({ config, setConfig }: AdvancedSectionProps) {
                   {CAPABILITY_GROUPS.map((group, idx) => {
                     const enabled = isCapabilityEnabled(group)
                     return (
-                      <div
-                        key={group.id}
-                        className={`flex items-center justify-between py-3 ${
-                          idx > 0 ? 'border-t border-border' : ''
-                        }`}
-                      >
-                        <div className="flex-1 min-w-0 mr-3">
-                          <p className="font-medium text-sm">{t(group.labelKey)}</p>
-                          <p className="text-xs text-muted-foreground">{t(group.descKey)}</p>
+                      <div key={group.id} className={`py-1.5 ${idx > 0 ? 'border-t border-border' : ''}`}>
+                        <div className={`flex items-center justify-between py-1.5 ${switchRowHover}`}>
+                          <div className="flex-1 min-w-0 mr-3">
+                            <p className="font-medium text-sm">{t(group.labelKey)}</p>
+                            <p className="text-xs text-muted-foreground">{t(group.descKey)}</p>
+                          </div>
+                          <Switch
+                            checked={enabled}
+                            onCheckedChange={(checked) => handleCapabilityToggle(group, checked)}
+                            size="sm"
+                          />
                         </div>
-                        <Switch
-                          checked={enabled}
-                          onCheckedChange={(checked) => handleCapabilityToggle(group, checked)}
-                          size="sm"
-                        />
                       </div>
                     )
                   })}
@@ -440,33 +548,197 @@ export function AdvancedSection({ config, setConfig }: AdvancedSectionProps) {
                 handleMaxTurnsChange(val)
               }
             }}
-            className="w-24 px-3 py-1.5 text-sm bg-secondary border border-border rounded-lg text-right focus:outline-none focus:ring-2 focus:ring-primary/50"
+            className="w-24 px-3 py-1.5 text-sm bg-secondary border border-transparent rounded-lg text-right focus:outline-none focus:border-primary/50"
+          />
+        </div>
+
+        {/* Team Turn Timeout */}
+        <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2 pt-4 border-t border-border">
+          <div className="flex-1">
+            <div className="flex items-center gap-2">
+              <p className="font-medium">{t('Digital Team Turn Timeout')}</p>
+              <span
+                className="inline-flex items-center justify-center w-4 h-4 text-xs rounded-full bg-muted text-muted-foreground cursor-help"
+                title={t('Maximum time a digital team member may spend on one turn before it is stopped, in minutes')}
+              >
+                ?
+              </span>
+            </div>
+            <p className="text-sm text-muted-foreground">
+              {t('Maximum time a digital team member may spend on one turn before it is stopped, in minutes')}
+            </p>
+          </div>
+          <input
+            type="number"
+            min={5}
+            max={1440}
+            value={teamTurnTimeoutMinutes}
+            onChange={(e) => {
+              const val = parseInt(e.target.value, 10)
+              if (!isNaN(val)) {
+                setTeamTurnTimeoutMinutesState(val)
+              }
+            }}
+            onBlur={(e) => {
+              const val = parseInt(e.target.value, 10)
+              if (!isNaN(val)) {
+                handleTeamTurnTimeoutChange(val)
+              }
+            }}
+            className="w-24 self-end sm:self-auto px-3 py-1.5 text-sm bg-secondary border border-transparent rounded-lg text-right focus:outline-none focus:border-primary/50"
+          />
+        </div>
+
+        {/* Team Circuit Breaker Limits */}
+        <div className="flex flex-col gap-3 pt-4 border-t border-border">
+          <div>
+            <div className="flex items-center gap-2">
+              <p className="font-medium">{t('Digital Team Circuit Breaker Limits')}</p>
+              <span
+                className="inline-flex items-center justify-center w-4 h-4 text-xs rounded-full bg-muted text-muted-foreground cursor-help"
+                title={t('Safety limits that automatically stop a digital team run if it loses control')}
+              >
+                ?
+              </span>
+            </div>
+            <p className="text-sm text-muted-foreground">
+              {t('Safety limits that automatically stop a digital team run if it loses control')}
+            </p>
+          </div>
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+            <label className="flex flex-col gap-1">
+              <span className="text-xs text-muted-foreground">{t('Max messages per run')}</span>
+              <input
+                type="number"
+                min={10}
+                max={5000}
+                value={teamCircuitLimits.maxMessages}
+                onChange={(e) => {
+                  const val = parseInt(e.target.value, 10)
+                  if (!isNaN(val)) setTeamCircuitLimitsState((prev) => ({ ...prev, maxMessages: val }))
+                }}
+                onBlur={(e) => {
+                  const val = parseInt(e.target.value, 10)
+                  if (!isNaN(val)) handleTeamCircuitLimitChange({ maxMessages: val })
+                }}
+                className="mt-auto w-full px-3 py-1.5 text-sm bg-secondary border border-transparent rounded-lg text-right focus:outline-none focus:border-primary/50"
+              />
+            </label>
+            <label className="flex flex-col gap-1">
+              <span className="text-xs text-muted-foreground">{t('Max chained replies')}</span>
+              <span className="text-[11px] text-muted-foreground/70">
+                {t('Digital humans replying back and forth without pause; resets when a person steps in')}
+              </span>
+              <input
+                type="number"
+                min={1}
+                max={100}
+                value={teamCircuitLimits.maxForwardDepth}
+                onChange={(e) => {
+                  const val = parseInt(e.target.value, 10)
+                  if (!isNaN(val)) setTeamCircuitLimitsState((prev) => ({ ...prev, maxForwardDepth: val }))
+                }}
+                onBlur={(e) => {
+                  const val = parseInt(e.target.value, 10)
+                  if (!isNaN(val)) handleTeamCircuitLimitChange({ maxForwardDepth: val })
+                }}
+                className="mt-auto w-full px-3 py-1.5 text-sm bg-secondary border border-transparent rounded-lg text-right focus:outline-none focus:border-primary/50"
+              />
+            </label>
+          </div>
+        </div>
+
+        {/* Team Max Concurrent Turns */}
+        <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2 pt-4 border-t border-border">
+          <div className="flex-1">
+            <div className="flex items-center gap-2">
+              <p className="font-medium">{t('Digital Team Concurrency Limit')}</p>
+              <span
+                className="inline-flex items-center justify-center w-4 h-4 text-xs rounded-full bg-muted text-muted-foreground cursor-help"
+                title={t('Maximum number of digital team member turns that may run at the same time on this machine')}
+              >
+                ?
+              </span>
+            </div>
+            <p className="text-sm text-muted-foreground">
+              {t('Maximum number of digital team member turns that may run at the same time on this machine')}
+            </p>
+          </div>
+          <input
+            type="number"
+            min={1}
+            max={100}
+            value={teamMaxConcurrentTurns}
+            onChange={(e) => {
+              const val = parseInt(e.target.value, 10)
+              if (!isNaN(val)) {
+                setTeamMaxConcurrentTurnsState(val)
+              }
+            }}
+            onBlur={(e) => {
+              const val = parseInt(e.target.value, 10)
+              if (!isNaN(val)) {
+                handleTeamMaxConcurrentTurnsChange(val)
+              }
+            }}
+            className="w-24 self-end sm:self-auto px-3 py-1.5 text-sm bg-secondary border border-transparent rounded-lg text-right focus:outline-none focus:border-primary/50"
+          />
+        </div>
+
+        {/* Resident Session Budget */}
+        <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2 pt-4 border-t border-border">
+          <div className="flex-1">
+            <p className="font-medium">{t('Active Conversation Limit')}</p>
+            <p className="text-sm text-muted-foreground">
+              {t('Most conversations kept ready at once. Each one keeps an AI process in memory; beyond the limit the least recently used pause and resume on their next message. Halved automatically when the computer is low on memory.')}
+            </p>
+          </div>
+          <input
+            type="number"
+            min={MIN_MAX_RESIDENT_SESSIONS}
+            max={MAX_MAX_RESIDENT_SESSIONS}
+            value={maxResidentSessions}
+            onChange={(e) => {
+              const val = parseInt(e.target.value, 10)
+              if (!isNaN(val)) {
+                setMaxResidentSessionsState(val)
+              }
+            }}
+            onBlur={(e) => {
+              const val = parseInt(e.target.value, 10)
+              if (!isNaN(val)) {
+                handleMaxResidentSessionsChange(val)
+              }
+            }}
+            className="w-24 self-end sm:self-auto px-3 py-1.5 text-sm bg-secondary border border-transparent rounded-lg text-right focus:outline-none focus:border-primary/50"
           />
         </div>
 
         {/* Developer Mode */}
-        <div className="flex items-start justify-between pt-4 border-t border-border">
-          <div className="flex-1 min-w-0">
-            <div className="flex items-center gap-2 mb-1">
-              <Terminal className="w-4 h-4 text-muted-foreground shrink-0" />
-              <p className="font-medium">{t('Developer Mode')}</p>
-              <span className="inline-flex items-center px-1.5 py-0.5 rounded text-xs font-medium bg-amber-500/10 text-amber-600 dark:text-amber-400 border border-amber-500/20 shrink-0">
-                {t('Dev')}
-              </span>
+        <div className="pt-4 border-t border-border">
+          <div className={`flex items-start justify-between py-1.5 ${switchRowHover}`}>
+            <div className="flex-1 min-w-0">
+              <div className="flex items-center gap-2 mb-1">
+                <Terminal className="w-4 h-4 text-muted-foreground shrink-0" />
+                <p className="font-medium">{t('Developer Mode')}</p>
+                <span className="inline-flex items-center px-1.5 py-0.5 rounded text-xs font-medium bg-amber-500/10 text-amber-600 dark:text-amber-400 border border-amber-500/20 shrink-0">
+                  {t('Dev')}
+                </span>
+              </div>
+              <p className="text-sm text-muted-foreground">
+                {t('Enable verbose logging for troubleshooting: HTTP request payloads, session lifecycle, stream events, and scheduler diagnostics.')}
+              </p>
+              <p className="text-xs text-amber-600 dark:text-amber-400 mt-1">
+                {t('Generates large log files and may affect performance. Disable after troubleshooting.')}
+              </p>
             </div>
-            <p className="text-sm text-muted-foreground">
-              {t('Enable verbose logging for troubleshooting: HTTP request payloads, session lifecycle, stream events, and scheduler diagnostics.')}
-            </p>
-            <p className="text-xs text-amber-600 dark:text-amber-400 mt-1">
-              {t('Generates large log files and may affect performance. Disable after troubleshooting.')}
-            </p>
+            <Switch
+              checked={developerMode}
+              onCheckedChange={handleDeveloperModeChange}
+              size="sm"
+              className="ml-4 mt-0.5"
+            />
           </div>
-          <Switch
-            checked={developerMode}
-            onCheckedChange={handleDeveloperModeChange}
-            size="sm"
-            className="ml-4 mt-0.5"
-          />
         </div>
 
         {/* Claude CLI Integration */}

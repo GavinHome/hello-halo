@@ -197,6 +197,61 @@ describe('Request Converters', () => {
       expect(result.request.reasoning_effort).toBeUndefined()
     })
 
+    it('should send the level picked for the session over an adaptive request and Model Config', () => {
+      const request: AnthropicRequest = {
+        model: 'glm-5.3',
+        max_tokens: 1024,
+        messages: [{ role: 'user', content: 'Hello' }],
+        thinking: { type: 'adaptive' }
+      }
+
+      const chat = convertAnthropicToOpenAIChat(request, { reasoningEffort: 'high', pickedReasoningEffort: 'max' })
+      expect(chat.request.reasoning_effort).toBe('max')
+
+      const responses = convertAnthropicToOpenAIResponses(request, { reasoningEffort: 'high', pickedReasoningEffort: 'off' })
+      expect(responses.request.reasoning).toEqual({ effort: 'low' })
+    })
+
+    it('should switch thinking off through thinking.type where the model has that toggle', () => {
+      const request: AnthropicRequest = {
+        model: 'deepseek-v4-pro',
+        max_tokens: 1024,
+        messages: [{ role: 'user', content: 'Hello' }],
+        thinking: { type: 'adaptive' }
+      }
+
+      const off = convertAnthropicToOpenAIChat(request, { pickedReasoningEffort: 'off' })
+      expect(off.request.thinking).toEqual({ type: 'disabled' })
+      expect(off.request.reasoning_effort).toBeUndefined()
+
+      const on = convertAnthropicToOpenAIChat(request, { pickedReasoningEffort: 'max' })
+      expect(on.request.thinking).toBeUndefined()
+      expect(on.request.reasoning_effort).toBe('max')
+
+      const other = convertAnthropicToOpenAIChat({ ...request, model: 'gpt-4o' }, { pickedReasoningEffort: 'off' })
+      expect(other.request.thinking).toBeUndefined()
+    })
+
+    it('should tell MiMo to stop thinking when thinking is off, and change nothing when it is on', () => {
+      const request: AnthropicRequest = {
+        model: 'mimo-v2.5',
+        max_tokens: 1024,
+        messages: [{ role: 'user', content: 'Hello' }],
+        thinking: { type: 'adaptive' }
+      }
+
+      const off = convertAnthropicToOpenAIChat(request, { pickedReasoningEffort: 'off' })
+      expect(off.request.thinking).toEqual({ type: 'disabled' })
+      expect(off.request.reasoning_effort).toBeUndefined()
+
+      const toggledOff = convertAnthropicToOpenAIChat({ ...request, thinking: { type: 'disabled' } })
+      expect(toggledOff.request.thinking).toEqual({ type: 'disabled' })
+
+      const on = convertAnthropicToOpenAIChat(request, { pickedReasoningEffort: 'high' })
+      expect(on.request.thinking).toBeUndefined()
+      expect(on.request.reasoning_effort).toBe('high')
+    })
+
     // ====================================================================
     // reasoning_content injection from thinking blocks
     // ====================================================================
@@ -479,7 +534,7 @@ describe('Request Converters', () => {
   describe('non-vision model image stripping', () => {
     const PNG_SOURCE = {
       type: 'base64' as const,
-      media_type: 'image/png',
+      media_type: 'image/png' as const,
       data: 'abc123'
     }
 
@@ -675,7 +730,7 @@ describe('Request Converters', () => {
   describe('vision override', () => {
     const PNG_SOURCE = {
       type: 'base64' as const,
-      media_type: 'image/png',
+      media_type: 'image/png' as const,
       data: 'abc123'
     }
 
@@ -776,6 +831,37 @@ describe('Response Converters', () => {
       expect(result.stop_reason).toBe('end_turn')
       expect(result.usage.input_tokens).toBe(10)
       expect(result.usage.output_tokens).toBe(8)
+    })
+
+    it('should exclude cache_read_input_tokens from input_tokens (GLM Coding Plan regression)', () => {
+      // prompt_tokens under OpenAI semantics already includes the cached
+      // portion; Anthropic's input_tokens must exclude it or every consumer
+      // that sums input_tokens + cache_read_input_tokens double-counts.
+      const response: OpenAIChatResponse = {
+        id: 'chatcmpl-789',
+        object: 'chat.completion',
+        created: Date.now(),
+        model: 'glm-5.2-zp',
+        choices: [
+          {
+            index: 0,
+            message: { role: 'assistant', content: 'Hello!' },
+            finish_reason: 'stop'
+          }
+        ],
+        usage: {
+          prompt_tokens: 131186,
+          completion_tokens: 79,
+          total_tokens: 131265,
+          cache_read_input_tokens: 130304
+        } as OpenAIChatResponse['usage']
+      }
+
+      const result = convertOpenAIChatToAnthropic(response)
+
+      expect(result.usage.input_tokens).toBe(882)
+      expect(result.usage.output_tokens).toBe(79)
+      expect(result.usage.cache_read_input_tokens).toBe(130304)
     })
 
     it('should convert tool_calls to tool_use', () => {

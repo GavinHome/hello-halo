@@ -18,8 +18,10 @@
  */
 
 import { describe, it, expect, beforeEach, vi } from 'vitest'
+import type { AppChatRequest } from '../../../../src/main/apps/runtime/app-chat'
 import type { InboundMessage, ReplyHandle } from '../../../../src/shared/types/inbound-message'
-import type { ImSessionRecord } from '../../../../src/shared/types/im-channel'
+import type { ImChannelInstance, ImSessionRecord } from '../../../../src/shared/types/im-channel'
+import type { ImSessionRegistry } from '../../../../src/main/apps/runtime/im-session-registry'
 
 // ============================================
 // Mocks (must be declared before importing dispatch-inbound)
@@ -36,17 +38,30 @@ const { resolveInboundIdentity } = vi.hoisted(() => ({
 }))
 
 const { sendAppChatMessage, isAppChatConversationGenerating } = vi.hoisted(() => ({
-  sendAppChatMessage: vi.fn(async () => {}),
+  sendAppChatMessage: vi.fn<[AppChatRequest], Promise<void>>(async () => {}),
   isAppChatConversationGenerating: vi.fn(() => false),
 }))
 
-const { findSessionMock, registerMock } = vi.hoisted(() => ({
-  findSessionMock: vi.fn(() => undefined as unknown),
-  registerMock: vi.fn(),
-}))
+const { sessions, findSessionMock, registerMock } = vi.hoisted(() => {
+  const sessions = new Map<string, ImSessionRecord>()
+  return {
+    sessions,
+    findSessionMock: vi.fn((appId: string, channel: string, chatId: string) => sessions.get(`${appId}:${channel}:${chatId}`)),
+    registerMock: vi.fn((...args: Parameters<ImSessionRegistry['register']>) => {
+      const [appId, channel, chatId, chatType, instanceId, opts] = args
+      const key = `${appId}:${channel}:${chatId}`
+      sessions.set(key, {
+        appId, channel, chatId, chatType, source: 'im', proactive: false,
+        displayName: opts?.displayName ?? chatId, ...sessions.get(key),
+        instanceId, lastActiveAt: Date.now(),
+        ...(opts?.contactId ? { contactId: opts.contactId } : {}),
+      })
+    }),
+  }
+})
 
 const { getInstanceMock } = vi.hoisted(() => ({
-  getInstanceMock: vi.fn(() => ({ identityCapability: { fetchIdentityDirectory: vi.fn() } })),
+  getInstanceMock: vi.fn<[], Pick<ImChannelInstance, 'identityCapability'>>(() => ({ identityCapability: { fetchIdentityDirectory: vi.fn() } })),
 }))
 
 vi.mock('../../../../src/main/apps/runtime/im-channels/identity-resolve', () => ({
@@ -57,7 +72,7 @@ vi.mock('../../../../src/main/apps/runtime/im-channels/identity-resolve', () => 
 }))
 
 vi.mock('../../../../src/main/apps/runtime/app-chat', () => ({
-  sendAppChatMessage: (...args: unknown[]) => {
+  sendAppChatMessage: (...args: [AppChatRequest]) => {
     callOrder.push('sendAppChatMessage')
     return sendAppChatMessage(...args)
   },
@@ -65,6 +80,13 @@ vi.mock('../../../../src/main/apps/runtime/app-chat', () => ({
   isAppChatConversationGenerating,
   buildImSessionKey: (appId: string, channel: string, chatType: string, chatId: string) =>
     `app-chat:${appId}:${channel}:${chatType}:${chatId}`,
+}))
+
+vi.mock('../../../../src/main/apps/runtime/app-chat-live-turn', () => ({
+  getAppChatTurnIdentity: () => undefined,
+  appChatMessageIdentity: (permission: any) => permission?.isOwner === false ? 'guest' : 'owner',
+  injectIntoAppChatBatch: () => false,
+  beginAppChatTurnStart: vi.fn(() => ({ cancelled: false, end: vi.fn() })),
 }))
 
 vi.mock('../../../../src/main/apps/runtime/im-session-registry', () => ({
@@ -77,7 +99,7 @@ vi.mock('../../../../src/main/apps/runtime/im-session-registry', () => ({
 vi.mock('../../../../src/main/apps/runtime/im-channels', () => ({
   getActiveImChannelManager: () => ({
     getInstance: getInstanceMock,
-    getInstanceConfig: () => ({}),
+    getInstanceConfig: () => ({ id: 'inst-1', type: 'wecom-bot', enabled: true, appId: 'app-1', config: {} }),
   }),
 }))
 
@@ -102,6 +124,17 @@ vi.mock('../../../../src/main/foundation/window.service', () => ({ sendToRendere
 vi.mock('../../../../src/main/http/websocket', () => ({ broadcastToAll: vi.fn() }))
 vi.mock('../../../../src/main/services/analytics/analytics.service', () => ({ analytics: { track: vi.fn() } }))
 vi.mock('../../../../src/main/services/analytics/types', () => ({ AnalyticsEvents: {} }))
+vi.mock('../../../../src/main/apps/team', () => ({ getTeamStore: vi.fn(() => null) }))
+vi.mock('../../../../src/main/apps/runtime/team', () => ({ getActiveTeamRuntime: vi.fn(() => null) }))
+
+vi.mock('../../../../src/main/foundation/config.service', () => ({
+  getConfig: vi.fn(() => ({})),
+  onAgentConfigChange: vi.fn(),
+}))
+
+// The IM error reply asks whether a failure is a refused local connection; what
+// a chat is then told is im-error-reply.test's, with the real check.
+vi.mock('../../../../src/main/services/agent', () => ({ isRefusedLocalConnection: () => false }))
 vi.mock('../../../../src/main/foundation/product-config', () => ({
   getImChannelsPermissionDefaults: vi.fn(() => ({})),
 }))
@@ -138,7 +171,7 @@ function makeMsg(overrides: Partial<InboundMessage> = {}): InboundMessage {
 }
 
 function makeReply(): ReplyHandle {
-  return { send: vi.fn(async () => true) }
+  return { channel: 'wecom-bot', chatId: 'user-1', send: vi.fn(async () => {}) }
 }
 
 function fakeSession(overrides: Partial<ImSessionRecord> = {}): ImSessionRecord {
@@ -156,8 +189,8 @@ function fakeSession(overrides: Partial<ImSessionRecord> = {}): ImSessionRecord 
   }
 }
 
-function sentPayload(): { message: string; senderIdentity?: { id: string; name: string } } {
-  return sendAppChatMessage.mock.calls[0][0] as { message: string; senderIdentity?: { id: string; name: string } }
+function sentPayload(): AppChatRequest {
+  return sendAppChatMessage.mock.calls[0][0]
 }
 
 beforeEach(() => {
@@ -166,8 +199,9 @@ beforeEach(() => {
   resolveInboundIdentity.mockReturnValue(new Promise<void>(() => {})) // hangs forever
   sendAppChatMessage.mockClear()
   isAppChatConversationGenerating.mockReturnValue(false)
-  findSessionMock.mockReset()
-  findSessionMock.mockReturnValue(undefined)
+  sessions.clear()
+  findSessionMock.mockClear()
+  registerMock.mockClear()
   getInstanceMock.mockReturnValue({ identityCapability: { fetchIdentityDirectory: vi.fn() } })
 })
 
@@ -202,11 +236,9 @@ describe('dispatchInboundMessage — identity resolution is fire-and-forget (B2 
 
 describe('dispatchInboundMessage — resolvedName applies to direct chats only (B1 regression)', () => {
   it('does NOT label a group message sender with the group session\'s own resolvedName', async () => {
-    findSessionMock.mockImplementation((_appId: string, _channel: string, chatId: string) =>
-      chatId === 'room-1'
-        ? fakeSession({ chatId: 'room-1', chatType: 'group', resolvedName: 'The Group Chat' })
-        : undefined
-    )
+    sessions.set('app-1:wecom-bot:room-1', fakeSession({
+      chatId: 'room-1', chatType: 'group', resolvedName: 'The Group Chat',
+    }))
 
     await dispatchInboundMessage(
       makeMsg({ chatType: 'group', chatId: 'room-1', from: 'user-1', fromName: 'Alice' }),
@@ -218,14 +250,13 @@ describe('dispatchInboundMessage — resolvedName applies to direct chats only (
     const { message } = sentPayload()
     expect(message).toContain('<msg-sender id="user-1" name="Alice" />')
     expect(message).not.toContain('The Group Chat')
+    expect(sentPayload().recorded).toEqual({ content: '<msg-sender id="user-1" name="Alice" />\nhello' })
   })
 
   it('applies resolvedName to the sender identity for a direct chat', async () => {
-    findSessionMock.mockImplementation((_appId: string, _channel: string, chatId: string) =>
-      chatId === 'user-1'
-        ? fakeSession({ chatId: 'user-1', chatType: 'direct', resolvedName: 'Alice Real Name' })
-        : undefined
-    )
+    sessions.set('app-1:wecom-bot:user-1', fakeSession({
+      chatId: 'user-1', chatType: 'direct', resolvedName: 'Alice Real Name',
+    }))
 
     await dispatchInboundMessage(
       makeMsg({ chatType: 'direct', chatId: 'user-1', from: 'user-1', fromName: 'user-1' }),
@@ -236,6 +267,8 @@ describe('dispatchInboundMessage — resolvedName applies to direct chats only (
 
     const { senderIdentity } = sentPayload()
     expect(senderIdentity?.name).toBe('Alice Real Name')
+    expect(sentPayload().recorded).toEqual({ content: 'hello' })
+    expect(findSessionMock('app-1', 'wecom-bot', 'user-1')).toMatchObject({ contactId: 'user-1' })
   })
 
   it('falls back to fromName for a direct chat with no resolvedName yet', async () => {

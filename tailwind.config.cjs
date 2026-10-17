@@ -6,7 +6,13 @@ module.exports = {
   theme: {
     extend: {
       colors: {
-        border: 'hsl(var(--border))',
+        border: {
+          DEFAULT: 'hsl(var(--border))',
+          // Per-theme dividers (see globals.css): alphas of --border in light,
+          // solid in dark. No alpha modifier — the value already carries it.
+          soft: 'var(--border-soft)',
+          faint: 'var(--border-faint)',
+        },
         input: 'hsl(var(--input))',
         ring: 'hsl(var(--ring))',
         background: 'hsl(var(--background))',
@@ -14,6 +20,7 @@ module.exports = {
         primary: {
           DEFAULT: 'hsl(var(--primary))',
           foreground: 'hsl(var(--primary-foreground))',
+          hover: 'hsl(var(--primary-hover))',
         },
         secondary: {
           DEFAULT: 'hsl(var(--secondary))',
@@ -39,20 +46,50 @@ module.exports = {
           DEFAULT: 'hsl(var(--card))',
           foreground: 'hsl(var(--card-foreground))',
         },
+        'surface-hover': 'hsl(var(--surface-hover))',
+        'subtle-foreground': 'hsl(var(--subtle-foreground))',
+        'faint-foreground': 'hsl(var(--faint-foreground))',
+        'accent-on-dark': 'hsl(var(--accent-on-dark))',
         // Halo brand colors
         'halo-glow': 'hsl(var(--halo-glow))',
         'halo-success': 'hsl(var(--halo-success))',
         'halo-warning': 'hsl(var(--halo-warning))',
         'halo-error': 'hsl(var(--halo-error))',
+        // Diff text and line backgrounds (see globals.css)
+        'diff-add': 'hsl(var(--diff-add) / <alpha-value>)',
+        'diff-del': 'hsl(var(--diff-del) / <alpha-value>)',
+        'diff-mod': 'hsl(var(--diff-mod) / <alpha-value>)',
 
         // App type accent colors
         'app-skill': 'hsl(var(--app-skill))',
         'app-mcp': 'hsl(var(--app-mcp))',
       },
+      // Text may take a darker shade of these than fills, dots and borders (light does; see globals.css).
+      textColor: {
+        // Object form so text-primary-foreground / -hover keep coming from colors.primary.
+        primary: { DEFAULT: 'hsl(var(--primary-text))' },
+        'halo-success': 'hsl(var(--halo-success-text))',
+        'halo-warning': 'hsl(var(--halo-warning-text))',
+      },
       borderRadius: {
         lg: 'var(--radius)',
         md: 'calc(var(--radius) - 2px)',
         sm: 'calc(var(--radius) - 4px)',
+      },
+      boxShadow: {
+        soft: 'var(--shadow-soft)',
+        pop: 'var(--shadow-pop)',
+      },
+      transitionTimingFunction: {
+        halo: 'var(--ease)',
+      },
+      transitionDuration: {
+        fast: '120ms',
+        DEFAULT: '160ms',
+        slow: '240ms',
+      },
+      maxWidth: {
+        chat: 'var(--chat-reading-width)',
       },
       // GitHub-like typography customization
       typography: ({ theme }) => ({
@@ -61,7 +98,7 @@ module.exports = {
             '--tw-prose-body': 'hsl(var(--foreground))',
             '--tw-prose-headings': 'hsl(var(--foreground))',
             '--tw-prose-lead': 'hsl(var(--muted-foreground))',
-            '--tw-prose-links': 'hsl(var(--primary))',
+            '--tw-prose-links': 'hsl(var(--primary-text))',
             '--tw-prose-bold': 'hsl(var(--foreground))',
             '--tw-prose-counters': 'hsl(var(--muted-foreground))',
             '--tw-prose-bullets': 'hsl(var(--muted-foreground))',
@@ -78,7 +115,7 @@ module.exports = {
             '--tw-prose-invert-body': 'hsl(var(--foreground))',
             '--tw-prose-invert-headings': 'hsl(var(--foreground))',
             '--tw-prose-invert-lead': 'hsl(var(--muted-foreground))',
-            '--tw-prose-invert-links': 'hsl(var(--primary))',
+            '--tw-prose-invert-links': 'hsl(var(--primary-text))',
             '--tw-prose-invert-bold': 'hsl(var(--foreground))',
             '--tw-prose-invert-counters': 'hsl(var(--muted-foreground))',
             '--tw-prose-invert-bullets': 'hsl(var(--muted-foreground))',
@@ -225,5 +262,11 @@ module.exports = {
   },
   plugins: [
     require('@tailwindcss/typography'),
+    // `theme-dark:` targets only the dark theme (<html class="theme-dark">,
+    // set from the theme setting; Tailwind's own `dark:` follows only the OS),
+    // so a theme added later is left untouched. It ties `hover:` / `data-*:`
+    // on specificity and wins by source order, while `group-hover:` outranks
+    // it, so restate overridden states under `theme-dark:`.
+    ({ addVariant }) => addVariant('theme-dark', '.theme-dark &'),
   ],
 }

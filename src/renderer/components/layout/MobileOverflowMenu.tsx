@@ -8,12 +8,21 @@
  */
 
 import { useState } from 'react'
-import { MoreHorizontal, Sparkles, Search, Settings, ChevronRight, X } from 'lucide-react'
+import { MoreHorizontal, Sparkles, Search, Settings, ChevronRight, X, Loader2 } from 'lucide-react'
+import { BROWSER_META, TERMINAL_META, CHANGES_META } from '../canvas'
 import { useAppStore } from '../../stores/app.store'
-import { useChatStore } from '../../stores/chat.store'
+import { useActiveModelTarget } from '../../hooks/useActiveModelTarget'
+import { openPersonModelSettings } from '../../utils/people-navigation'
 import { getModelDisplayName, type AISourcesConfig } from '../../types'
 import { useTranslation } from '../../i18n'
-import { ModelSelectSheet } from './ModelSelector'
+import { ModelSelectSheet } from '../ai-config/ModelSelector'
+import { useSpaceQuickActions } from '../../hooks/useSpaceQuickActions'
+import { trackHome, trackNavigate } from '../../services/home-telemetry'
+import { trackToolOpen } from '../../services/tool-session-telemetry'
+
+const BrowserIcon = BROWSER_META.icon
+const TerminalIcon = TERMINAL_META.icon
+const ChangesIcon = CHANGES_META.icon
 
 interface MobileOverflowMenuProps {
   onSearch: () => void
@@ -21,7 +30,7 @@ interface MobileOverflowMenuProps {
 
 export function MobileOverflowMenu({ onSearch }: MobileOverflowMenuProps) {
   const { t } = useTranslation()
-  const { config, setView } = useAppStore()
+  const { config, navigate } = useAppStore()
   const [isMenuOpen, setIsMenuOpen] = useState(false)
   const [isAnimatingOut, setIsAnimatingOut] = useState(false)
   const [isModelSheetOpen, setIsModelSheetOpen] = useState(false)
@@ -29,14 +38,22 @@ export function MobileOverflowMenu({ onSearch }: MobileOverflowMenuProps) {
   const aiSources: AISourcesConfig = config?.aiSources?.version === 2
     ? config.aiSources
     : { version: 2, currentId: null, sources: [] }
-  // Show the current conversation's pinned model (falls back to global selection).
-  const currentConversation = useChatStore(s => {
-    const conversationId = s.getCurrentSpaceState().currentConversationId
-    return conversationId ? s.conversationCache.get(conversationId) ?? null : null
-  })
-  const currentModelName = getModelDisplayName(
-    aiSources, currentConversation?.modelSourceId, currentConversation?.modelId
-  )
+  // The model the conversation on screen runs on: a regular conversation's own
+  // pin, or the settings of the digital human being talked to.
+  const modelTarget = useActiveModelTarget()
+  const sourceId = modelTarget.kind === 'digital-human' ? modelTarget.modelSourceId : modelTarget.conversation?.modelSourceId
+  const modelId = modelTarget.kind === 'digital-human' ? modelTarget.modelId : modelTarget.conversation?.modelId
+  const currentModelName = getModelDisplayName(aiSources, sourceId, modelId)
+
+  const {
+    canOpenBrowser,
+    openBrowser,
+    terminalAvailable,
+    terminalCreating,
+    openTerminal,
+    canOpenChanges,
+    openChanges,
+  } = useSpaceQuickActions()
 
   const closeMenu = (after?: () => void) => {
     setIsAnimatingOut(true)
@@ -47,10 +64,29 @@ export function MobileOverflowMenu({ onSearch }: MobileOverflowMenuProps) {
     }, 200)
   }
 
+  const openMenu = () => {
+    trackHome('home.header.action', { action: 'more', surface: 'mobile_sheet' })
+    setIsMenuOpen(true)
+  }
+
+  const runAction = (action: 'model' | 'search', after: () => void) => {
+    trackHome('home.header.action', { action, surface: 'mobile_sheet' })
+    closeMenu(after)
+  }
+
+  const handleOpenBrowser = () => closeMenu(() => trackToolOpen('browser', 'mobile_menu', openBrowser()))
+  const handleOpenTerminal = () => closeMenu(() => trackToolOpen('terminal', 'mobile_menu', openTerminal()))
+  const handleOpenChanges = () => closeMenu(() => { void openChanges() })
+
+  const goSettings = () => {
+    trackNavigate('settings', 'header', 'header')
+    closeMenu(() => navigate('settings'))
+  }
+
   return (
     <div className="sm:hidden">
       <button
-        onClick={() => setIsMenuOpen(true)}
+        onClick={openMenu}
         className="p-1.5 hover:bg-secondary rounded-lg transition-colors"
         title={t('More')}
         aria-label={t('More')}
@@ -71,7 +107,7 @@ export function MobileOverflowMenu({ onSearch }: MobileOverflowMenuProps) {
           <div
             className={`
               fixed inset-x-0 bottom-0 z-50
-              bg-card rounded-t-2xl border-t border-border/50
+              bg-card rounded-t-2xl border-t border-border-faint
               shadow-2xl overflow-hidden
               ${isAnimatingOut ? 'animate-slide-out-bottom' : 'animate-slide-in-bottom'}
             `}
@@ -82,7 +118,7 @@ export function MobileOverflowMenu({ onSearch }: MobileOverflowMenuProps) {
             </div>
 
             {/* Header */}
-            <div className="px-4 py-2 border-b border-border/50 flex items-center justify-between">
+            <div className="px-4 py-2 border-b border-border-faint flex items-center justify-between">
               <h3 className="text-base font-semibold text-foreground">{t('More')}</h3>
               <button
                 onClick={() => closeMenu()}
@@ -95,19 +131,23 @@ export function MobileOverflowMenu({ onSearch }: MobileOverflowMenuProps) {
             <div className="py-1 pb-[env(safe-area-inset-bottom)]">
               {/* Model row: label + current value, chains into ModelSelectSheet */}
               <button
-                onClick={() => closeMenu(() => setIsModelSheetOpen(true))}
+                onClick={() => runAction('model', () => {
+                  // A digital human's model is chosen in its settings, not here.
+                  if (modelTarget.kind === 'digital-human') openPersonModelSettings(modelTarget.appId)
+                  else setIsModelSheetOpen(true)
+                })}
                 className="w-full px-4 py-3 flex items-center gap-3 hover:bg-secondary/80 transition-colors"
               >
                 <Sparkles className="w-4 h-4 text-muted-foreground flex-shrink-0" />
                 <span className="text-sm text-foreground">{t('Model')}</span>
-                <span className="ml-auto text-sm text-muted-foreground truncate max-w-[160px]">
+                <span className="ml-auto min-w-0 truncate max-w-[160px] text-sm text-muted-foreground">
                   {currentModelName}
                 </span>
                 <ChevronRight className="w-4 h-4 text-muted-foreground flex-shrink-0" />
               </button>
 
               <button
-                onClick={() => closeMenu(onSearch)}
+                onClick={() => runAction('search', onSearch)}
                 className="w-full px-4 py-3 flex items-center gap-3 hover:bg-secondary/80 transition-colors"
               >
                 <Search className="w-4 h-4 text-muted-foreground flex-shrink-0" />
@@ -115,12 +155,47 @@ export function MobileOverflowMenu({ onSearch }: MobileOverflowMenuProps) {
               </button>
 
               <button
-                onClick={() => closeMenu(() => setView('settings'))}
+                onClick={goSettings}
                 className="w-full px-4 py-3 flex items-center gap-3 hover:bg-secondary/80 transition-colors"
               >
                 <Settings className="w-4 h-4 text-muted-foreground flex-shrink-0" />
                 <span className="text-sm text-foreground">{t('Settings')}</span>
               </button>
+
+              {canOpenBrowser && (
+                <button
+                  onClick={handleOpenBrowser}
+                  className="w-full px-4 py-3 flex items-center gap-3 hover:bg-secondary/80 transition-colors"
+                >
+                  <BrowserIcon className={`w-4 h-4 ${BROWSER_META.color} flex-shrink-0`} />
+                  <span className="text-sm text-foreground">{t('Open browser')}</span>
+                </button>
+              )}
+
+              {terminalAvailable && (
+                <button
+                  onClick={handleOpenTerminal}
+                  disabled={terminalCreating}
+                  className="w-full px-4 py-3 flex items-center gap-3 hover:bg-secondary/80 transition-colors disabled:opacity-60"
+                >
+                  {terminalCreating ? (
+                    <Loader2 className="w-4 h-4 flex-shrink-0 animate-spin" />
+                  ) : (
+                    <TerminalIcon className={`w-4 h-4 ${TERMINAL_META.color} flex-shrink-0`} />
+                  )}
+                  <span className="text-sm text-foreground">{t('Open terminal')}</span>
+                </button>
+              )}
+
+              {canOpenChanges && (
+                <button
+                  onClick={handleOpenChanges}
+                  className="w-full px-4 py-3 flex items-center gap-3 hover:bg-secondary/80 transition-colors"
+                >
+                  <ChangesIcon className={`w-4 h-4 ${CHANGES_META.color} flex-shrink-0`} />
+                  <span className="text-sm text-foreground">{t('Changes')}</span>
+                </button>
+              )}
             </div>
           </div>
         </>

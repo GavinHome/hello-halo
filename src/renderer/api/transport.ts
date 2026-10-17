@@ -435,11 +435,17 @@ export function forceReconnectWebSocket(): void {
 /**
  * Register event listener (works for IPC, WebSocket, or Capacitor WS)
  */
-export function onEvent(channel: string, callback: (data: unknown) => void): () => void {
+// Generic in the payload so a slice can declare the shape its consumers get
+// (see artifactApi.onArtifactChangedBatch) instead of casting at the call site; the
+// channel is stringly-typed either way, so `T` is the declaration, not a proof.
+export function onEvent<T = unknown>(channel: string, callback: (data: T) => void): () => void {
+  const listener = callback as (data: unknown) => void
   if (isElectron()) {
     // Use IPC in Electron
     const methodMap: Record<string, keyof typeof window.halo> = {
       'agent:message': 'onAgentMessage',
+      'agent:input-arrived': 'onAgentInputArrived',
+      'agent:input-stopped': 'onAgentInputStopped',
       'agent:tool-call': 'onAgentToolCall',
       'agent:tool-result': 'onAgentToolResult',
       'agent:error': 'onAgentError',
@@ -451,36 +457,53 @@ export function onEvent(channel: string, callback: (data: unknown) => void): () 
       'agent:ask-question': 'onAgentAskQuestion',
       'agent:session-info': 'onAgentSessionInfo',
       'agent:turn-start': 'onAgentTurnStart',
+      'agent:goal-updated': 'onAgentGoalUpdated',
+      'agent:api-retry': 'onAgentApiRetry',
       'toolsets:changed': 'onToolsetsChanged',
       'toolsets:requested': 'onToolsetsRequested',
       'terminal:data': 'onTerminalData',
       'terminal:lifecycle': 'onTerminalLifecycle',
       'remote:status-change': 'onRemoteStatusChange',
       'credential:decrypt-failed': 'onCredentialDecryptFailed',
+      'ai-sources:catalog-changed': 'onModelCatalogChanged',
       'browser:state-change': 'onBrowserStateChange',
+      'browser:page-gone': 'onBrowserPageGone',
       'browser:zoom-changed': 'onBrowserZoomChanged',
       'canvas:tab-action': 'onCanvasTabAction',
       'ai-browser:active-view-changed': 'onAIBrowserActiveViewChanged',
       'ai-browser:view-gone': 'onAIBrowserViewGone',
+      'ai-browser:conversation-released': 'onAIBrowserConversationReleased',
       'artifact:tree-update': 'onArtifactTreeUpdate',
+      'artifact:changed-batch': 'onArtifactChangedBatch',
       'perf:snapshot': 'onPerfSnapshot',
       'perf:warning': 'onPerfWarning',
       'app:status_changed': 'onAppStatusChanged',
+      'app:list_changed': 'onAppListChanged',
       'app:activity_entry:new': 'onAppActivityEntry',
       'app:escalation:new': 'onAppEscalation',
+      'app:escalation:resolved': 'onAppEscalationResolved',
       'app:navigate': 'onAppNavigate',
       'app:im-session-updated': 'onImSessionUpdated',
       'im-channels:instance-updated': 'onImChannelInstanceUpdated',
+      'team:updated': 'onTeamUpdated',
+      'team:blackboard': 'onTeamBlackboard',
+      'team:message': 'onTeamMessage',
+      'team:presence': 'onTeamPresence',
+      'team:office-status': 'onTeamOfficeStatus',
+      'team:invite-link': 'onTeamInviteLink',
+      'team:member-history': 'onTeamMemberHistory',
       'notification:toast': 'onNotificationToast',
+      'app:memory-pressure': 'onMemoryPressure',
       'tlon:stats-updated': 'onTlonStatsUpdated',
       'tlon:ingest-progress': 'onTlonIngestProgress',
       'store:sync-status-changed': 'onStoreSyncStatusChanged',
       'store:upgrade-available': 'onStoreUpgradeAvailable',
+      'task:state_changed': 'onTaskStateChanged',
     }
 
     const method = methodMap[channel]
     if (method && typeof window.halo[method] === 'function') {
-      return (window.halo[method] as (cb: (data: unknown) => void) => () => void)(callback)
+      return (window.halo[method] as (cb: (data: unknown) => void) => () => void)(listener)
     }
 
     return () => {}
@@ -489,10 +512,10 @@ export function onEvent(channel: string, callback: (data: unknown) => void): () 
     if (!wsEventListeners.has(channel)) {
       wsEventListeners.set(channel, new Set())
     }
-    wsEventListeners.get(channel)!.add(callback)
+    wsEventListeners.get(channel)!.add(listener)
 
     return () => {
-      wsEventListeners.get(channel)?.delete(callback)
+      wsEventListeners.get(channel)?.delete(listener)
     }
   }
 }

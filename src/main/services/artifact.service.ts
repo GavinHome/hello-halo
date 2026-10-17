@@ -9,17 +9,20 @@
  */
 
 import { statSync, existsSync, realpathSync, readFileSync, writeFileSync, openSync, readSync, closeSync } from 'fs'
-import { promises as fsAsync } from 'fs'
-import { join, extname, basename, dirname, sep } from 'path'
+import { promises as fsAsync, type Stats } from 'fs'
+import { join, extname, basename, dirname, sep, isAbsolute, resolve as resolvePath } from 'path'
 import { shell } from 'electron'
 import { getTempSpacePath } from '../foundation/config.service'
-import { getSpace } from './space.service'
+import { MAX_PREVIEW_DOCUMENT_SIZE, formatPreviewSize } from '../../shared/constants/artifact-preview'
+import { getSpace, getSpaceDir } from './space.service'
+import { queryFilesViaWorker } from './watcher-host.service'
+import type { FileQueryItem, FileQueryResult, ResolvedArtifactPath } from '../../shared/types/artifact'
 import {
-  listArtifacts as listArtifactsCached,
   listArtifactsTree as listArtifactsTreeCached,
   loadDirectoryChildren,
-  initSpaceCache,
   ensureSpaceCache,
+  retainSpaceCache,
+  releaseSpaceCache,
   onArtifactChange,
   reconcileLoadedDirs,
   type CachedArtifact,
@@ -57,40 +60,152 @@ function getWorkingDir(spaceId: string): string {
   return getTempSpacePath()
 }
 
+/** Largest result a file query may ask for. */
+export const MAX_FILE_QUERY_LIMIT = 200
+/** Largest flat listing `listArtifacts` returns. */
+const MAX_LISTED_ARTIFACTS = 20_000
+const LIST_INDEX_WAIT_MS = 3000
+
 /**
- * List all artifacts in a space
- * Uses caching and file watching for optimal performance
+ * Best matches for a typed file query (the @ menu), answered from the
+ * watcher's background path index; only `limit` items cross processes.
+ * Watches the space if nothing did yet — the first query of a large space
+ * may report `indexing` with partial results.
+ */
+export async function queryFiles(spaceId: string, query: string, limit: number): Promise<FileQueryResult> {
+  const boundedLimit = Math.max(0, Math.min(Math.floor(limit) || 0, MAX_FILE_QUERY_LIMIT))
+  return queryPathIndex(spaceId, typeof query === 'string' ? query : '', boundedLimit)
+}
+
+async function queryPathIndex(
+  spaceId: string,
+  query: string,
+  limit: number,
+  maxDepth?: number
+): Promise<FileQueryResult> {
+  const workDir = getWorkingDir(spaceId)
+  if (!existsSync(workDir)) return { items: [], truncated: false, indexing: false, hasPaths: false }
+
+  await ensureSpaceCache(spaceId, workDir)
+  const result = await queryFilesViaWorker(spaceId, query, limit, maxDepth)
+  if (!result) return { items: [], truncated: false, indexing: false, hasPaths: false }
+
+  const items: FileQueryItem[] = result.items.map(({ relativePath, isFolder }) => ({
+    path: join(result.rootPath, relativePath),
+    relativePath,
+    name: basename(relativePath),
+    type: isFolder ? 'folder' : 'file',
+  }))
+  return { items, truncated: result.truncated, indexing: result.indexing, hasPaths: result.hasPaths }
+}
+
+/** Most paths one `resolveArtifactPaths` call answers; the rest are not looked at. */
+export const MAX_RESOLVED_PATHS = 200
+const MAX_RESOLVED_PATH_CHARS = 4096
+/** Filesystem lookups in flight at once, well inside libuv's thread pool. */
+const RESOLVE_CONCURRENCY = 16
+
+const foldCase = process.platform === 'darwin' || process.platform === 'win32'
+  ? (p: string) => p.toLowerCase()
+  : (p: string) => p
+
+/** Whether `child` is `root` or below it, compared as strings (both already resolved). */
+function isLiterallyWithin(child: string, root: string): boolean {
+  const c = foldCase(child)
+  const r = foldCase(root)
+  return c === r || c.startsWith(r.endsWith(sep) ? r : r + sep)
+}
+
+/**
+ * A path that can only name a file on this machine's own disks: not a network
+ * share (`\\host\share`, `//host/share`), not a Win32 device or extended path
+ * (`\\.\`, `\\?\`), not drive-relative (`C:foo`, which follows that drive's
+ * own current directory). Merely stat-ing a share makes Windows connect to the
+ * host and offer the user's credentials.
+ */
+function isPlainLocalPath(path: string): boolean {
+  return !/^[\\/]{2}/.test(path) && !/^[A-Za-z]:(?![\\/])/.test(path)
+}
+
+async function mapWithLimit<T, R>(items: T[], limit: number, map: (item: T) => Promise<R>): Promise<R[]> {
+  const results = new Array<R>(items.length)
+  let next = 0
+  const worker = async () => {
+    while (next < items.length) {
+      const index = next++
+      results[index] = await map(items[index])
+    }
+  }
+  await Promise.all(Array.from({ length: Math.min(limit, items.length) }, worker))
+  return results
+}
+
+/**
+ * Which of `paths` name an existing file or folder inside the space —
+ * relative ones resolved against `baseDir` when that lies inside the space,
+ * else against its working directory.
+ *
+ * The paths come from AI replies, so nothing outside the space is ever
+ * touched: each one must lie inside the space as written before the
+ * filesystem is asked about it, and again once links are resolved. An unknown
+ * space answers nothing. One lookup per path, never a scan.
+ */
+export async function resolveArtifactPaths(spaceId: string, paths: string[], baseDir?: string): Promise<ResolvedArtifactPath[]> {
+  const asked = paths.slice(0, MAX_RESOLVED_PATHS).filter((path): path is string => typeof path === 'string')
+  const missing = (path: string): ResolvedArtifactPath => ({ path, absolutePath: null, isDirectory: false })
+  const workDir = getSpaceDir(spaceId)
+  if (!workDir) return asked.map(missing)
+
+  const root = resolvePath(workDir)
+  const realRoot = await fsAsync.realpath(root).catch(() => null)
+  if (!realRoot) return asked.map(missing)
+  const base = baseDir && isAbsolute(baseDir) && isPlainLocalPath(baseDir) && isLiterallyWithin(resolvePath(baseDir), root)
+    ? resolvePath(baseDir)
+    : root
+
+  return mapWithLimit(asked, RESOLVE_CONCURRENCY, async (path) => {
+    if (!path || path.length > MAX_RESOLVED_PATH_CHARS || !isPlainLocalPath(path)) return missing(path)
+    const candidate = resolvePath(base, path)
+    if (!isLiterallyWithin(candidate, root)) return missing(path)
+    try {
+      const real = await fsAsync.realpath(candidate)
+      if (!isLiterallyWithin(real, realRoot)) return missing(path)
+      const stats = await fsAsync.stat(real)
+      return { path, absolutePath: candidate, isDirectory: stats.isDirectory() }
+    } catch {
+      return missing(path)
+    }
+  })
+}
+
+/**
+ * Flat listing of a space down to `maxDepth` path segments, folders first,
+ * capped at MAX_LISTED_ARTIFACTS. Served from the path index; waits briefly
+ * for a space whose index is still being built.
  */
 export async function listArtifacts(spaceId: string, maxDepth: number = 2): Promise<Artifact[]> {
-  console.log(`[Artifact] listArtifacts for space: ${spaceId}`)
-
-  const workDir = getWorkingDir(spaceId)
-
-  if (!existsSync(workDir)) {
-    console.log(`[Artifact] Directory does not exist: ${workDir}`)
-    return []
+  const deadline = Date.now() + LIST_INDEX_WAIT_MS
+  let result = await queryPathIndex(spaceId, '', MAX_LISTED_ARTIFACTS, maxDepth)
+  while (result.indexing && Date.now() < deadline) {
+    await new Promise(resolve => setTimeout(resolve, 100))
+    result = await queryPathIndex(spaceId, '', MAX_LISTED_ARTIFACTS, maxDepth)
   }
 
-  const cachedArtifacts = await listArtifactsCached(spaceId, workDir, maxDepth)
-
-  // Convert to Artifact format
-  const artifacts: Artifact[] = cachedArtifacts.map(ca => ({
-    id: ca.id,
-    spaceId: ca.spaceId,
-    conversationId: 'all',
-    name: ca.name,
-    type: ca.type,
-    path: ca.path,
-    relativePath: ca.relativePath,
-    extension: ca.extension,
-    icon: ca.icon,
-    createdAt: ca.createdAt,
-    size: ca.size,
-    preview: undefined  // Don't load preview by default for performance
-  }))
-
-  console.log(`[Artifact] Found ${artifacts.length} artifacts`)
-  return artifacts
+  return result.items.map(item => {
+    const extension = item.type === 'file' ? extname(item.name).replace('.', '') : ''
+    return {
+      id: item.path,
+      spaceId,
+      conversationId: 'all',
+      name: item.name,
+      type: item.type,
+      path: item.path,
+      relativePath: item.relativePath,
+      extension,
+      icon: item.type === 'folder' ? 'folder' : extension,
+      createdAt: '',
+    }
+  })
 }
 
 // Get artifact by ID
@@ -108,7 +223,7 @@ export function watchArtifacts(
   callback: (artifacts: Artifact[]) => void
 ): () => void {
   // File watching is handled by artifact-cache.service.ts via IPC events
-  // Callers should use api.onArtifactChanged() instead
+  // Callers should use api.onArtifactChangedBatch() instead
   return () => {}
 }
 
@@ -118,7 +233,6 @@ export function watchArtifacts(
  */
 export async function listArtifactsTree(spaceId: string): Promise<{ workspaceRoot: string; nodes: CachedTreeNode[] }> {
   const workDir = getWorkingDir(spaceId)
-  console.log(`[Artifact] listArtifactsTree: spaceId=${spaceId}, workDir=${workDir}`)
 
   if (!existsSync(workDir)) {
     console.log(`[Artifact] Directory does not exist: ${workDir}`)
@@ -127,7 +241,7 @@ export async function listArtifactsTree(spaceId: string): Promise<{ workspaceRoo
 
   const nodes = await listArtifactsTreeCached(spaceId, workDir)
 
-  console.log(`[Artifact] listArtifactsTree: ${nodes.length} root nodes`)
+  console.log(`[Artifact] listArtifactsTree: spaceId=${spaceId} workDir=${workDir} rootNodes=${nodes.length}`)
   return { workspaceRoot: workDir, nodes }
 }
 
@@ -138,10 +252,7 @@ export async function loadTreeChildren(
   spaceId: string,
   dirPath: string
 ): Promise<CachedTreeNode[]> {
-  console.log(`[Artifact] loadTreeChildren for: ${dirPath}`)
-
   const workDir = getWorkingDir(spaceId)
-  console.log(`[Artifact] loadTreeChildren workDir resolved: ${workDir}`)
 
   if (!existsSync(dirPath)) {
     console.log(`[Artifact] Directory does not exist: ${dirPath}`)
@@ -174,17 +285,22 @@ export async function loadTreeChildren(
 }
 
 /**
- * Initialize artifact watcher for a space
+ * A client (renderer instance or remote tab, identified by `clientId`) starts
+ * or keeps showing a space. `recreated`: the client held nothing here, so on a
+ * renewal its view may have missed changes and should be reloaded.
  */
-export async function initArtifactWatcher(spaceId: string): Promise<void> {
+export async function retainArtifactSpace(spaceId: string, clientId: string): Promise<{ recreated: boolean }> {
   const workDir = getWorkingDir(spaceId)
-
   if (!existsSync(workDir)) {
-    console.log(`[Artifact] Cannot init watcher, directory does not exist: ${workDir}`)
-    return
+    console.log(`[Artifact] Cannot retain space, directory does not exist: ${workDir}`)
+    return { recreated: false }
   }
+  return { recreated: await retainSpaceCache(spaceId, workDir, clientId) }
+}
 
-  await ensureSpaceCache(spaceId, workDir)
+/** The client stopped showing the space; its cache and watcher may be released. */
+export async function releaseArtifactSpace(spaceId: string, clientId: string): Promise<void> {
+  await releaseSpaceCache(spaceId, clientId)
 }
 
 /**
@@ -265,6 +381,12 @@ const MIME_TYPES: Record<string, string> = {
   webp: 'image/webp',
   ico: 'image/x-icon',
   bmp: 'image/bmp',
+  // Documents
+  pdf: 'application/pdf',
+  xlsx: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+  xls: 'application/vnd.ms-excel',
+  docx: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+  pptx: 'application/vnd.openxmlformats-officedocument.presentationml.presentation',
 }
 
 /**
@@ -279,7 +401,7 @@ function getMimeType(ext: string): string {
  * Check if file is binary (image, etc.)
  */
 function isBinaryFile(ext: string): boolean {
-  const binaryExtensions = ['png', 'jpg', 'jpeg', 'gif', 'webp', 'ico', 'bmp', 'pdf', 'zip', 'tar', 'gz', 'rar']
+  const binaryExtensions = ['png', 'jpg', 'jpeg', 'gif', 'webp', 'ico', 'bmp', 'pdf', 'zip', 'tar', 'gz', 'rar', 'xlsx', 'xls', 'docx', 'pptx']
   return binaryExtensions.includes(ext.toLowerCase().replace('.', ''))
 }
 
@@ -294,50 +416,94 @@ export interface ArtifactContent {
   size: number
 }
 
-export function readArtifactContent(filePath: string): ArtifactContent {
-  console.log(`[Artifact] Reading content: ${filePath}`)
+const MAX_TEXT_SIZE = 10 * 1024 * 1024
+const MAX_BINARY_SIZE = 50 * 1024 * 1024
 
-  if (!existsSync(filePath)) {
+/**
+ * Documents get a tighter ceiling than other binaries — see
+ * MAX_PREVIEW_DOCUMENT_SIZE for why, and note that the remote transport enforces
+ * the same number from the renderer side.
+ */
+const PREVIEW_DOCUMENT_EXTENSIONS = new Set(['xlsx', 'xls', 'docx', 'pptx', 'pdf'])
+
+function maxReadSize(ext: string): number {
+  const bare = ext.toLowerCase().replace('.', '')
+  if (PREVIEW_DOCUMENT_EXTENSIONS.has(bare)) return MAX_PREVIEW_DOCUMENT_SIZE
+  return isBinaryFile(ext) ? MAX_BINARY_SIZE : MAX_TEXT_SIZE
+}
+
+/**
+ * Shared entry gate for both read paths, so the two can never drift on which
+ * files they will open or how large those may be.
+ */
+async function statForRead(filePath: string): Promise<Stats> {
+  let stats: Stats
+  try {
+    stats = await fsAsync.stat(filePath)
+  } catch {
     throw new Error(`File not found: ${filePath}`)
   }
-
-  const stats = statSync(filePath)
   if (stats.isDirectory()) {
     throw new Error(`Cannot read directory content: ${filePath}`)
   }
+  const maxSize = maxReadSize(extname(filePath))
+  if (stats.size > maxSize) {
+    throw new Error(
+      `File too large to preview: ${formatPreviewSize(stats.size)} ` +
+      `(limit ${formatPreviewSize(maxSize)})`
+    )
+  }
+  return stats
+}
+
+/**
+ * Read a file as raw bytes for the Canvas document viewers.
+ *
+ * Kept separate from readArtifactContent (contract: `content: string`) rather
+ * than an encoding flag: base64 there would cost a string, a second copy in
+ * the IPC clone, and a decode loop on the renderer's main thread — with no
+ * cheaper option available (isolated renderer has no Buffer; Chromium has no
+ * one-shot base64 primitive). A Buffer crosses structured clone as a
+ * Uint8Array, avoiding all of that.
+ *
+ * Same paths and size limits as readArtifactContent; only the encoding differs.
+ */
+export async function readArtifactBytes(filePath: string): Promise<Buffer> {
+  console.log(`[Artifact] Reading bytes: ${filePath}`)
+  await statForRead(filePath)
+
+  try {
+    return await fsAsync.readFile(filePath)
+  } catch (error) {
+    console.error(`[Artifact] Failed to read file: ${filePath}`, error)
+    throw new Error(`Failed to read file: ${(error as Error).message}`)
+  }
+}
+
+export async function readArtifactContent(filePath: string): Promise<ArtifactContent> {
+  console.log(`[Artifact] Reading content: ${filePath}`)
+  const stats = await statForRead(filePath)
 
   const ext = extname(filePath)
   const mimeType = getMimeType(ext)
 
-  // Check file size limit (10MB for text, 50MB for binary)
-  const maxTextSize = 10 * 1024 * 1024  // 10MB
-  const maxBinarySize = 50 * 1024 * 1024  // 50MB
-  const isBinary = isBinaryFile(ext)
-  const maxSize = isBinary ? maxBinarySize : maxTextSize
-
-  if (stats.size > maxSize) {
-    throw new Error(`File too large: ${stats.size} bytes (max: ${maxSize} bytes)`)
-  }
-
   try {
-    if (isBinary) {
-      // Read as base64 for binary files
-      const buffer = readFileSync(filePath)
+    // Always async: a synchronous read of a multi-megabyte file blocks every
+    // other main-process consumer, including the window that is waiting on it.
+    if (isBinaryFile(ext)) {
+      const buffer = await fsAsync.readFile(filePath)
       return {
         content: buffer.toString('base64'),
         mimeType,
         encoding: 'base64',
         size: stats.size
       }
-    } else {
-      // Read as UTF-8 for text files
-      const content = readFileSync(filePath, 'utf-8')
-      return {
-        content,
-        mimeType,
-        encoding: 'utf-8',
-        size: stats.size
-      }
+    }
+    return {
+      content: await fsAsync.readFile(filePath, 'utf-8'),
+      mimeType,
+      encoding: 'utf-8',
+      size: stats.size
     }
   } catch (error) {
     console.error(`[Artifact] Failed to read file: ${filePath}`, error)
@@ -388,6 +554,9 @@ export type CanvasContentType =
   | 'text'
   | 'json'
   | 'csv'
+  | 'xlsx'
+  | 'docx'
+  | 'pptx'
   | 'binary'
 
 /**
@@ -409,8 +578,10 @@ const BINARY_EXTENSIONS = new Set([
   'zip', 'tar', 'gz', 'bz2', 'xz', '7z', 'rar', 'tgz',
   // Media (non-viewable)
   'mp3', 'mp4', 'avi', 'mov', 'mkv', 'flv', 'wmv', 'wav', 'flac', 'aac', 'ogg',
-  // Office documents (use external app)
-  'doc', 'docx', 'xls', 'xlsx', 'ppt', 'pptx', 'odt', 'ods', 'odp',
+  // Legacy/OpenDocument office formats (no in-canvas viewer; use external app).
+  // Keep in step with the renderer's own list in constants/file-types.ts —
+  // docx/xlsx/xls/pptx are deliberately absent, Canvas has viewers for them.
+  'doc', 'ppt', 'odt', 'ods', 'odp',
   // Fonts
   'ttf', 'otf', 'woff', 'woff2', 'eot',
   // Database
@@ -419,6 +590,12 @@ const BINARY_EXTENSIONS = new Set([
   'class', 'pyc', 'pyo', 'o', 'obj', 'a', 'lib',
   'iso', 'img', 'vmdk', 'vdi',
 ])
+
+// OOXML office documents (open in their own Canvas viewer; .xls is read by the
+// same SheetJS-backed viewer as .xlsx)
+const OFFICE_CONTENT_TYPES: Record<string, CanvasContentType> = {
+  xlsx: 'xlsx', xls: 'xlsx', docx: 'docx', pptx: 'pptx',
+}
 
 // Known image extensions (open in ImageViewer)
 const IMAGE_EXTENSIONS = new Set([
@@ -588,13 +765,26 @@ export function detectFileType(filePath: string): FileTypeInfo {
     }
   }
 
-  // PDF → BrowserView
+  // PDF uses the embedded Chromium viewer.
   if (ext === 'pdf') {
     return {
       isText: false,
       canViewInCanvas: true,
       contentType: 'pdf',
       mimeType: 'application/pdf',
+    }
+  }
+
+  // OOXML office documents → the dedicated Canvas viewers. Answers must match
+  // the renderer's own extension mapping in services/canvas-lifecycle.ts, which
+  // short-circuits these locally; this branch is what remote mode and any other
+  // caller of detect-type sees.
+  if (OFFICE_CONTENT_TYPES[ext]) {
+    return {
+      isText: false,
+      canViewInCanvas: true,
+      contentType: OFFICE_CONTENT_TYPES[ext],
+      mimeType: getMimeType(ext),
     }
   }
 

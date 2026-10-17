@@ -5,6 +5,7 @@
 
 import { useState, useEffect } from 'react'
 import { useTranslation } from '../../i18n'
+import { Switch, switchRowHover } from '../ui/Switch'
 import { api } from '../../api'
 import { useSecurityPolicy } from '../../hooks/useSecurityPolicy'
 import {
@@ -14,6 +15,7 @@ import {
   type PasswordPolicyCode,
 } from '../../../shared/auth/password-policy'
 import type { RemoteAccessStatus } from './types'
+import type { HaloConfig } from '../../types'
 
 type TranslateFn = (text: string, options?: Record<string, unknown>) => string
 
@@ -40,7 +42,12 @@ function describePolicyFailure(codes: PasswordPolicyCode[], t: TranslateFn): str
   return t('Password must include: {{items}}', { items: fragments.join(', ') })
 }
 
-export function RemoteAccessSection() {
+interface RemoteAccessSectionProps {
+  config: HaloConfig | null
+  setConfig: (config: HaloConfig) => void
+}
+
+export function RemoteAccessSection({ config, setConfig }: RemoteAccessSectionProps) {
   const { t } = useTranslation()
 
   // Build-time security policy. While `null` (first fetch in flight)
@@ -64,6 +71,27 @@ export function RemoteAccessSection() {
   // re-toggling will succeed with a fresh PIN; the message tells the user
   // why their previously paired devices stopped working.
   const [enableError, setEnableError] = useState<string | null>(null)
+
+  // Federation gateway settings state
+  const [gatewayInput, setGatewayInput] = useState(config?.federation?.gatewayUrl || '')
+  const [gatewayError, setGatewayError] = useState<string | null>(null)
+  const [gatewaySaved, setGatewaySaved] = useState(false)
+  const [isSavingGateway, setIsSavingGateway] = useState(false)
+  const [defaultGatewayUrl, setDefaultGatewayUrl] = useState<string | null | undefined>()
+
+  useEffect(() => {
+    let cancelled = false
+    api.getConfig().then(response => {
+      if (!response.success) {
+        console.error('[RemoteAccessSection] Failed to load gateway default:', response.error)
+        return
+      }
+      if (!cancelled) setDefaultGatewayUrl(response.productDefaults?.federation.gatewayUrl)
+    }).catch(error => {
+      console.error('[RemoteAccessSection] Failed to load gateway default:', error)
+    })
+    return () => { cancelled = true }
+  }, [])
 
   // Change-address flow (revoke + re-issue a new permanent hostname)
   const [showReset, setShowReset] = useState(false)
@@ -161,6 +189,44 @@ export function RemoteAccessSection() {
     navigator.clipboard.writeText(text)
   }
 
+  const handleGatewaySave = async () => {
+    const value = gatewayInput.trim()
+    if (value) {
+      try {
+        const u = new URL(value)
+        const supported = ['http:', 'https:', 'ws:', 'wss:']
+        if (!supported.includes(u.protocol)) {
+          setGatewayError(t('Unsupported protocol. Use http://, https://, ws://, wss://'))
+          return
+        }
+      } catch {
+        setGatewayError(t('Invalid gateway URL. Example: https://gateway.example.com'))
+        return
+      }
+    }
+    setGatewayError(null)
+    setIsSavingGateway(true)
+    try {
+      const updatedFederation = { ...config?.federation, gatewayUrl: value }
+      const updatedConfig = { ...config, federation: updatedFederation } as HaloConfig
+      const response = await api.setConfig({ federation: updatedFederation })
+      if (!response.success) {
+        console.error('[RemoteAccessSection] Gateway override was not saved:', response.error)
+        setGatewayError(response.error || t('Failed to save'))
+        return
+      }
+      setConfig(updatedConfig)
+      setGatewayInput(value)
+      setGatewaySaved(true)
+      setTimeout(() => setGatewaySaved(false), 2000)
+    } catch (error) {
+      console.error('[RemoteAccessSection] Failed to save gateway URL:', error)
+      setGatewayError(t('Failed to save'))
+    } finally {
+      setIsSavingGateway(false)
+    }
+  }
+
   const handleResetAddress = async () => {
     setIsResetting(true)
     setResetError(null)
@@ -182,7 +248,7 @@ export function RemoteAccessSection() {
   }
 
   return (
-    <section id="remote" className="bg-card rounded-xl border border-border p-6">
+    <section id="remote" className="bg-card rounded-xl border border-border-faint p-6">
       <h2 className="text-lg font-medium mb-4">{t('Remote Access')}</h2>
 
       {/* Security Warning */}
@@ -200,29 +266,14 @@ export function RemoteAccessSection() {
 
       <div className="space-y-4">
         {/* Enable/Disable Toggle */}
-        <div className="flex items-center justify-between">
+        <div className={`flex items-center justify-between py-1.5 ${switchRowHover}`}>
           <div>
             <p className="font-medium">{t('Enable Remote Access')}</p>
             <p className="text-sm text-muted-foreground">
               {t('Allow access to Halo from other devices')}
             </p>
           </div>
-          <label className="relative inline-flex items-center cursor-pointer">
-            <input
-              type="checkbox"
-              checked={remoteStatus?.enabled || false}
-              onChange={handleToggleRemote}
-              disabled={isEnablingRemote}
-              className="sr-only peer"
-            />
-            <div className="w-11 h-6 bg-secondary rounded-full peer peer-checked:bg-primary transition-colors">
-              <div
-                className={`w-5 h-5 bg-white rounded-full shadow-md transform transition-transform ${
-                  remoteStatus?.enabled ? 'translate-x-5' : 'translate-x-0.5'
-                } mt-0.5`}
-              />
-            </div>
-          </label>
+          <Switch checked={remoteStatus?.enabled || false} onCheckedChange={() => handleToggleRemote()} disabled={isEnablingRemote} />
         </div>
 
         {enableError && (
@@ -524,6 +575,48 @@ export function RemoteAccessSection() {
             )}
           </>
         )}
+
+        {/* Federation Gateway */}
+        <div className="pt-4 border-t border-border space-y-2">
+          <p className="font-medium">{t('Federation Gateway')}</p>
+          <p className="text-sm text-muted-foreground">
+            {t('Relay team collaboration through a gateway server so members outside your local network can join.')}
+          </p>
+          {defaultGatewayUrl ? (
+            <p className="text-sm text-muted-foreground break-words">
+              {config?.federation?.gatewayUrl?.trim() ? t('Built-in gateway') : t('Using the built-in gateway')}: <code className="block break-all sm:inline">{defaultGatewayUrl}</code>
+              <span className="block">{t('Leave empty to use the built-in gateway.')}</span>
+            </p>
+          ) : defaultGatewayUrl === null ? (
+            <p className="text-sm text-muted-foreground">{t('Leave empty for LAN-only teams.')}</p>
+          ) : null}
+          <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
+            <input
+              type="text"
+              value={gatewayInput}
+              onChange={(e) => {
+                setGatewayInput(e.target.value)
+                setGatewayError(null)
+                setGatewaySaved(false)
+              }}
+              aria-label={t('Federation Gateway')}
+              disabled={isSavingGateway}
+              placeholder={defaultGatewayUrl || t('https://gateway.example.com')}
+              className="w-full min-w-0 flex-1 px-2 py-1 text-sm bg-input rounded border border-border focus:border-primary focus:outline-none disabled:opacity-50"
+            />
+            <button
+              onClick={handleGatewaySave}
+              disabled={isSavingGateway}
+              className="text-xs px-3 py-1.5 bg-primary text-primary-foreground rounded hover:bg-primary/90 disabled:opacity-50"
+            >
+              {isSavingGateway ? t('Saving...') : gatewaySaved ? t('Saved') : t('Save')}
+            </button>
+          </div>
+          <p className="text-xs text-muted-foreground">
+            {t('Restart Halo to apply gateway changes to existing team connections.')}
+          </p>
+          {gatewayError && <p className="text-xs text-red-500">{gatewayError}</p>}
+        </div>
       </div>
     </section>
   )

@@ -12,16 +12,19 @@
  * IM Sessions are NOT shown here — they live in the digital human config.
  */
 
-import { useState, useCallback, useRef, useEffect } from 'react'
+import { useState, useCallback, useRef, useEffect, useMemo, type ReactNode } from 'react'
+import type { TFunction } from 'i18next'
 import {
   Mail, MessageSquare, Bell, Webhook, Loader2,
-  CheckCircle, XCircle, ChevronDown, RefreshCw, Bot,
-  Plus, Trash2, MoreVertical, Smartphone, Info,
+  CheckCircle, XCircle, ChevronDown, RefreshCw,
+  Plus, Trash2, MoreVertical, Smartphone, Send,
   QrCode, ExternalLink, UserCheck, Eye, EyeOff,
 } from 'lucide-react'
 import { useTranslation, getCurrentLanguage } from '../../i18n'
+import { Switch, switchRowHover } from '../ui/Switch'
 import { api } from '../../api'
 import { useAppsStore } from '../../stores/apps.store'
+import { useTeamStore } from '../../stores/team.store'
 import type { HaloConfig } from '../../types'
 import { resolveLocalizedText } from '../../../shared/types'
 import { NOTIFICATION_CHANNEL_META } from '../../../shared/types/notification-channels'
@@ -31,22 +34,30 @@ import type {
   NotificationChannelsConfig,
   NotifyChannelsProductConfig,
 } from '../../../shared/types/notification-channels'
-import type {
-  ImChannelInstanceConfig,
-  ImChannelInstanceStatus,
-  GuestPolicy,
+import {
+  imCredentialId,
+  type ImChannelInstanceConfig,
+  type ImChannelInstanceStatus,
 } from '../../../shared/types/im-channel'
+import { ChannelBackendSelect, ChannelBackendName } from './ChannelBackendSelect'
+import { getImBotLabel } from '../apps/im-channel-labels'
+import { Disclosure } from '../ui/Disclosure'
+import type {
+  ChannelBackendApp,
+  ChannelBackendTeam,
+  ChannelBackendValue,
+} from './ChannelBackendSelect'
 import { WeixinIlinkInstanceCard } from './WeixinIlinkInstanceCard'
 import { WecomScanAuthDialog } from './WecomScanAuthDialog'
+import { FeishuInstanceCard } from './FeishuInstanceCard'
+import { FeishuScanAuthDialog } from './FeishuScanAuthDialog'
+import { ImInstancePermissionSection } from './ImInstancePermissionSection'
+import { defaultGuestPolicy } from '../../../shared/apps/capability-policy'
+import type { ImPermissionDefaults } from './ImInstancePermissionSection'
 import { Popover, PopoverTrigger, PopoverContent } from '../ui/Popover'
-
-/** Product-level permission defaults (from IPC). Mirrors auth-loader.ImChannelsPermissionDefaults. */
-interface PermissionDefaults {
-  defaultEnabled?: boolean
-  defaultGuestAccess?: boolean
-  defaultGuestPolicy?: { allowedTools?: string[] }
-  ownerIdHint?: string
-}
+import { HelpHint } from '../ui/HelpHint'
+import { ImProcessingNoticeRow } from './ImProcessingNoticeRow'
+import { effectiveSmtpPort, parseSmtpPort, smtpPortAfterSecureChange } from './smtp-port'
 
 // ============================================
 // Types
@@ -81,7 +92,7 @@ interface NotifyChannelDef {
   notifyType: NotificationChannelType
   icon: typeof Mail
   labelKey: string
-  descriptionKey: string
+  description: string
   fields: FieldDef[]
 }
 
@@ -89,23 +100,24 @@ interface NotifyChannelDef {
 // Notification Channel Definitions
 // ============================================
 
-function buildNotifyChannelDefs(): NotifyChannelDef[] {
+/** Labels and descriptions are literal t() calls so the translation extractor finds them; sample values stay as typed. */
+function buildNotifyChannelDefs(t: TFunction): NotifyChannelDef[] {
   return [
     {
       id: 'email',
       notifyType: 'email',
       icon: Mail,
       labelKey: NOTIFICATION_CHANNEL_META.email.labelKey,
-      descriptionKey: NOTIFICATION_CHANNEL_META.email.descriptionKey,
+      description: t('Send notifications via SMTP email'),
       fields: [
-        { key: 'smtp.host', label: 'SMTP Host', type: 'text', placeholder: 'smtp.gmail.com', required: true, nested: 'smtp.host' },
-        { key: 'smtp.port', label: 'SMTP Port', type: 'number', placeholder: '465', required: true, nested: 'smtp.port' },
-        { key: 'smtp.secure', label: 'Use SSL/TLS', type: 'toggle', nested: 'smtp.secure' },
-        { key: 'smtp.user', label: 'Username', type: 'text', placeholder: 'user@example.com', required: true, nested: 'smtp.user' },
-        { key: 'smtp.password', label: 'Password', type: 'password', placeholder: 'App password', required: true, nested: 'smtp.password' },
-        { key: 'defaultTo', label: 'Default Recipient', type: 'text', placeholder: 'recipient@example.com', required: true },
-        { key: 'caldavUrl', label: 'CalDAV URL', type: 'text', placeholder: 'https://{host}/dav/users/{email}/calendars/default/', group: 'advanced' },
-        { key: 'tlsCiphers', label: 'TLS Ciphers', type: 'text', placeholder: 'Auto (system default)', group: 'advanced' },
+        { key: 'smtp.host', label: t('SMTP Host'), type: 'text', placeholder: 'smtp.gmail.com', required: true, nested: 'smtp.host' },
+        { key: 'smtp.port', label: t('SMTP Port'), type: 'number', required: true, nested: 'smtp.port' },
+        { key: 'smtp.secure', label: t('Use SSL/TLS'), type: 'toggle', nested: 'smtp.secure' },
+        { key: 'smtp.user', label: t('Username'), type: 'text', placeholder: 'user@example.com', required: true, nested: 'smtp.user' },
+        { key: 'smtp.password', label: t('Password'), type: 'password', placeholder: t('App password'), required: true, nested: 'smtp.password' },
+        { key: 'defaultTo', label: t('Default Recipient'), type: 'text', placeholder: 'recipient@example.com', required: true },
+        { key: 'caldavUrl', label: t('CalDAV URL'), type: 'text', placeholder: 'https://{host}/dav/users/{email}/calendars/default/', group: 'advanced' },
+        { key: 'tlsCiphers', label: t('TLS Ciphers'), type: 'text', placeholder: t('Auto (system default)'), group: 'advanced' },
       ],
     },
     {
@@ -113,13 +125,13 @@ function buildNotifyChannelDefs(): NotifyChannelDef[] {
       notifyType: 'wecom',
       icon: MessageSquare,
       labelKey: NOTIFICATION_CHANNEL_META.wecom.labelKey,
-      descriptionKey: NOTIFICATION_CHANNEL_META.wecom.descriptionKey,
+      description: t('Send notifications via WeChat Work (企业微信)'),
       fields: [
-        { key: 'corpId', label: 'Corp ID', type: 'text', placeholder: 'ww...', required: true },
-        { key: 'agentId', label: 'Agent ID', type: 'number', placeholder: '1000002', required: true },
-        { key: 'secret', label: 'Secret', type: 'password', required: true },
-        { key: 'defaultToUser', label: 'Default User ID', type: 'text', placeholder: 'userid (optional)' },
-        { key: 'defaultToParty', label: 'Default Party ID', type: 'text', placeholder: 'party id (optional)' },
+        { key: 'corpId', label: t('Corp ID'), type: 'text', placeholder: 'ww...', required: true },
+        { key: 'agentId', label: t('Agent ID'), type: 'number', placeholder: '1000002', required: true },
+        { key: 'secret', label: t('Secret'), type: 'password', required: true },
+        { key: 'defaultToUser', label: t('Default User ID'), type: 'text', placeholder: t('userid (optional)') },
+        { key: 'defaultToParty', label: t('Default Party ID'), type: 'text', placeholder: t('party id (optional)') },
       ],
     },
     {
@@ -127,13 +139,13 @@ function buildNotifyChannelDefs(): NotifyChannelDef[] {
       notifyType: 'dingtalk',
       icon: Bell,
       labelKey: NOTIFICATION_CHANNEL_META.dingtalk.labelKey,
-      descriptionKey: NOTIFICATION_CHANNEL_META.dingtalk.descriptionKey,
+      description: t('Send notifications via DingTalk (钉钉)'),
       fields: [
-        { key: 'appKey', label: 'App Key', type: 'text', required: true },
-        { key: 'appSecret', label: 'App Secret', type: 'password', required: true },
-        { key: 'agentId', label: 'Agent ID', type: 'number', placeholder: '0', required: true },
-        { key: 'robotCode', label: 'Robot Code', type: 'text', placeholder: 'Robot code (optional)' },
-        { key: 'defaultChatId', label: 'Default Chat ID', type: 'text', placeholder: 'Chat ID (optional)' },
+        { key: 'appKey', label: t('App Key'), type: 'text', required: true },
+        { key: 'appSecret', label: t('App Secret'), type: 'password', required: true },
+        { key: 'agentId', label: t('Agent ID'), type: 'number', placeholder: '0', required: true },
+        { key: 'robotCode', label: t('Robot Code'), type: 'text', placeholder: t('Robot code (optional)') },
+        { key: 'defaultChatId', label: t('Default Chat ID'), type: 'text', placeholder: t('Chat ID (optional)') },
       ],
     },
     {
@@ -141,12 +153,12 @@ function buildNotifyChannelDefs(): NotifyChannelDef[] {
       notifyType: 'feishu',
       icon: MessageSquare,
       labelKey: NOTIFICATION_CHANNEL_META.feishu.labelKey,
-      descriptionKey: NOTIFICATION_CHANNEL_META.feishu.descriptionKey,
+      description: t('Send notifications via Feishu/Lark (飞书)'),
       fields: [
-        { key: 'appId', label: 'App ID', type: 'text', required: true },
-        { key: 'appSecret', label: 'App Secret', type: 'password', required: true },
-        { key: 'defaultChatId', label: 'Default Chat ID', type: 'text', placeholder: 'Chat ID (optional)' },
-        { key: 'defaultUserId', label: 'Default User ID', type: 'text', placeholder: 'User open_id (optional)' },
+        { key: 'appId', label: t('App ID'), type: 'text', required: true },
+        { key: 'appSecret', label: t('App Secret'), type: 'password', required: true },
+        { key: 'defaultChatId', label: t('Default Chat ID'), type: 'text', placeholder: t('Chat ID (optional)') },
+        { key: 'defaultUserId', label: t('Default User ID'), type: 'text', placeholder: t('User open_id (optional)') },
       ],
     },
     {
@@ -154,21 +166,19 @@ function buildNotifyChannelDefs(): NotifyChannelDef[] {
       notifyType: 'webhook',
       icon: Webhook,
       labelKey: NOTIFICATION_CHANNEL_META.webhook.labelKey,
-      descriptionKey: NOTIFICATION_CHANNEL_META.webhook.descriptionKey,
+      description: t('Send notifications via HTTP webhook'),
       fields: [
-        { key: 'url', label: 'URL', type: 'text', placeholder: 'https://example.com/webhook', required: true },
+        { key: 'url', label: t('URL'), type: 'text', placeholder: 'https://example.com/webhook', required: true },
         {
-          key: 'method', label: 'Method', type: 'select',
+          key: 'method', label: t('Method'), type: 'select',
           options: [{ value: 'POST', label: 'POST' }, { value: 'PUT', label: 'PUT' }],
         },
-        { key: 'headers', label: 'Headers (JSON)', type: 'text', placeholder: '{"Authorization": "Bearer ..."}' },
-        { key: 'secret', label: 'HMAC Secret', type: 'password', placeholder: 'Signing secret (optional)' },
+        { key: 'headers', label: t('Headers (JSON)'), type: 'text', placeholder: '{"Authorization": "Bearer ..."}' },
+        { key: 'secret', label: t('HMAC Secret'), type: 'password', placeholder: t('Signing secret (optional)') },
       ],
     },
   ]
 }
-
-const NOTIFY_CHANNEL_DEFS = buildNotifyChannelDefs()
 
 // ============================================
 // Helpers
@@ -221,23 +231,9 @@ function ChannelField({ field, value, onChange, docs }: ChannelFieldProps) {
   if (field.type === 'toggle') {
     const checked = Boolean(value)
     return (
-      <div className="flex items-center justify-between">
-        <label className="text-sm text-muted-foreground">{t(field.label)}</label>
-        <label className="relative inline-flex items-center cursor-pointer">
-          <input
-            type="checkbox"
-            checked={checked}
-            onChange={(e) => onChange(e.target.checked)}
-            className="sr-only peer"
-          />
-          <div className="w-11 h-6 bg-secondary rounded-full peer peer-checked:bg-primary transition-colors">
-            <div
-              className={`w-5 h-5 bg-white rounded-full shadow-md transform transition-transform ${
-                checked ? 'translate-x-5' : 'translate-x-0.5'
-              } mt-0.5`}
-            />
-          </div>
-        </label>
+      <div className={`flex items-center justify-between py-1.5 ${switchRowHover}`}>
+        <label className="text-sm text-muted-foreground">{field.label}</label>
+        <Switch checked={checked} onCheckedChange={onChange} />
       </div>
     )
   }
@@ -245,11 +241,11 @@ function ChannelField({ field, value, onChange, docs }: ChannelFieldProps) {
   if (field.type === 'select') {
     return (
       <div className="space-y-1">
-        <label className="text-sm text-muted-foreground">{t(field.label)}</label>
+        <label className="text-sm text-muted-foreground">{field.label}</label>
         <select
           value={(value as string) || field.options?.[0]?.value || ''}
           onChange={(e) => onChange(e.target.value)}
-          className="w-full bg-muted border border-border rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-1 focus:ring-primary"
+          className="w-full bg-secondary border border-transparent rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-primary"
         >
           {field.options?.map((opt) => (
             <option key={opt.value} value={opt.value}>
@@ -294,7 +290,7 @@ function ChannelField({ field, value, onChange, docs }: ChannelFieldProps) {
   return (
     <div className="space-y-1">
       <label className="text-sm text-muted-foreground">
-        {t(field.label)}
+        {field.label}
         {field.required && <span className="text-red-400 ml-0.5">*</span>}
       </label>
       <input
@@ -302,8 +298,8 @@ function ChannelField({ field, value, onChange, docs }: ChannelFieldProps) {
         value={displayValue}
         onChange={(e) => handleChange(e.target.value)}
         onBlur={handleBlur}
-        placeholder={field.placeholder ? t(field.placeholder) : undefined}
-        className="w-full bg-muted border border-border rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-1 focus:ring-primary"
+        placeholder={field.placeholder}
+        className="w-full bg-secondary border border-transparent rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-primary"
       />
       {docs && (
         <button
@@ -317,6 +313,39 @@ function ChannelField({ field, value, onChange, docs }: ChannelFieldProps) {
           <ExternalLink className="w-3 h-3" />
         </button>
       )}
+    </div>
+  )
+}
+
+interface SmtpPortFieldProps {
+  label: string
+  value: string
+  invalid: boolean
+  onChange: (text: string) => void
+  onBlur: () => void
+}
+
+/** Shows the text being typed so the field can be cleared; only a usable port is saved. */
+function SmtpPortField({ label, value, invalid, onChange, onBlur }: SmtpPortFieldProps) {
+  const { t } = useTranslation()
+  return (
+    <div className="space-y-1">
+      <label className="text-sm text-muted-foreground">
+        {label}
+        <span className="text-red-400 ml-0.5">*</span>
+      </label>
+      <input
+        type="number"
+        inputMode="numeric"
+        value={value}
+        onChange={(e) => onChange(e.target.value)}
+        onBlur={onBlur}
+        aria-invalid={invalid}
+        className={`w-full bg-secondary border rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-primary ${
+          invalid ? 'border-red-500' : 'border-transparent'
+        }`}
+      />
+      {invalid && <p className="text-xs text-red-500">{t('Please enter the SMTP port')}</p>}
     </div>
   )
 }
@@ -357,7 +386,7 @@ function NameResolutionField({ value, onChange, status }: NameResolutionFieldPro
     <div className="space-y-1">
       <div className="flex items-center gap-1.5">
         <UserCheck className="w-3.5 h-3.5 text-muted-foreground" />
-        <label className="text-sm text-muted-foreground">{t('Name Resolution URL')}</label>
+        <label className="text-sm text-foreground">{t('Name Resolution URL')}</label>
         <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-muted text-muted-foreground">
           {t('Optional')}
         </span>
@@ -368,7 +397,7 @@ function NameResolutionField({ value, onChange, status }: NameResolutionFieldPro
           value={value}
           onChange={(e) => onChange(e.target.value)}
           placeholder="https://qyapi.weixin.qq.com/mcp/v2/bot/msg?apikey=..."
-          className="w-full bg-muted border border-border rounded-lg px-3 py-2 pr-10 text-sm focus:outline-none focus:ring-1 focus:ring-primary"
+          className="w-full bg-secondary border border-transparent rounded-lg px-3 py-2 pr-10 text-sm focus:outline-none focus:border-primary"
         />
         <button
           type="button"
@@ -394,25 +423,31 @@ function NameResolutionField({ value, onChange, status }: NameResolutionFieldPro
 interface InstanceCardProps {
   instance: ImChannelInstanceConfig
   status: ImChannelInstanceStatus | undefined
-  automationApps: { id: string; spec: { name: string } }[]
+  automationApps: ChannelBackendApp[]
+  /** Teams whose members can back this channel (see ChannelBackendSelect). */
+  teams: ChannelBackendTeam[]
   isExpanded: boolean
   onToggle: () => void
   onChange: (instance: ImChannelInstanceConfig) => void
+  /** Rebinding goes through main so its validation applies to both binding surfaces. */
+  onRebind: (appId: string) => void
   onDelete: () => void
   onReconnect: () => void
   /** Warning message when this instance's Bot ID conflicts with another instance */
   duplicateWarning?: string
   /** Product-level permission defaults */
-  permissionDefaults?: PermissionDefaults | null
+  permissionDefaults?: ImPermissionDefaults | null
 }
 
 function InstanceCard({
   instance,
   status,
   automationApps,
+  teams,
   isExpanded,
   onToggle,
   onChange,
+  onRebind,
   onDelete,
   onReconnect,
   duplicateWarning,
@@ -427,10 +462,6 @@ function InstanceCard({
   const isEnabled = instance.enabled
   const cfg = instance.config as Record<string, unknown>
   const botId = (cfg.botId as string) || ''
-
-  // Resolve bound app name
-  const boundApp = automationApps.find(a => a.id === instance.appId)
-  const displayName = boundApp?.spec.name || t('Not bound')
 
   // Status indicator. Standby (superseded by another device) is informational
   // rather than an error, so it gets its own colour.
@@ -502,10 +533,14 @@ function InstanceCard({
     onChange({ ...instance, enabled: !isEnabled })
   }
 
-  const handleAppChange = (appId: string) => {
+  const handleTargetChange = (target: ChannelBackendValue) => {
     if (saveTimerRef.current) clearTimeout(saveTimerRef.current)
     setDraft(null)
-    onChange({ ...instance, appId })
+    // A digital-human target goes through main's rebind, which rejects a target
+    // that would silently swallow inbound messages. A team target has no such
+    // validator yet, so it takes the plain config write.
+    if (target.teamId) onChange({ ...instance, ...target })
+    else onRebind(target.appId)
   }
 
   const handleStreamingChange = () => {
@@ -536,120 +571,133 @@ function InstanceCard({
     onChange({ ...instance, replyScope: scope as ImChannelInstanceConfig['replyScope'] })
   }
 
+  const handleProcessingNoticeChange = () => {
+    if (saveTimerRef.current) clearTimeout(saveTimerRef.current)
+    setDraft(null)
+    // On by default (undefined). Toggle off → explicit false; toggle on → undefined.
+    onChange({ ...instance, processingNotice: instance.processingNotice === false ? undefined : false })
+  }
+
   const isStreamingEnabled = instance.streaming === true
   const isQuoteReplyEnabled = (cfg.quoteReply as boolean) !== false
   const replyScope = instance.replyScope ?? 'all'
 
   return (
-    <div className="border border-border/60 rounded-lg overflow-hidden bg-card/50">
-      {/* Instance header */}
-      <button
-        type="button"
-        onClick={onToggle}
-        className="w-full flex items-center justify-between px-3 py-2.5 hover:bg-muted/30 transition-colors"
-      >
-        <div className="flex items-center gap-2.5 min-w-0">
+    <div className="rounded-lg bg-card">
+      {/* Instance header — the enable switch lives here, so it works without opening the card */}
+      <div className="flex items-center justify-between gap-2 px-3 py-2.5 rounded-lg">
+        <button type="button" onClick={onToggle} aria-expanded={isExpanded} className="flex flex-1 items-center gap-2.5 min-w-0">
           <div className={`w-2 h-2 rounded-full flex-shrink-0 ${statusDot}`} />
           <div className="text-left min-w-0">
-            <p className="text-sm font-medium truncate">{displayName}</p>
+            <p className="text-sm font-medium truncate">
+              <ChannelBackendName value={instance} automationApps={automationApps} teams={teams} />
+            </p>
             <p className="text-[11px] text-muted-foreground truncate">
-              Bot ID: {truncateId(botId) || t('Not set')}
+              {status && <>{getImBotLabel(status, t)} · </>}
+              {t('Bot ID')}: {truncateId(botId) || t('Not set')}
               {!isEnabled ? '' : isConnected ? '' : ` · ${statusText}`}
             </p>
           </div>
-        </div>
+        </button>
         <div className="flex items-center gap-1.5 flex-shrink-0">
-          {/* Context menu. Popover renders the panel through a portal so it
-              escapes this card's `overflow-hidden`, which previously clipped
-              the dropdown. The wrapper stops clicks from toggling the header. */}
-          <div onClick={(e) => e.stopPropagation()}>
-            <Popover
-              open={showMenu}
-              onOpenChange={(open) => {
-                setShowMenu(open)
-                if (!open) setShowDeleteConfirm(false)
-              }}
-            >
-              <PopoverTrigger className="p-1 rounded hover:bg-muted transition-colors">
-                <MoreVertical className="w-3.5 h-3.5 text-muted-foreground" />
-              </PopoverTrigger>
-              <PopoverContent align="end" className="min-w-[140px] py-1">
+          <label className="flex items-center gap-1.5 cursor-pointer">
+            <span aria-hidden className="hidden sm:inline text-xs text-muted-foreground">{isEnabled ? t('Enabled') : t('Disabled')}</span>
+            <Switch checked={isEnabled} onCheckedChange={() => handleEnabledChange()} ariaLabel={t('Enable this channel')} />
+          </label>
+          <Popover
+            open={showMenu}
+            onOpenChange={(open) => {
+              setShowMenu(open)
+              if (!open) setShowDeleteConfirm(false)
+            }}
+          >
+            <PopoverTrigger className="p-1 rounded hover:bg-muted transition-colors">
+              <MoreVertical className="w-3.5 h-3.5 text-muted-foreground" />
+            </PopoverTrigger>
+            <PopoverContent align="end" className="min-w-[140px] py-1">
+              <button
+                type="button"
+                onClick={() => { setShowMenu(false); onReconnect() }}
+                className="w-full text-left px-3 py-1.5 text-sm hover:bg-muted transition-colors flex items-center gap-2"
+                disabled={!isEnabled}
+              >
+                <RefreshCw className="w-3.5 h-3.5" />
+                {t('Reconnect')}
+              </button>
+              {showDeleteConfirm ? (
+                // Inline confirmation — avoids misclick on a destructive action
+                <div className="px-3 py-2 space-y-1.5">
+                  <p className="text-xs text-muted-foreground">{t('Delete this instance?')}</p>
+                  <div className="flex items-center gap-2">
+                    <button
+                      type="button"
+                      onClick={() => { setShowMenu(false); setShowDeleteConfirm(false); onDelete() }}
+                      className="flex-1 px-2 py-1 text-xs rounded bg-destructive/10 text-destructive hover:bg-destructive/20 transition-colors"
+                    >
+                      {t('Confirm')}
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setShowDeleteConfirm(false)}
+                      className="flex-1 px-2 py-1 text-xs rounded hover:bg-muted text-muted-foreground transition-colors"
+                    >
+                      {t('Cancel')}
+                    </button>
+                  </div>
+                </div>
+              ) : (
                 <button
                   type="button"
-                  onClick={() => { setShowMenu(false); onReconnect() }}
-                  className="w-full text-left px-3 py-1.5 text-sm hover:bg-muted transition-colors flex items-center gap-2"
-                  disabled={!isEnabled}
+                  onClick={() => setShowDeleteConfirm(true)}
+                  className="w-full text-left px-3 py-1.5 text-sm hover:bg-muted text-destructive transition-colors flex items-center gap-2"
                 >
-                  <RefreshCw className="w-3.5 h-3.5" />
-                  {t('Reconnect')}
+                  <Trash2 className="w-3.5 h-3.5" />
+                  {t('Delete')}
                 </button>
-                {showDeleteConfirm ? (
-                  // Inline confirmation — avoids misclick on a destructive action
-                  <div className="px-3 py-2 space-y-1.5">
-                    <p className="text-xs text-muted-foreground">{t('Delete this instance?')}</p>
-                    <div className="flex items-center gap-2">
-                      <button
-                        type="button"
-                        onClick={() => { setShowMenu(false); setShowDeleteConfirm(false); onDelete() }}
-                        className="flex-1 px-2 py-1 text-xs rounded bg-destructive/10 text-destructive hover:bg-destructive/20 transition-colors"
-                      >
-                        {t('Confirm')}
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => setShowDeleteConfirm(false)}
-                        className="flex-1 px-2 py-1 text-xs rounded hover:bg-muted text-muted-foreground transition-colors"
-                      >
-                        {t('Cancel')}
-                      </button>
-                    </div>
-                  </div>
-                ) : (
-                  <button
-                    type="button"
-                    onClick={() => setShowDeleteConfirm(true)}
-                    className="w-full text-left px-3 py-1.5 text-sm hover:bg-muted text-destructive transition-colors flex items-center gap-2"
-                  >
-                    <Trash2 className="w-3.5 h-3.5" />
-                    {t('Delete')}
-                  </button>
-                )}
-              </PopoverContent>
-            </Popover>
-          </div>
-          <ChevronDown
-            className={`w-3.5 h-3.5 text-muted-foreground transition-transform duration-200 ${isExpanded ? 'rotate-180' : ''}`}
-          />
+              )}
+            </PopoverContent>
+          </Popover>
+          <button type="button" onClick={onToggle} tabIndex={-1} aria-hidden="true" className="p-1">
+            <ChevronDown
+              className={`w-3.5 h-3.5 text-muted-foreground transition-transform duration-200 ${isExpanded ? '' : '-rotate-90'}`}
+            />
+          </button>
         </div>
-      </button>
+      </div>
 
-      {/* Instance body */}
+      {/* Instance body: connection, replies, permissions */}
       {isExpanded && (
-        <div className="px-3 pb-3 pt-2 border-t border-border/60 space-y-3 animate-in slide-in-from-top-1 duration-150">
-          {/* Enable toggle */}
-          <div className="flex items-center justify-between">
-            <p className="text-sm text-muted-foreground">{t('Enabled')}</p>
-            <label className="relative inline-flex items-center cursor-pointer">
-              <input
-                type="checkbox"
-                checked={isEnabled}
-                onChange={handleEnabledChange}
-                className="sr-only peer"
-              />
-              <div className="w-11 h-6 bg-secondary rounded-full peer peer-checked:bg-primary transition-colors">
-                <div
-                  className={`w-5 h-5 bg-white rounded-full shadow-md transform transition-transform ${
-                    isEnabled ? 'translate-x-5' : 'translate-x-0.5'
-                  } mt-0.5`}
-                />
+        <div className="px-3 pb-3 pt-1 space-y-4 animate-in slide-in-from-top-1 duration-150">
+          {/* Only states that need action are called out; "connected" is the header's dot. */}
+          {isEnabled && isStandby && (
+            <div className="space-y-2 rounded-lg bg-sky-500/10 border border-sky-500/30 px-3 py-2">
+              <div className="flex items-center gap-1.5 text-sm text-sky-500">
+                <div className="w-2 h-2 rounded-full bg-sky-500" />
+                <span>{t('In use on another device')}</span>
               </div>
-            </label>
-          </div>
+              <p className="text-xs text-muted-foreground">
+                {t('This bot is currently active on another device. Take over to use it here — the other device will switch to standby.')}
+              </p>
+              <button
+                type="button"
+                onClick={onReconnect}
+                className="flex items-center gap-1.5 px-2.5 py-1 text-xs rounded-md bg-primary text-primary-foreground hover:bg-primary/90 transition-colors"
+              >
+                <RefreshCw className="w-3.5 h-3.5" />
+                {t('Use on this device')}
+              </button>
+            </div>
+          )}
+          {isEnabled && !isStandby && !isConnected && (
+            <div className="flex items-center gap-1.5 rounded-lg bg-amber-500/10 px-3 py-2 text-xs text-amber-600 theme-dark:text-amber-500">
+              <div className="w-1.5 h-1.5 rounded-full bg-amber-500" />
+              {t('Disconnected')}
+            </div>
+          )}
 
-          {/* Config fields */}
-          <div className="space-y-2.5">
+          <InstanceSection title={t('Connection')} first>
             <div className="space-y-1">
-              <label className="text-sm text-muted-foreground">
+              <label className="text-sm text-foreground">
                 Bot ID <span className="text-red-400">*</span>
               </label>
               <input
@@ -657,8 +705,8 @@ function InstanceCard({
                 value={(currentCfg.botId as string) ?? ''}
                 onChange={(e) => handleConfigChange('botId', e.target.value)}
                 placeholder="aib-xxx"
-                className={`w-full bg-muted border rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-1 focus:ring-primary ${
-                  duplicateWarning ? 'border-amber-500' : 'border-border'
+                className={`w-full bg-secondary border rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-primary ${
+                  duplicateWarning ? 'border-amber-500' : 'border-transparent'
                 }`}
               />
               {duplicateWarning && (
@@ -666,529 +714,166 @@ function InstanceCard({
               )}
             </div>
             <div className="space-y-1">
-              <label className="text-sm text-muted-foreground">
+              <label className="text-sm text-foreground">
                 Secret <span className="text-red-400">*</span>
               </label>
               <input
                 type="password"
                 value={(currentCfg.secret as string) ?? ''}
                 onChange={(e) => handleConfigChange('secret', e.target.value)}
-                className="w-full bg-muted border border-border rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-1 focus:ring-primary"
+                className="w-full bg-secondary border border-transparent rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-primary"
               />
             </div>
             <div className="space-y-1">
-              <label className="text-sm text-muted-foreground">WebSocket URL</label>
+              <label className="text-sm text-foreground">WebSocket URL</label>
               <input
                 type="text"
                 value={(currentCfg.wsUrl as string) ?? ''}
                 onChange={(e) => handleConfigChange('wsUrl', e.target.value)}
                 placeholder="wss://openws.work.weixin.qq.com"
-                className="w-full bg-muted border border-border rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-1 focus:ring-primary"
+                className="w-full bg-secondary border border-transparent rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-primary"
               />
             </div>
-          </div>
+            <NameResolutionField
+              value={(currentCfg.nameResolveUrl as string) ?? ''}
+              onChange={(v) => handleConfigChange('nameResolveUrl', v)}
+              status={status?.identityResolution}
+            />
+          </InstanceSection>
 
-          {/* Name resolution — optional, resolves anonymized sender IDs to real names */}
-          <NameResolutionField
-            value={(currentCfg.nameResolveUrl as string) ?? ''}
-            onChange={(v) => handleConfigChange('nameResolveUrl', v)}
-            status={status?.identityResolution}
-          />
-
-          {/* Digital Human selector */}
-          <div className="space-y-1">
-            <label className="text-sm text-muted-foreground">
-              {t('Digital Human')} <span className="text-red-400">*</span>
-            </label>
-            <div className="relative">
-              <Bot className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-muted-foreground pointer-events-none" />
+          <InstanceSection title={t('Replies')}>
+            <ChannelBackendSelect
+              value={instance}
+              automationApps={automationApps}
+              teams={teams}
+              onChange={handleTargetChange}
+            />
+            {/* Reply scope */}
+            <div className="space-y-1">
+              <div className="flex items-center gap-1">
+                <label className="text-sm text-foreground">{t('Reply Scope')}</label>
+                <HelpHint label={t('About this setting')} text={t('Decides where the digital human replies. All messages: it replies when @mentioned in groups and to direct messages. Group chats only: direct messages are declined. Direct messages only: group messages get no reply.')} />
+              </div>
               <select
-                value={instance.appId || ''}
-                onChange={(e) => handleAppChange(e.target.value)}
-                className="w-full bg-muted border border-border rounded-lg pl-9 pr-3 py-2 text-sm focus:outline-none focus:ring-1 focus:ring-primary appearance-none cursor-pointer"
+                value={replyScope}
+                onChange={(e) => handleReplyScopeChange(e.target.value)}
+                className="w-full bg-secondary border border-transparent rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-primary appearance-none cursor-pointer"
               >
-                <option value="">{t('Select digital human')}</option>
-                {automationApps.map(app => (
-                  <option key={app.id} value={app.id}>
-                    {app.spec.name}
-                  </option>
-                ))}
+                <option value="all">{t('All messages')}</option>
+                <option value="group">{t('Group chats only')}</option>
+                <option value="direct">{t('Direct messages only')}</option>
               </select>
-            </div>
-            <p className="text-xs text-muted-foreground">
-              {t('All messages from this Bot will be handled by this digital human')}
-            </p>
-          </div>
-
-          {/* Reply scope */}
-          <div className="space-y-1">
-            <label className="text-sm text-muted-foreground">{t('Reply Scope')}</label>
-            <select
-              value={replyScope}
-              onChange={(e) => handleReplyScopeChange(e.target.value)}
-              className="w-full bg-muted border border-border rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-1 focus:ring-primary appearance-none cursor-pointer"
-            >
-              <option value="all">{t('All messages')}</option>
-              <option value="group">{t('Group chats only')}</option>
-              <option value="direct">{t('Direct messages only')}</option>
-            </select>
-            {replyScope === 'all' && (
-              <p className="text-xs text-muted-foreground">
-                {t('Enabling direct messages allows any user to interact with this digital human privately')}
-              </p>
-            )}
-            {replyScope === 'group' && (
-              <p className="text-xs text-muted-foreground">
-                {t('Private messages will be rejected for security')}
-              </p>
-            )}
-          </div>
-
-          {/* Streaming toggle */}
-          <div className="flex items-center justify-between">
-            <div className="space-y-0.5">
-              <p className="text-sm text-muted-foreground">{t('Streaming')}</p>
-              <p className="text-xs text-muted-foreground/70">
-                {isStreamingEnabled
-                  ? t('Shows thinking process in real-time')
-                  : t('Only sends the final reply')}
-              </p>
-              {!isQuoteReplyEnabled && (
-                <p className="text-xs text-amber-500">
-                  {t('Streaming requires Quote Reply (group chats)')}
+              {replyScope === 'all' && (
+                <p className="text-xs text-muted-foreground">
+                  {t('Enabling direct messages allows any user to interact with this digital human privately')}
+                </p>
+              )}
+              {replyScope === 'group' && (
+                <p className="text-xs text-muted-foreground">
+                  {t('Private messages will be rejected for security')}
                 </p>
               )}
             </div>
-            <label className={`relative inline-flex items-center ${!isQuoteReplyEnabled ? 'cursor-not-allowed opacity-50' : 'cursor-pointer'}`}>
-              <input
-                type="checkbox"
-                checked={isStreamingEnabled}
-                onChange={handleStreamingChange}
-                disabled={!isQuoteReplyEnabled}
-                className="sr-only peer"
-              />
-              <div className="w-11 h-6 bg-secondary rounded-full peer peer-checked:bg-primary transition-colors">
-                <div
-                  className={`w-5 h-5 bg-white rounded-full shadow-md transform transition-transform ${
-                    isStreamingEnabled ? 'translate-x-5' : 'translate-x-0.5'
-                  } mt-0.5`}
-                />
-              </div>
-            </label>
-          </div>
-
-          {/* Quote Reply toggle */}
-          <div className="flex items-center justify-between">
-            <div className="space-y-0.5">
-              <p className="text-sm text-muted-foreground">{t('Quote Reply (Group)')}</p>
-              <p className="text-xs text-muted-foreground/70">
-                {isQuoteReplyEnabled
-                  ? t('Group replies quote the original message')
-                  : t('Group replies are sent as plain text without quote bubbles')}
-              </p>
-            </div>
-            <label className="relative inline-flex items-center cursor-pointer">
-              <input
-                type="checkbox"
-                checked={isQuoteReplyEnabled}
-                onChange={handleQuoteReplyChange}
-                className="sr-only peer"
-              />
-              <div className="w-11 h-6 bg-secondary rounded-full peer peer-checked:bg-primary transition-colors">
-                <div
-                  className={`w-5 h-5 bg-white rounded-full shadow-md transform transition-transform ${
-                    isQuoteReplyEnabled ? 'translate-x-5' : 'translate-x-0.5'
-                  } mt-0.5`}
-                />
-              </div>
-            </label>
-          </div>
-
-          {/* ── Permission Control ── */}
-          <PermissionSection instance={instance} onChange={onChange} onDebouncedChange={scheduleChange} permissionDefaults={permissionDefaults} />
-
-          {/* Connection status */}
-          {isEnabled && (
-            isStandby ? (
-              <div className="space-y-2 rounded-lg bg-sky-500/10 border border-sky-500/30 px-3 py-2">
-                <div className="flex items-center gap-1.5 text-sm text-sky-500">
-                  <div className="w-2 h-2 rounded-full bg-sky-500" />
-                  <span>{t('In use on another device')}</span>
+            {/* Streaming toggle */}
+            <div className={`flex items-center justify-between py-1.5 ${switchRowHover}`}>
+              <div className="space-y-0.5">
+                <div className="flex items-center gap-1">
+                  <p className="text-sm text-foreground">{t('Streaming')}</p>
+                  <HelpHint label={t('About this setting')} text={t('On: the reply is written into one message as it is produced. Off: one complete reply is sent when it is done. In group chats, Quote Reply must be on as well.')} />
                 </div>
                 <p className="text-xs text-muted-foreground">
-                  {t('This bot is currently active on another device. Take over to use it here — the other device will switch to standby.')}
+                  {isStreamingEnabled
+                    ? t('Shows thinking process in real-time')
+                    : t('Only sends the final reply')}
                 </p>
-                <button
-                  type="button"
-                  onClick={onReconnect}
-                  className="flex items-center gap-1.5 px-2.5 py-1 text-xs rounded-md bg-primary text-primary-foreground hover:bg-primary/90 transition-colors"
-                >
-                  <RefreshCw className="w-3.5 h-3.5" />
-                  {t('Use on this device')}
-                </button>
+                {!isQuoteReplyEnabled && (
+                  <p className="text-xs text-amber-500">
+                    {t('Streaming requires Quote Reply (group chats)')}
+                  </p>
+                )}
               </div>
-            ) : (
-              <div className={`flex items-center gap-1.5 text-sm ${isConnected ? 'text-green-500' : 'text-amber-500'}`}>
-                <div className={`w-2 h-2 rounded-full ${isConnected ? 'bg-green-500' : 'bg-amber-500'}`} />
-                <span>{isConnected ? t('Connected') : t('Disconnected')}</span>
+              <Switch checked={isStreamingEnabled} onCheckedChange={() => handleStreamingChange()} disabled={!isQuoteReplyEnabled} />
+            </div>
+            {/* Quote Reply toggle */}
+            <div className={`flex items-center justify-between py-1.5 ${switchRowHover}`}>
+              <div className="space-y-0.5">
+                <div className="flex items-center gap-1">
+                  <p className="text-sm text-foreground">{t('Quote Reply (Group)')}</p>
+                  <HelpHint label={t('About this setting')} text={t('On: a reply in a group quotes the message it answers, so it is clear whom it answers. Off: replies are sent as plain messages, and streaming cannot be used.')} />
+                </div>
+                <p className="text-xs text-muted-foreground">
+                  {isQuoteReplyEnabled
+                    ? t('Group replies quote the original message')
+                    : t('Group replies are sent as plain text without quote bubbles')}
+                </p>
               </div>
-            )
-          )}
+              <Switch checked={isQuoteReplyEnabled} onCheckedChange={() => handleQuoteReplyChange()} />
+            </div>
+            <ImProcessingNoticeRow
+              on={instance.processingNotice !== false}
+              streaming={isStreamingEnabled}
+              onToggle={handleProcessingNoticeChange}
+            />
+          </InstanceSection>
+
+          <InstanceSection title={t('Permissions')}>
+            <ImInstancePermissionSection instance={instance} onChange={onChange} onDebouncedChange={scheduleChange} permissionDefaults={permissionDefaults} />
+          </InstanceSection>
         </div>
       )}
     </div>
   )
 }
 
-// ============================================
-// Permission Section (permissionEnabled + owners + guestPolicy)
-// ============================================
-
-/**
- * Built-in tools that can be granted to guests.
- * All tools are off by default — owners choose which to enable.
- */
-const GUEST_SAFE_BUILTIN_TOOLS = [
-  { name: 'Read', group: 'file' },
-  { name: 'Glob', group: 'file' },
-  { name: 'Grep', group: 'file' },
-  { name: 'WebFetch', group: 'network' },
-  { name: 'WebSearch', group: 'network' },
-  { name: 'Agent', group: 'other' },
-  { name: 'TodoWrite', group: 'other' },
-  { name: 'Bash', group: 'advanced' },
-  { name: 'Write', group: 'advanced' },
-  { name: 'Edit', group: 'advanced' },
-  { name: 'NotebookEdit', group: 'advanced' },
-] as const
-
-/** Group labels for tool tags */
-const TOOL_GROUP_LABELS: Record<string, string> = {
-  file: 'File Read',
-  network: 'Network',
-  other: 'Other',
-  advanced: 'Advanced',
-}
-
-/**
- * Halo MCP toggle definitions for the guest policy UI.
- * Replaces the old free-text mcp__ input.
- */
-const HALO_MCP_TOGGLES: { key: keyof GuestPolicy; labelKey: string }[] = [
-  { key: 'allowAiBrowser', labelKey: 'AI Browser' },
-  { key: 'allowEmail',     labelKey: 'Email' },
-  { key: 'allowNotify',    labelKey: 'Notifications' },
-  { key: 'allowApps',      labelKey: 'Digital Humans' },
-  { key: 'allowFileSend',  labelKey: 'File Send' },
-  { key: 'allowOcr',       labelKey: 'Text Extraction (OCR)' },
-]
-
-interface PermissionSectionProps {
-  instance: ImChannelInstanceConfig
-  /** Immediate save (for toggles) */
-  onChange: (instance: ImChannelInstanceConfig) => void
-  /** Debounced save (for text fields — 500ms delay, same as config fields) */
-  onDebouncedChange: (instance: ImChannelInstanceConfig) => void
-  /** Product-level permission defaults (for owner ID hint, etc.) */
-  permissionDefaults?: PermissionDefaults | null
-}
-
-function PermissionSection({ instance, onChange, onDebouncedChange, permissionDefaults }: PermissionSectionProps) {
-  const { t } = useTranslation()
-  const permissionEnabled = instance.permissionEnabled ?? false
-  const owners = instance.owners ?? []
-  const hasOwners = owners.length > 0
-  const guestPolicy = instance.guestPolicy
-  const guestAccessEnabled = hasOwners && guestPolicy !== undefined
-
-  // Load installed MCP apps for the user MCP whitelist
-  const { apps } = useAppsStore()
-  const mcpApps = apps.filter(a => a.spec.type === 'mcp')
-
-  // Local draft state for text fields (avoids cursor jumping during debounce)
-  const [ownersDraft, setOwnersDraft] = useState<string | null>(null)
-
-  // Derive display values
-  const currentAllowedTools = guestPolicy?.allowedTools ?? []
-  const builtinNames = new Set(GUEST_SAFE_BUILTIN_TOOLS.map(t => t.name))
-  const selectedBuiltinTools = new Set(currentAllowedTools.filter(t => builtinNames.has(t)))
-
-  const ownersDisplay = ownersDraft ?? owners.join(', ')
-
-  // ── Handlers ──
-
-  const handlePermissionToggle = () => {
-    onChange({ ...instance, permissionEnabled: !permissionEnabled })
-  }
-
-  const handleOwnersChange = (value: string) => {
-    setOwnersDraft(value)
-    const parsed = value
-      .split(/[,\n]/)
-      .map(s => s.trim())
-      .filter(Boolean)
-    onDebouncedChange({
-      ...instance,
-      owners: parsed.length > 0 ? parsed : undefined,
-    })
-  }
-
-  const handleOwnersBlur = () => {
-    setOwnersDraft(null)
-  }
-
-  const handleGuestAccessToggle = () => {
-    if (guestAccessEnabled) {
-      onChange({ ...instance, guestPolicy: undefined })
-    } else {
-      onChange({ ...instance, guestPolicy: { allowedTools: [] } })
-    }
-  }
-
-  const handleBuiltinToolToggle = (toolName: string) => {
-    const newSet = new Set(selectedBuiltinTools)
-    if (newSet.has(toolName)) {
-      newSet.delete(toolName)
-    } else {
-      newSet.add(toolName)
-    }
-    onChange({ ...instance, guestPolicy: { ...guestPolicy, allowedTools: Array.from(newSet) } })
-  }
-
-  const handleMcpToggle = (key: keyof GuestPolicy) => {
-    const current = guestPolicy?.[key] as boolean | undefined
-    onChange({ ...instance, guestPolicy: { ...guestPolicy, [key]: !current } })
-  }
-
-  const handleUserMcpToggle = (specId: string) => {
-    const current = guestPolicy?.allowedUserMcp ?? []
-    const updated = current.includes(specId)
-      ? current.filter(s => s !== specId)
-      : [...current, specId]
-    onChange({
-      ...instance,
-      guestPolicy: { ...guestPolicy, allowedUserMcp: updated.length > 0 ? updated : undefined },
-    })
-  }
-
-  // ── Render ──
-
+/** One titled group inside an expanded instance; the rule runs on from its title. */
+function InstanceSection({ title, first, children }: { title: string; first?: boolean; children: ReactNode }) {
   return (
-    <div className="space-y-2">
-      {/* Master toggle */}
-      <div className="flex items-center justify-between">
-        <div className="space-y-0.5">
-          <p className="text-sm text-muted-foreground">{t('Permission Control')}</p>
-          <p className="text-xs text-muted-foreground/70">
-            {permissionEnabled
-              ? t('Restrict access by owner/guest roles')
-              : t('Everyone has full access')}
-          </p>
-        </div>
-        <label className="relative inline-flex items-center cursor-pointer">
-          <input
-            type="checkbox"
-            checked={permissionEnabled}
-            onChange={handlePermissionToggle}
-            className="sr-only peer"
-          />
-          <div className="w-11 h-6 bg-secondary rounded-full peer peer-checked:bg-primary transition-colors">
-            <div
-              className={`w-5 h-5 bg-white rounded-full shadow-md transform transition-transform ${
-                permissionEnabled ? 'translate-x-5' : 'translate-x-0.5'
-              } mt-0.5`}
-            />
-          </div>
-        </label>
+    <section className={`space-y-3 ${first ? '' : 'pt-2'}`}>
+      <div className="flex items-center gap-3">
+        <h4 className="flex-shrink-0 text-[13px] font-semibold text-foreground">{title}</h4>
+        <div className="h-px flex-1 bg-border-soft" />
       </div>
-
-      {/* Permission details (only when enabled) */}
-      {permissionEnabled && (
-        <div className="space-y-3 pl-1 animate-in slide-in-from-top-1 duration-150">
-          {/* Owners */}
-          <div className="space-y-1">
-            <label className="text-sm text-muted-foreground">
-              {t('Owner User IDs')}
-            </label>
-            <textarea
-              value={ownersDisplay}
-              onChange={(e) => handleOwnersChange(e.target.value)}
-              onBlur={handleOwnersBlur}
-              placeholder={permissionDefaults?.ownerIdHint || t('Fill in your own user ID. Ask the bot "what is my user ID" to get it.')}
-              rows={2}
-              className="w-full bg-muted border border-border rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-1 focus:ring-primary resize-none"
-            />
-            <p className="text-xs text-muted-foreground">
-              {t('Owners always have full access and are not restricted by the guest settings below.')}
-            </p>
-          </div>
-
-          {/* No owners yet — auto-claim is active, so this is an expected
-              interim state rather than a misconfiguration. */}
-          {!hasOwners && (
-            <div className="flex items-center gap-2 rounded-lg bg-primary/10 border border-primary/30 px-3 py-2">
-              <Info className="w-4 h-4 text-primary shrink-0" />
-              <p className="text-xs text-foreground/80">
-                {t('No owner bound yet. The first user to send this bot a direct message will be bound as the owner automatically. Until then, all users are deny-all guests.')}
-              </p>
-            </div>
-          )}
-
-          {/* Guest section divider — makes the owner/guest boundary visually explicit */}
-          {hasOwners && (
-            <div className="flex items-center gap-2 pt-1">
-              <div className="flex-1 border-t border-border/60" />
-              <span className="text-[10px] uppercase tracking-widest text-muted-foreground/50 px-1">
-                {t('Guest Permissions')}
-              </span>
-              <div className="flex-1 border-t border-border/60" />
-            </div>
-          )}
-
-          {/* Guest access toggle (only when owners are set) */}
-          {hasOwners && (
-            <>
-              <div className="flex items-center justify-between">
-                <div className="space-y-0.5">
-                  <p className="text-sm text-muted-foreground">{t('Guest Access')}</p>
-                  <p className="text-xs text-muted-foreground/70">
-                    {guestAccessEnabled
-                      ? t('Guests have limited access to selected tools below')
-                      : t('Guests have no tool access — chat only')}
-                  </p>
-                </div>
-                <label className="relative inline-flex items-center cursor-pointer">
-                  <input
-                    type="checkbox"
-                    checked={guestAccessEnabled}
-                    onChange={handleGuestAccessToggle}
-                    className="sr-only peer"
-                  />
-                  <div className="w-11 h-6 bg-secondary rounded-full peer peer-checked:bg-primary transition-colors">
-                    <div
-                      className={`w-5 h-5 bg-white rounded-full shadow-md transform transition-transform ${
-                        guestAccessEnabled ? 'translate-x-5' : 'translate-x-0.5'
-                      } mt-0.5`}
-                    />
-                  </div>
-                </label>
-              </div>
-
-              {/* Tool selection (only when guest access is enabled) */}
-              {guestAccessEnabled && (
-                <div className="space-y-2">
-                  <label className="text-sm text-muted-foreground">
-                    {t('Guest Allowed Tools')}
-                  </label>
-
-                  {/* Built-in tool tags grouped — unchanged from original */}
-                  {Object.entries(TOOL_GROUP_LABELS).map(([group, label]) => {
-                    const tools = GUEST_SAFE_BUILTIN_TOOLS.filter(t => t.group === group)
-                    if (tools.length === 0) return null
-                    return (
-                      <div key={group} className="flex flex-wrap items-center gap-1.5">
-                        <span className="text-xs text-muted-foreground/70 w-14 sm:w-16 shrink-0">
-                          {t(label)}
-                        </span>
-                        {tools.map(tool => {
-                          const isSelected = selectedBuiltinTools.has(tool.name)
-                          return (
-                            <button
-                              key={tool.name}
-                              type="button"
-                              onClick={() => handleBuiltinToolToggle(tool.name)}
-                              className={`px-2 py-0.5 text-xs rounded-md border transition-colors ${
-                                isSelected
-                                  ? 'bg-primary/15 text-primary border-primary/30'
-                                  : 'bg-muted text-muted-foreground border-border hover:border-primary/20'
-                              }`}
-                            >
-                              {tool.name}
-                            </button>
-                          )
-                        })}
-                      </div>
-                    )
-                  })}
-
-                  {/* MCP capabilities — replaces old free-text mcp__ input */}
-                  <div className="mt-2 pt-2 border-t border-border/40 space-y-3">
-                    {/* Halo built-in MCP toggles */}
-                    <div className="space-y-1.5">
-                      <label className="text-xs text-muted-foreground/70">
-                        {t('Halo Capabilities')}
-                      </label>
-                      {HALO_MCP_TOGGLES.map(({ key, labelKey }) => {
-                        const isOn = Boolean(guestPolicy?.[key])
-                        return (
-                          <div key={key} className="flex items-center justify-between">
-                            <p className="text-sm text-muted-foreground">{t(labelKey)}</p>
-                            <label className="relative inline-flex items-center cursor-pointer">
-                              <input
-                                type="checkbox"
-                                checked={isOn}
-                                onChange={() => handleMcpToggle(key)}
-                                className="sr-only peer"
-                              />
-                              <div className="w-9 h-5 bg-secondary rounded-full peer peer-checked:bg-primary transition-colors">
-                                <div
-                                  className={`w-4 h-4 bg-white rounded-full shadow-md transform transition-transform ${
-                                    isOn ? 'translate-x-4' : 'translate-x-0.5'
-                                  } mt-0.5`}
-                                />
-                              </div>
-                            </label>
-                          </div>
-                        )
-                      })}
-                    </div>
-
-                    {/* User-installed MCP servers (only shown when any are installed) */}
-                    {mcpApps.length > 0 && (
-                    <div className="space-y-1.5">
-                      <label className="text-xs text-muted-foreground/70">
-                        {t('Installed MCP Servers')}
-                      </label>
-                      {mcpApps.map(app => {
-                      const specId = app.specId
-                      const isAllowed = guestPolicy?.allowedUserMcp?.includes(specId) ?? false
-                      return (
-                        <div key={specId} className="flex items-center justify-between">
-                          <p className="text-sm text-muted-foreground">{app.spec.name}</p>
-                          <label className="relative inline-flex items-center cursor-pointer">
-                            <input
-                              type="checkbox"
-                              checked={isAllowed}
-                              onChange={() => handleUserMcpToggle(specId)}
-                              className="sr-only peer"
-                            />
-                            <div className="w-9 h-5 bg-secondary rounded-full peer peer-checked:bg-primary transition-colors">
-                              <div
-                                className={`w-4 h-4 bg-white rounded-full shadow-md transform transition-transform ${
-                                  isAllowed ? 'translate-x-4' : 'translate-x-0.5'
-                                } mt-0.5`}
-                              />
-                            </div>
-                          </label>
-                        </div>
-                      )
-                    })}
-                  </div>
-                    )}
-                  </div>
-                </div>
-              )}
-            </>
-          )}
-        </div>
-      )}
-    </div>
+      {children}
+    </section>
   )
 }
 
 // ============================================
 // Notification Channel Card
 // ============================================
+
+/** Scan-first add actions for a multi-instance channel. */
+function AddInstanceActions({ onScan, onManual, hint }: {
+  onScan: () => void
+  onManual: () => void
+  hint: string
+}) {
+  const { t } = useTranslation()
+
+  return (
+    <>
+      <div className="flex flex-col sm:flex-row items-stretch gap-2 pt-1">
+        <button
+          type="button"
+          onClick={onScan}
+          className="flex-1 flex items-center justify-center gap-2 px-3 py-2 text-sm bg-primary/10 text-primary rounded-lg hover:bg-primary/15 transition-colors font-medium"
+        >
+          <QrCode className="w-4 h-4" />
+          {t('Scan to add')}
+        </button>
+        <button
+          type="button"
+          onClick={onManual}
+          className="flex items-center justify-center gap-2 px-3 py-2 text-sm border border-border rounded-lg text-muted-foreground hover:text-foreground hover:bg-muted/30 transition-colors"
+        >
+          <Plus className="w-4 h-4" />
+          {t('Manual setup')}
+        </button>
+      </div>
+      <p className="text-[11px] text-muted-foreground text-center pt-0.5">{hint}</p>
+    </>
+  )
+}
 
 interface NotifyChannelCardProps {
   def: NotifyChannelDef
@@ -1217,7 +902,6 @@ function NotifyChannelCard({
   const { t } = useTranslation()
   const Icon = def.icon
   const isEnabled = Boolean(channelConfig?.enabled)
-  const [showAdvanced, setShowAdvanced] = useState(false)
 
   // The help link answers "where do I get this credential", so it hangs off the
   // channel's secret input rather than a hard-coded field name.
@@ -1255,6 +939,68 @@ function NotifyChannelCard({
     return getNestedValue(currentConfig || {}, path)
   }
 
+  // SMTP port: typed text that is not a usable port yet; null shows the port in use.
+  const [portText, setPortText] = useState<string | null>(null)
+  const [portTestRefused, setPortTestRefused] = useState(false)
+  const secure = Boolean(getNestedValue(currentConfig || {}, 'smtp.secure'))
+  const storedPort = getNestedValue(currentConfig || {}, 'smtp.port')
+  const portShown = portText ?? String(effectiveSmtpPort(storedPort, secure))
+  const portInvalid = def.notifyType === 'email' && parseSmtpPort(portShown) === null
+
+  const handlePortChange = (text: string) => {
+    setPortText(text)
+    setPortTestRefused(false)
+    const port = parseSmtpPort(text)
+    if (port !== null && port !== parseSmtpPort(storedPort)) {
+      handleFieldChange('smtp.port', port, 'smtp.port')
+    }
+  }
+
+  const handleSecureChange = (value: unknown) => {
+    let updated = setNestedValue({ ...currentConfig }, 'smtp.secure', value)
+    const port = smtpPortAfterSecureChange(storedPort, secure)
+    if (port !== undefined && port !== parseSmtpPort(storedPort)) {
+      updated = setNestedValue(updated, 'smtp.port', port)
+    }
+    setPortText(null)
+    setPortTestRefused(false)
+    scheduleSave(updated)
+  }
+
+  const handleTest = () => {
+    if (portInvalid) {
+      setPortTestRefused(true)
+      return
+    }
+    onTest(def.notifyType)
+  }
+
+  const renderField = (field: FieldDef, fieldDocs?: ChannelDocsLink) => {
+    if (field.key === 'smtp.port') {
+      return (
+        <SmtpPortField
+          key={field.key}
+          label={field.label}
+          value={portShown}
+          invalid={portInvalid}
+          onChange={handlePortChange}
+          onBlur={() => { if (!portInvalid) setPortText(null) }}
+        />
+      )
+    }
+    return (
+      <ChannelField
+        key={field.key}
+        field={field}
+        value={getFieldValue(field)}
+        onChange={(value) => field.key === 'smtp.secure'
+          ? handleSecureChange(value)
+          : handleFieldChange(field.key, value, field.nested)}
+        docs={fieldDocs}
+      />
+    )
+  }
+
   const statusLabel = isEnabled ? t('Configured') : t('Not configured')
   const statusColor = isEnabled ? 'bg-green-500' : 'bg-muted-foreground/30'
 
@@ -1274,83 +1020,59 @@ function NotifyChannelCard({
                 {t('One-way')}
               </span>
             </div>
-            <p className="text-xs text-muted-foreground mt-0.5 hidden sm:block">{t(def.descriptionKey)}</p>
+            <p className="text-xs text-muted-foreground mt-0.5 hidden sm:block">{def.description}</p>
           </div>
         </div>
         <div className="flex items-center gap-2 sm:gap-3 flex-shrink-0">
           <span className="text-xs text-muted-foreground hidden sm:inline">{statusLabel}</span>
           <div className={`w-2 h-2 rounded-full ${statusColor}`} />
-          <ChevronDown className={`w-4 h-4 text-muted-foreground transition-transform duration-200 ${isExpanded ? 'rotate-180' : ''}`} />
+          <ChevronDown className={`w-4 h-4 text-muted-foreground transition-transform duration-200 ${isExpanded ? '' : '-rotate-90'}`} />
         </div>
       </button>
 
       {isExpanded && (
         <div className="px-4 pb-4 pt-2 border-t border-border space-y-4 animate-in slide-in-from-top-1 duration-150">
-          <div className="flex items-center justify-between">
+          <div className={`flex items-center justify-between py-1.5 ${switchRowHover}`}>
             <div>
               <p className="text-sm font-medium">{t('Enabled')}</p>
               <p className="text-xs text-muted-foreground">{t('Enable this channel')}</p>
             </div>
-            <label className="relative inline-flex items-center cursor-pointer">
-              <input type="checkbox" checked={isEnabled} onChange={handleToggleEnabled} className="sr-only peer" />
-              <div className="w-11 h-6 bg-secondary rounded-full peer peer-checked:bg-primary transition-colors">
-                <div className={`w-5 h-5 bg-white rounded-full shadow-md transform transition-transform ${isEnabled ? 'translate-x-5' : 'translate-x-0.5'} mt-0.5`} />
-              </div>
-            </label>
+            <Switch checked={isEnabled} onCheckedChange={() => handleToggleEnabled()} />
           </div>
 
           <div className="space-y-3">
-            {def.fields.filter(f => !f.group).map((field) => (
-              <ChannelField
-                key={field.key}
-                field={field}
-                value={getFieldValue(field)}
-                onChange={(value) => handleFieldChange(field.key, value, field.nested)}
-                docs={field.key === credentialFieldKey ? docs : undefined}
-              />
-            ))}
+            {def.fields.filter(f => !f.group).map((field) =>
+              renderField(field, field.key === credentialFieldKey ? docs : undefined))}
           </div>
 
           {/* Advanced fields (collapsible) */}
           {def.fields.some(f => f.group === 'advanced') && (
-            <div className="border-t border-border/60 pt-3">
-              <button
-                type="button"
-                onClick={() => setShowAdvanced(!showAdvanced)}
-                className="flex items-center gap-1.5 text-xs text-muted-foreground hover:text-foreground transition-colors"
-              >
-                <ChevronDown className={`w-3.5 h-3.5 transition-transform duration-200 ${showAdvanced ? 'rotate-180' : ''}`} />
-                {t('Advanced')}
-              </button>
-              {showAdvanced && (
-                <div className="mt-3 space-y-3 animate-in slide-in-from-top-1 duration-150">
-                  {def.fields.filter(f => f.group === 'advanced').map((field) => (
-                    <ChannelField
-                      key={field.key}
-                      field={field}
-                      value={getFieldValue(field)}
-                      onChange={(value) => handleFieldChange(field.key, value, field.nested)}
-                    />
-                  ))}
-                  <p className="text-[11px] text-muted-foreground leading-relaxed">
-                    {t('CalDAV URL enables calendar tools. Supports {host} and {email} placeholders.')}
-                  </p>
-                </div>
-              )}
+            <div className="border-t border-border-soft pt-3">
+              <Disclosure title={t('Advanced')} contentClassName="space-y-3">
+                {def.fields.filter(f => f.group === 'advanced').map((field) => renderField(field))}
+                <p className="text-[11px] text-muted-foreground leading-relaxed">
+                  {t('CalDAV URL enables calendar tools. Supports {host} and {email} placeholders.')}
+                </p>
+              </Disclosure>
             </div>
           )}
 
           <div className="flex items-center gap-3 pt-2 flex-wrap">
             <button
               type="button"
-              onClick={() => onTest(def.notifyType)}
+              onClick={handleTest}
               disabled={isTesting || !isEnabled}
               className="flex items-center gap-2 px-3 py-1.5 text-sm bg-primary/10 text-primary hover:bg-primary/20 rounded-lg transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
             >
               {isTesting ? <Loader2 className="w-4 h-4 animate-spin" /> : <Bell className="w-4 h-4" />}
               {isTesting ? t('Testing...') : t('Test')}
             </button>
-            {testResult && (
+            {portTestRefused && portInvalid ? (
+              <div className="flex items-center gap-1.5 text-sm text-red-500">
+                <XCircle className="w-4 h-4" />
+                <span>{t('Please enter the SMTP port')}</span>
+              </div>
+            ) : testResult && (
               <div className={`flex items-center gap-1.5 text-sm ${testResult.success ? 'text-green-500' : 'text-red-500'}`}>
                 {testResult.success ? <CheckCircle className="w-4 h-4" /> : <XCircle className="w-4 h-4" />}
                 <span>{testResult.success ? t('Test passed') : testResult.error || t('Test failed')}</span>
@@ -1369,15 +1091,19 @@ function NotifyChannelCard({
 
 export function MessageChannelsSection({ config, setConfig }: MessageChannelsSectionProps) {
   const { t } = useTranslation()
+  const notifyChannelDefs = useMemo(() => buildNotifyChannelDefs(t), [t])
 
   const [expandedChannels, setExpandedChannels] = useState<Set<string>>(new Set())
   const [expandedInstances, setExpandedInstances] = useState<Set<string>>(new Set())
   const [testingChannel, setTestingChannel] = useState<string | null>(null)
   const [testResults, setTestResults] = useState<Record<string, TestResult>>({})
   const [imStatuses, setImStatuses] = useState<ImChannelInstanceStatus[]>([])
-  const [permissionDefaults, setPermissionDefaults] = useState<PermissionDefaults | null>(null)
+  const [rebindError, setRebindError] = useState<string | null>(null)
+  const rebindBusy = useRef(false)
+  const [permissionDefaults, setPermissionDefaults] = useState<ImPermissionDefaults | null>(null)
   const [notifyProductConfig, setNotifyProductConfig] = useState<NotifyChannelsProductConfig | null>(null)
   const [scanDialogOpen, setScanDialogOpen] = useState(false)
+  const [feishuScanDialogOpen, setFeishuScanDialogOpen] = useState(false)
 
   // Load automation apps for the digital human selector
   const { apps, loadApps } = useAppsStore()
@@ -1385,11 +1111,20 @@ export function MessageChannelsSection({ config, setConfig }: MessageChannelsSec
 
   useEffect(() => { loadApps() }, [loadApps])
 
+  // Teams for the backend selector — a channel binds one member of a team, so
+  // the selector needs a LIVE roster. team.store is that: App.tsx loads it at
+  // startup and keeps it current from team:updated, and every roster edit goes
+  // through the store's own actions. A local fetch here would be a second copy
+  // that nothing refreshes, so a member added after this panel mounted could
+  // never be picked.
+  const teams = useTeamStore(s => s.teams)
+
   // Load product-level permission defaults (once)
   useEffect(() => {
     api.imChannelsPermissionDefaults()
-      .then((res: { success?: boolean; data?: PermissionDefaults | null }) => {
-        if (res.success && res.data) setPermissionDefaults(res.data)
+      .then((res) => {
+        // Untyped IPC payload — ImPermissionDefaults is the renderer's mirror of it.
+        if (res.success && res.data) setPermissionDefaults(res.data as ImPermissionDefaults)
       })
       .catch(() => { /* defaults stay null — no restrictions */ })
   }, [])
@@ -1447,7 +1182,7 @@ export function MessageChannelsSection({ config, setConfig }: MessageChannelsSec
   }, [setConfig])
 
   // ── IM Channel instances from config ────────────────────────────
-  const instances = config?.imChannels?.instances ?? []
+  const instances: ImChannelInstanceConfig[] = config?.imChannels?.instances ?? []
 
   const saveInstances = useCallback(async (newInstances: ImChannelInstanceConfig[]) => {
     if (!config) return
@@ -1467,16 +1202,19 @@ export function MessageChannelsSection({ config, setConfig }: MessageChannelsSec
    * Returns a warning message if duplicate found, undefined otherwise.
    */
   const getDuplicateWarning = useCallback((instance: ImChannelInstanceConfig, allInstances: ImChannelInstanceConfig[]): string | undefined => {
-    const botId = (instance.config.botId as string)?.trim()
-    if (!botId || !instance.enabled) return undefined
+    // Which field identifies the bot is per-provider knowledge, shared with
+    // the main-process enforcement (im-channels/binding.ts) via imCredentialId.
+    // This is the inline warning, shown before the user leaves the field.
+    const credential = imCredentialId(instance.type, instance.config)
+    if (!credential || !instance.enabled) return undefined
     const duplicate = allInstances.find(
       other => other.id !== instance.id
         && other.type === instance.type
         && other.enabled
-        && (other.config.botId as string)?.trim() === botId
+        && imCredentialId(other.type, other.config) === credential
     )
     if (duplicate) {
-      return t('This Bot ID is already in use by another instance. Each Bot can only be bound to one digital human.')
+      return t('This bot is already in use by another instance. Each bot can only be bound to one digital human.')
     }
     return undefined
   }, [t])
@@ -1485,6 +1223,44 @@ export function MessageChannelsSection({ config, setConfig }: MessageChannelsSec
     const newInstances = instances.map(i => i.id === updated.id ? updated : i)
     saveInstances(newInstances)
   }, [instances, saveInstances])
+
+  // Rebinding is owned by main (see im-channels/binding.ts): it validates the
+  // target and re-applies the connection, which a plain config write cannot do.
+  const handleRebindInstance = useCallback(async (instanceId: string, appId: string) => {
+    if (rebindBusy.current) return
+    const current = configRef.current
+    const instance = current?.imChannels?.instances?.find(i => i.id === instanceId)
+    if (!current || !instance) {
+      console.warn('[MessageChannelsSection] Rebinding skipped: bot configuration no longer exists', { instanceId, appId })
+      setRebindError(t('Failed to bind'))
+      return
+    }
+    rebindBusy.current = true
+    setRebindError(null)
+    try {
+      const res = await api.imChannelsSetInstanceApp(instanceId, appId, instance.appId)
+      if (!res.success) {
+        if (res.code !== 'BINDING_CHANGED') {
+          console.warn('[MessageChannelsSection] Bot binding was rejected', { instanceId, appId, error: res.error })
+        }
+        setRebindError(res.code === 'BINDING_CHANGED'
+          ? t('The bot binding changed. Refresh and confirm again.')
+          : res.error ?? t('Failed to bind'))
+      }
+      const fresh = await api.getConfig()
+      if (!fresh.success || !fresh.data) {
+        console.warn('[MessageChannelsSection] Bot configuration could not be refreshed after rebinding', { instanceId, error: fresh.error })
+        setRebindError(t('Failed to load bot connections'))
+        return
+      }
+      setConfig(fresh.data as HaloConfig)
+    } catch (error) {
+      console.warn('[MessageChannelsSection] Bot rebinding failed', { instanceId, appId, error })
+      setRebindError(t('Failed to bind'))
+    } finally {
+      rebindBusy.current = false
+    }
+  }, [setConfig, t])
 
   const handleAddInstance = useCallback(() => {
     // Apply product-level permission defaults for new instances
@@ -1498,9 +1274,7 @@ export function MessageChannelsSection({ config, setConfig }: MessageChannelsSec
       replyScope: 'all', // Default to all messages
       permissionEnabled: pd?.defaultEnabled ?? false,
       ...(pd?.defaultEnabled ? {
-        guestPolicy: pd.defaultGuestAccess
-          ? { allowedTools: pd.defaultGuestPolicy?.allowedTools ?? [] }
-          : undefined,
+        guestPolicy: pd.defaultGuestAccess ? defaultGuestPolicy(pd.defaultGuestPolicy) : undefined,
       } : {}),
     }
     const newInstances = [...instances, newInstance]
@@ -1548,6 +1322,66 @@ export function MessageChannelsSection({ config, setConfig }: MessageChannelsSec
     setExpandedChannels(prev => {
       const next = new Set(prev)
       next.add('im-wecom-bot')
+      return next
+    })
+  }, [instances, saveInstances, loadApps])
+
+  const handleAddFeishuInstance = useCallback(() => {
+    const pd = permissionDefaults
+    const newInstance: ImChannelInstanceConfig = {
+      id: generateId(),
+      type: 'feishu-bot',
+      enabled: false,
+      appId: '',
+      config: { appId: '', appSecret: '', domain: 'feishu', requireMention: true, quoteReply: true },
+      replyScope: 'all',
+      permissionEnabled: pd?.defaultEnabled ?? false,
+      ...(pd?.defaultEnabled ? {
+        guestPolicy: pd.defaultGuestAccess ? defaultGuestPolicy(pd.defaultGuestPolicy) : undefined,
+      } : {}),
+    }
+    saveInstances([...instances, newInstance])
+    setExpandedInstances(prev => new Set(prev).add(newInstance.id))
+  }, [instances, saveInstances, permissionDefaults])
+
+  /**
+   * Persist the app the user just created by scanning.
+   *
+   * Permission control is forced on for the scan path: the device flow returns
+   * the scanner's open_id but not the id the bot will see on an inbound message,
+   * so owner binding is left to the generic auto-claim on the first direct
+   * message. That intentionally overrides product-level permissionDefaults,
+   * because an app created this way is a personal bot.
+   */
+  const handleFeishuScanComplete = useCallback(async (result: {
+    appId: string
+    appSecret: string
+    tenantBrand: 'feishu' | 'lark'
+    assistantAppId: string
+    assistantAppName: string
+  }) => {
+    const newInstance: ImChannelInstanceConfig = {
+      id: generateId(),
+      type: 'feishu-bot',
+      enabled: true,
+      appId: result.assistantAppId,
+      config: {
+        appId: result.appId,
+        appSecret: result.appSecret,
+        domain: result.tenantBrand,
+        requireMention: true,
+        quoteReply: true,
+      },
+      replyScope: 'all',
+      permissionEnabled: true,
+    }
+    await saveInstances([...instances, newInstance])
+    // Refresh the apps list so the newly-installed assistant shows up in the
+    // digital-human selector inside the new instance card.
+    loadApps().catch(() => {})
+    setExpandedChannels(prev => {
+      const next = new Set(prev)
+      next.add('im-feishu-bot')
       return next
     })
   }, [instances, saveInstances, loadApps])
@@ -1619,6 +1453,8 @@ export function MessageChannelsSection({ config, setConfig }: MessageChannelsSec
   const wecomInstances = (instances as ImChannelInstanceConfig[]).filter(i => i.type === 'wecom-bot')
   const weixinIlinkInstances = (instances as ImChannelInstanceConfig[]).filter(i => i.type === 'weixin-ilink-bot')
 
+  const feishuInstances = (instances as ImChannelInstanceConfig[]).filter(i => i.type === 'feishu-bot')
+
   const wecomConnectedCount = imStatuses.filter(s => s.type === 'wecom-bot' && s.connected).length
   const wecomStandbyCount = imStatuses.filter(s => s.type === 'wecom-bot' && s.state === 'standby').length
   const weixinConnectedCount = imStatuses.filter(s => s.type === 'weixin-ilink-bot' && s.connected).length
@@ -1651,6 +1487,21 @@ export function MessageChannelsSection({ config, setConfig }: MessageChannelsSec
       ? 'bg-green-500'
       : 'bg-amber-500'
 
+  const feishuConnectedCount = imStatuses.filter(s => s.type === 'feishu-bot' && s.connected).length
+
+  const feishuStatusSummary = feishuInstances.length === 0
+    ? t('Not configured')
+    : feishuConnectedCount > 0
+      ? `${feishuConnectedCount} ${t('connected')}`
+      : t('Disconnected')
+
+  const feishuStatusColor = feishuInstances.length === 0
+    ? 'bg-muted-foreground/30'
+    : feishuConnectedCount > 0
+      ? 'bg-green-500'
+      : 'bg-amber-500'
+
+  const isFeishuExpanded = expandedChannels.has('im-feishu-bot')
   const isImExpanded = expandedChannels.has('im-wecom-bot')
   const isWeixinExpanded = expandedChannels.has('im-weixin-ilink-bot')
 
@@ -1668,13 +1519,15 @@ export function MessageChannelsSection({ config, setConfig }: MessageChannelsSec
   }, [instances, saveInstances])
 
   return (
-    <section id="message-channels" className="bg-card rounded-xl border border-border p-4 sm:p-6">
+    <section id="message-channels" className="bg-card rounded-xl border border-border-faint p-4 sm:p-6">
       <div className="mb-4">
         <h2 className="text-lg font-medium">{t('Message Channels')}</h2>
         <p className="text-sm text-muted-foreground mt-1">
           {t('Configure channels for sending and receiving messages with digital humans')}
         </p>
       </div>
+
+      {rebindError && <p role="alert" className="mb-3 text-sm text-destructive">{rebindError}</p>}
 
       <div className="space-y-3">
         {/* ── WeChat Personal Bot via iLink (multi-instance) ─────────── */}
@@ -1702,13 +1555,13 @@ export function MessageChannelsSection({ config, setConfig }: MessageChannelsSec
             <div className="flex items-center gap-2 sm:gap-3 flex-shrink-0">
               <span className="text-xs text-muted-foreground hidden sm:inline">{weixinStatusSummary}</span>
               <div className={`w-2 h-2 rounded-full ${weixinStatusColor}`} />
-              <ChevronDown className={`w-4 h-4 text-muted-foreground transition-transform duration-200 ${isWeixinExpanded ? 'rotate-180' : ''}`} />
+              <ChevronDown className={`w-4 h-4 text-muted-foreground transition-transform duration-200 ${isWeixinExpanded ? '' : '-rotate-90'}`} />
             </div>
           </button>
 
           {/* Instance list */}
           {isWeixinExpanded && (
-            <div className="px-4 pb-4 pt-2 border-t border-border space-y-2.5 animate-in slide-in-from-top-1 duration-150">
+            <div className="px-4 pb-4 pt-3 border-t border-border bg-secondary/70 space-y-2.5 animate-in slide-in-from-top-1 duration-150">
               {weixinIlinkInstances.length === 0 && (
                 <p className="text-sm text-muted-foreground py-2 text-center">
                   {t('No Bot instances configured. Click the button below to add one.')}
@@ -1721,9 +1574,11 @@ export function MessageChannelsSection({ config, setConfig }: MessageChannelsSec
                   instance={inst}
                   status={imStatuses.find(s => s.id === inst.id)}
                   automationApps={automationApps}
+                  teams={teams}
                   isExpanded={expandedInstances.has(inst.id)}
                   onToggle={() => toggleInstanceExpanded(inst.id)}
                   onChange={handleInstanceChange}
+                  onRebind={(appId) => handleRebindInstance(inst.id, appId)}
                   onDelete={() => handleDeleteInstance(inst.id)}
                 />
               ))}
@@ -1741,12 +1596,78 @@ export function MessageChannelsSection({ config, setConfig }: MessageChannelsSec
           )}
         </div>
 
+        {/* ── Feishu Bot (multi-instance) ─────────────────────────────── */}
+        <div className="border border-border rounded-lg overflow-hidden">
+          {/* Provider card header */}
+          <button
+            type="button"
+            onClick={() => toggleExpanded('im-feishu-bot')}
+            className="w-full flex items-center justify-between px-4 py-3 hover:bg-muted/30 transition-colors"
+          >
+            <div className="flex items-center gap-3 min-w-0">
+              <Send className="w-5 h-5 text-muted-foreground flex-shrink-0" />
+              <div className="text-left min-w-0">
+                <div className="flex items-center gap-2 flex-wrap">
+                  <p className="font-medium text-sm">{t('Feishu Bot')}</p>
+                  <span className="text-[10px] px-1.5 py-0.5 rounded-full font-medium bg-primary/10 text-primary">
+                    {t('Bidirectional')}
+                  </span>
+                </div>
+                <p className="text-xs text-muted-foreground mt-0.5 hidden sm:block">
+                  {t('Bidirectional messaging via Feishu/Lark long connection')}
+                </p>
+              </div>
+            </div>
+            <div className="flex items-center gap-2 sm:gap-3 flex-shrink-0">
+              <span className="text-xs text-muted-foreground hidden sm:inline">{feishuStatusSummary}</span>
+              <div className={`w-2 h-2 rounded-full ${feishuStatusColor}`} />
+              <ChevronDown className={`w-4 h-4 text-muted-foreground transition-transform duration-200 ${isFeishuExpanded ? '' : '-rotate-90'}`} />
+            </div>
+          </button>
+
+          {/* Instance list */}
+          {isFeishuExpanded && (
+            <div className="px-4 pb-4 pt-3 border-t border-border bg-secondary/70 space-y-2.5 animate-in slide-in-from-top-1 duration-150">
+              {feishuInstances.length === 0 && (
+                <p className="text-sm text-muted-foreground py-2 text-center">
+                  {t('No Bot instances configured. Click the button below to add one.')}
+                </p>
+              )}
+
+              {feishuInstances.map(inst => (
+                <FeishuInstanceCard
+                  key={inst.id}
+                  instance={inst}
+                  status={imStatuses.find(s => s.id === inst.id)}
+                  automationApps={automationApps}
+                  teams={teams}
+                  isExpanded={expandedInstances.has(inst.id)}
+                  onToggle={() => toggleInstanceExpanded(inst.id)}
+                  onChange={handleInstanceChange}
+                  onRebind={(appId) => handleRebindInstance(inst.id, appId)}
+                  onDelete={() => handleDeleteInstance(inst.id)}
+                  onReconnect={() => handleReconnectInstance(inst.id)}
+                  duplicateWarning={getDuplicateWarning(inst, instances)}
+                  permissionDefaults={permissionDefaults}
+                />
+              ))}
+
+              <AddInstanceActions
+                onScan={() => setFeishuScanDialogOpen(true)}
+                onManual={handleAddFeishuInstance}
+                hint={t('Scanning creates the Feishu app for you — no developer console, no permission setup.')}
+              />
+            </div>
+          )}
+        </div>
+
         {/* ── WeCom Intelligent Bot (multi-instance) ─────────────────── */}
         <div className="border border-border rounded-lg overflow-hidden">
           {/* Provider card header */}
           <button
             type="button"
             onClick={() => toggleExpanded('im-wecom-bot')}
+            aria-expanded={isImExpanded}
             className="w-full flex items-center justify-between px-4 py-3 hover:bg-muted/30 transition-colors"
           >
             <div className="flex items-center gap-3 min-w-0">
@@ -1766,13 +1687,13 @@ export function MessageChannelsSection({ config, setConfig }: MessageChannelsSec
             <div className="flex items-center gap-2 sm:gap-3 flex-shrink-0">
               <span className="text-xs text-muted-foreground hidden sm:inline">{wecomStatusSummary}</span>
               <div className={`w-2 h-2 rounded-full ${wecomStatusColor}`} />
-              <ChevronDown className={`w-4 h-4 text-muted-foreground transition-transform duration-200 ${isImExpanded ? 'rotate-180' : ''}`} />
+              <ChevronDown className={`w-4 h-4 text-muted-foreground transition-transform duration-200 ${isImExpanded ? '' : '-rotate-90'}`} />
             </div>
           </button>
 
           {/* Instance list */}
           {isImExpanded && (
-            <div className="px-4 pb-4 pt-2 border-t border-border space-y-2.5 animate-in slide-in-from-top-1 duration-150">
+            <div className="px-4 pb-4 pt-3 border-t border-border bg-secondary/70 space-y-2.5 animate-in slide-in-from-top-1 duration-150">
               {wecomInstances.length === 0 && (
                 <p className="text-sm text-muted-foreground py-2 text-center">
                   {t('No Bot instances configured. Click the button below to add one.')}
@@ -1785,9 +1706,11 @@ export function MessageChannelsSection({ config, setConfig }: MessageChannelsSec
                   instance={inst}
                   status={imStatuses.find(s => s.id === inst.id)}
                   automationApps={automationApps}
+                  teams={teams}
                   isExpanded={expandedInstances.has(inst.id)}
                   onToggle={() => toggleInstanceExpanded(inst.id)}
                   onChange={handleInstanceChange}
+                  onRebind={(appId) => handleRebindInstance(inst.id, appId)}
                   onDelete={() => handleDeleteInstance(inst.id)}
                   onReconnect={() => handleReconnectInstance(inst.id)}
                   duplicateWarning={getDuplicateWarning(inst, instances)}
@@ -1795,34 +1718,17 @@ export function MessageChannelsSection({ config, setConfig }: MessageChannelsSec
                 />
               ))}
 
-              {/* Add instance — scan QR (primary) + manual setup (secondary) */}
-              <div className="flex flex-col sm:flex-row items-stretch gap-2 pt-1">
-                <button
-                  type="button"
-                  onClick={() => setScanDialogOpen(true)}
-                  className="flex-1 flex items-center justify-center gap-2 px-3 py-2 text-sm bg-primary text-primary-foreground rounded-lg hover:bg-primary/90 transition-colors font-medium"
-                >
-                  <QrCode className="w-4 h-4" />
-                  {t('Scan to add')}
-                </button>
-                <button
-                  type="button"
-                  onClick={handleAddInstance}
-                  className="flex items-center justify-center gap-2 px-3 py-2 text-sm border border-border rounded-lg text-muted-foreground hover:text-foreground hover:bg-muted/30 transition-colors"
-                >
-                  <Plus className="w-4 h-4" />
-                  {t('Manual setup')}
-                </button>
-              </div>
-              <p className="text-[11px] text-muted-foreground text-center pt-0.5">
-                {t('Recommended: scan to add — auto-creates a default digital human and binds it in one step.')}
-              </p>
+              <AddInstanceActions
+                onScan={() => setScanDialogOpen(true)}
+                onManual={handleAddInstance}
+                hint={t('Recommended: scan to add — auto-creates a default digital human and binds it in one step.')}
+              />
             </div>
           )}
         </div>
 
         {/* ── Notification channels (one-way) ───────────────────────── */}
-        {NOTIFY_CHANNEL_DEFS.map((def) => (
+        {notifyChannelDefs.map((def) => (
           <NotifyChannelCard
             key={def.id}
             def={def}
@@ -1843,6 +1749,13 @@ export function MessageChannelsSection({ config, setConfig }: MessageChannelsSec
         open={scanDialogOpen}
         onClose={() => setScanDialogOpen(false)}
         onComplete={handleScanComplete}
+      />
+
+      {/* Feishu scan-to-create dialog (portal-style overlay) */}
+      <FeishuScanAuthDialog
+        open={feishuScanDialogOpen}
+        onClose={() => setFeishuScanDialogOpen(false)}
+        onComplete={handleFeishuScanComplete}
       />
     </section>
   )

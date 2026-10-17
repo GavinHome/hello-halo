@@ -2,9 +2,9 @@
  * API Routes aggregator — REST endpoints for remote access.
  *
  * The route handlers are split by domain into sibling `*.routes.ts` files;
- * shared imports and path/security helpers live in `_shared.ts`. This file
- * only wires the per-domain registrars onto the Express app, mirroring the
- * IPC API surface.
+ * shared imports live in `_shared.ts`, and the checks on which paths a remote
+ * client may touch live in `_path-guard.ts`. This file only wires the
+ * per-domain registrars onto the Express app, mirroring the IPC API surface.
  */
 import type { Express } from 'express'
 import { registerConfigRoutes } from './config.routes'
@@ -17,8 +17,12 @@ import { registerNotifyRoutes } from './notify.routes'
 import { registerImRoutes } from './im.routes'
 import { registerSystemRoutes } from './system.routes'
 import { registerAppsRoutes } from './apps.routes'
+import { registerTeamRoutes } from './team.routes'
 import { registerStoreRoutes } from './store.routes'
 import { registerTlonRoutes } from './tlon.routes'
+import { registerTaskRoutes } from './task.routes'
+import { registerGitRoutes } from './git.routes'
+import { registerCodeReviewRoutes } from './code-review.routes'
 
 /**
  * Register all API routes.
@@ -34,8 +38,12 @@ export function registerApiRoutes(app: Express): void {
   registerImRoutes(app)
   registerSystemRoutes(app)
   registerAppsRoutes(app)
+  registerTeamRoutes(app)
   registerStoreRoutes(app)
   registerTlonRoutes(app)
+  registerTaskRoutes(app)
+  registerGitRoutes(app)
+  registerCodeReviewRoutes(app)
 
   console.log('[HTTP] API routes registered')
 }

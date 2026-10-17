@@ -13,6 +13,7 @@
 
 import { describe, it, expect, beforeEach, vi } from 'vitest'
 import type { Response as ExpressResponse } from 'express'
+import { CLAUDE_CODE_USER_AGENT } from '../../../src/main/openai-compat-router/utils/claude-code-identity'
 
 const runInterceptors = vi.fn()
 vi.mock('../../../src/main/openai-compat-router/interceptors', () => ({
@@ -28,6 +29,7 @@ const convertAnthropicToOpenAIChat = vi.fn()
 const convertAnthropicToOpenAIResponses = vi.fn()
 const convertOpenAIChatToAnthropic = vi.fn()
 const convertOpenAIResponsesToAnthropic = vi.fn()
+const normalizeAnthropicReasoning = vi.fn((...[request]: unknown[]) => ({ request, modified: false }))
 vi.mock('../../../src/main/openai-compat-router/converters', () => ({
   convertAnthropicToOpenAIChat: (...a: unknown[]) => convertAnthropicToOpenAIChat(...a),
   convertAnthropicToOpenAIResponses: (...a: unknown[]) => convertAnthropicToOpenAIResponses(...a),
@@ -39,7 +41,8 @@ const streamOpenAIChatToAnthropic = vi.fn()
 const streamOpenAIResponsesToAnthropic = vi.fn()
 const streamAnthropicPassthrough = vi.fn()
 const pipeAnthropicPassthrough = vi.fn()
-vi.mock('../../../src/main/openai-compat-router/stream', () => ({
+vi.mock('../../../src/main/openai-compat-router/stream', async (importOriginal) => ({
+  collectAnthropicMessage: (await importOriginal<typeof import('../../../src/main/openai-compat-router/stream')>()).collectAnthropicMessage,
   streamOpenAIChatToAnthropic: (...a: unknown[]) => streamOpenAIChatToAnthropic(...a),
   streamOpenAIResponsesToAnthropic: (...a: unknown[]) => streamOpenAIResponsesToAnthropic(...a),
   streamAnthropicPassthrough: (...a: unknown[]) => streamAnthropicPassthrough(...a),
@@ -51,17 +54,17 @@ vi.mock('../../../src/main/services/proxy-fetch', () => ({
   proxyFetch: (...a: unknown[]) => proxyFetch(...a),
 }))
 
-const applyProviderAdapter = vi.fn(() => null)
+const applyProviderAdapter = vi.fn((..._args: unknown[]) => null)
 vi.mock('../../../src/main/openai-compat-router/server/provider-adapters', () => ({
   applyProviderAdapter: (...a: unknown[]) => applyProviderAdapter(...a),
 }))
 
 // Run the queued fn inline so conversion-path assertions stay synchronous.
 // api-type: real-ish behavior driven per test via mockReturnValue.
-const getApiTypeFromUrl = vi.fn(() => 'chat_completions')
-const isValidEndpointUrl = vi.fn(() => true)
-const getEndpointUrlError = vi.fn(() => 'bad url')
-const shouldForceStream = vi.fn(() => false)
+const getApiTypeFromUrl = vi.fn((..._args: unknown[]) => 'chat_completions')
+const isValidEndpointUrl = vi.fn((..._args: unknown[]) => true)
+const getEndpointUrlError = vi.fn((..._args: unknown[]) => 'bad url')
+const shouldForceStream = vi.fn((..._args: unknown[]) => false)
 vi.mock('../../../src/main/openai-compat-router/server/api-type', () => ({
   getApiTypeFromUrl: (...a: unknown[]) => getApiTypeFromUrl(...a),
   isValidEndpointUrl: (...a: unknown[]) => isValidEndpointUrl(...a),
@@ -69,14 +72,15 @@ vi.mock('../../../src/main/openai-compat-router/server/api-type', () => ({
   shouldForceStream: (...a: unknown[]) => shouldForceStream(...a),
 }))
 
-const isNativeAnthropicHost = vi.fn(() => false)
-const normalizeSystemPrompt = vi.fn((request: unknown) => ({ request, modified: false }))
+const isNativeAnthropicHost = vi.fn((..._args: unknown[]) => false)
+const normalizeSystemPrompt = vi.fn((request: unknown, ..._args: unknown[]) => ({ request, modified: false }))
 vi.mock('../../../src/main/openai-compat-router/utils', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../../../src/main/openai-compat-router/utils')>()
   return {
     ...actual,
     isNativeAnthropicHost: (...a: unknown[]) => isNativeAnthropicHost(...a),
-    normalizeSystemPrompt: (...a: unknown[]) => normalizeSystemPrompt(...a),
+    normalizeSystemPrompt: (request: unknown, ...args: unknown[]) => normalizeSystemPrompt(request, ...args),
+    normalizeAnthropicReasoning: (...a: unknown[]) => normalizeAnthropicReasoning(...a),
   }
 })
 
@@ -100,6 +104,8 @@ interface CapturedRes {
   status: (n: number) => CapturedRes
   setHeader: (k: string, v: string) => void
   getHeader: (k: string) => string | undefined
+  hasHeader: (k: string) => boolean
+  removeHeader: (k: string) => void
   json: (b: unknown) => void
   end: (b?: string) => void
   on: (event: string, cb: () => void) => void
@@ -122,6 +128,12 @@ function makeRes(): CapturedRes {
     },
     getHeader(k) {
       return this.headers[k.toLowerCase()]
+    },
+    hasHeader(k) {
+      return k.toLowerCase() in this.headers
+    },
+    removeHeader(k) {
+      delete this.headers[k.toLowerCase()]
     },
     json(b) {
       this.jsonBody = b
@@ -247,6 +259,19 @@ describe('handleMessagesRequest dispatch', () => {
     expect(handleKiroRequest).not.toHaveBeenCalled()
   })
 
+  it('keeps account-scoped capabilities attached to both an initial Responses request and its retry', async () => {
+    const capabilities = { reasoningSummary: false, responsesLite: true, reasoningLevels: ['low'] }
+    convertAnthropicToOpenAIResponses.mockReturnValue({ request: { model: 'shared', input: [] } })
+    proxyFetch.mockResolvedValueOnce(fakeResponse({ ok: false, status: 400, text: 'stream must be set to true' }))
+      .mockResolvedValueOnce(fakeResponse({ ok: true, body: {} }))
+    await handleMessagesRequest(anthReq(), baseConfig({
+      apiType: 'responses', adapterId: 'openai-codex', codexModelCapabilities: capabilities
+    }), makeRes() as unknown as ExpressResponse)
+    expect(applyProviderAdapter).toHaveBeenCalledTimes(2)
+    expect(applyProviderAdapter.mock.calls[0][4]).toMatchObject({ codexModelCapabilities: capabilities })
+    expect(applyProviderAdapter.mock.calls[1][4]).toBe(applyProviderAdapter.mock.calls[0][4])
+  })
+
   it('short-circuits when an interceptor already responded', async () => {
     runInterceptors.mockResolvedValue({ intercepted: true, responded: true })
     const res = makeRes()
@@ -283,6 +308,24 @@ describe('handleMessagesRequest dispatch', () => {
     const body = proxyFetch.mock.calls[0][1].body
     expect(Buffer.isBuffer(body)).toBe(false)
     expect(body).toBe(JSON.stringify(normalized))
+  })
+
+  it('forwards the reasoning-normalized request instead of the raw body', async () => {
+    const req = anthReq()
+    const reasoned = anthReq({ thinking: { type: 'adaptive' }, output_config: { effort: 'max' } })
+    runInterceptors.mockResolvedValue({ intercepted: false, request: req })
+    normalizeAnthropicReasoning.mockReturnValueOnce({ request: reasoned, modified: true })
+    proxyFetch.mockResolvedValue(fakeResponse({ ok: true, text: '{}' }))
+    const config = baseConfig({
+      apiType: 'anthropic_passthrough',
+      url: 'https://third-party/v1/messages',
+      pickedReasoningEffort: 'max',
+    })
+
+    await handleMessagesRequest(req, config, makeRes() as unknown as ExpressResponse, { rawBody: Buffer.from('RAW-BYTES') })
+
+    expect(normalizeAnthropicReasoning).toHaveBeenCalledWith(req, config)
+    expect(proxyFetch.mock.calls[0][1].body).toBe(JSON.stringify(reasoned))
   })
 })
 
@@ -379,14 +422,38 @@ describe('anthropic passthrough header merge', () => {
     expect(headers['anthropic-beta']).toBe('context-management, shared, oauth')
   })
 
-  it('collapses content-type to a single value regardless of casing', async () => {
+  it('collapses content-type casing and gives provider headers precedence', async () => {
     const headers = await runPassthrough({
       sdkHeaders: { 'content-type': 'application/json' },
-      customHeaders: { 'Content-Type': 'application/json' },
+      customHeaders: { 'Content-Type': 'application/json; charset=utf-8' },
     })
     const ctKeys = Object.keys(headers).filter((k) => k.toLowerCase() === 'content-type')
     expect(ctKeys).toHaveLength(1)
-    expect(headers[ctKeys[0]]).toBe('application/json')
+    expect(headers[ctKeys[0]]).toBe('application/json; charset=utf-8')
+  })
+
+  it('overrides an older Claude Code user-agent with the compatibility identity', async () => {
+    const headers = await runPassthrough({
+      sdkHeaders: { 'User-Agent': 'claude-cli/2.1.89 (external, cli)' },
+    })
+    const userAgentKeys = Object.keys(headers).filter((k) => k.toLowerCase() === 'user-agent')
+    expect(userAgentKeys).toHaveLength(1)
+    expect(headers[userAgentKeys[0]]).toBe(CLAUDE_CODE_USER_AGENT)
+  })
+
+  it('gives a provider-owned user-agent precedence over the SDK identity', async () => {
+    const headers = await runPassthrough({
+      sdkHeaders: { 'user-agent': 'claude-cli/2.1.89 (external, cli)' },
+      customHeaders: { 'User-Agent': 'GitHubCopilotChat/0.39.1' },
+    })
+    const userAgentKeys = Object.keys(headers).filter((k) => k.toLowerCase() === 'user-agent')
+    expect(userAgentKeys).toHaveLength(1)
+    expect(headers[userAgentKeys[0]]).toBe('GitHubCopilotChat/0.39.1')
+  })
+
+  it('injects the Claude Code compatibility identity when user-agent is absent', async () => {
+    const headers = await runPassthrough({})
+    expect(headers['user-agent']).toBe(CLAUDE_CODE_USER_AGENT)
   })
 
   it('skips x-api-key when the provider supplies an Authorization header', async () => {
@@ -555,5 +622,122 @@ describe('upstream error mapping', () => {
       type: 'invalid_request_error',
       message: 'bad input',
     })
+  })
+})
+
+describe('retry headers on error replies', () => {
+  async function relay(upstream: { status: number; body: unknown; headers?: Record<string, string> }, apiType = 'chat_completions') {
+    const req = anthReq()
+    runInterceptors.mockResolvedValue({ intercepted: false, request: req })
+    proxyFetch.mockResolvedValue(
+      fakeResponse({
+        ok: false,
+        status: upstream.status,
+        headers: upstream.headers,
+        text: typeof upstream.body === 'string' ? upstream.body : JSON.stringify(upstream.body),
+      }),
+    )
+    const res = makeRes()
+    await handleMessagesRequest(
+      req,
+      baseConfig(apiType === 'anthropic_passthrough' ? { apiType, url: 'https://third-party/v1/messages' } : { apiType }),
+      res as unknown as ExpressResponse,
+    )
+    return res
+  }
+
+  it('keeps the upstream status for a vendor-specific error type instead of collapsing it to 500', async () => {
+    const res = await relay({
+      status: 429,
+      body: { type: 'error', error: { type: 'GoUsageLimitError', message: 'Go usage limit exceeded' } },
+    })
+
+    expect(res.statusCode).toBe(429)
+    expect((res.jsonBody as { error: { type: string } }).error.type).toBe('GoUsageLimitError')
+  })
+
+  it('tells the client not to retry a spent quota, with no invented wait', async () => {
+    const res = await relay({
+      status: 429,
+      body: { type: 'error', error: { type: 'GoUsageLimitError', message: 'Go usage limit exceeded' } },
+    })
+
+    expect(res.headers['x-should-retry']).toBe('false')
+    expect(res.headers['retry-after']).toBeUndefined()
+  })
+
+  it('leaves an ordinary rate limit retryable on the client\'s own backoff', async () => {
+    const res = await relay({ status: 429, body: { error: { type: 'rate_limit_error', message: 'Too many requests' } } })
+
+    expect(res.statusCode).toBe(429)
+    expect(res.headers['x-should-retry']).toBeUndefined()
+    expect(res.headers['retry-after']).toBeUndefined()
+  })
+
+  it.each(['chat_completions', 'anthropic_passthrough'])(
+    '%s: passes on none of the upstream\'s retry hints, even a wait of hours',
+    async (apiType) => {
+      const res = await relay({
+        status: 429,
+        body: { type: 'error', error: { type: 'rate_limit_error', message: "This request would exceed your account's rate limit. Please try again later." } },
+        headers: { 'retry-after': '15007', 'retry-after-ms': '15007000', 'x-should-retry': 'true' },
+      }, apiType)
+
+      expect(res.statusCode).toBe(429)
+      expect(res.headers['retry-after']).toBeUndefined()
+      expect(res.headers['retry-after-ms']).toBeUndefined()
+      expect(res.headers['x-should-retry']).toBeUndefined()
+    },
+  )
+
+  it.each(['chat_completions', 'anthropic_passthrough'])(
+    '%s: ignores an upstream refusal to retry an ordinary rate limit',
+    async (apiType) => {
+      const res = await relay({
+        status: 429,
+        body: { type: 'error', error: { type: 'rate_limit_error', message: 'slow down' } },
+        headers: { 'retry-after': '2', 'x-should-retry': 'false' },
+      }, apiType)
+
+      expect(res.headers['x-should-retry']).toBeUndefined()
+      expect(res.headers['retry-after']).toBeUndefined()
+    },
+  )
+
+  it.each(['chat_completions', 'anthropic_passthrough'])(
+    '%s: refuses to retry quota wording even when the upstream asks for a short wait',
+    async (apiType) => {
+      const res = await relay({
+        status: 429,
+        body: { type: 'error', error: { type: 'rate_limit_error', message: 'Quota exceeded: requests per minute. Please retry in 2 seconds.' } },
+        headers: { 'retry-after': '2', 'x-should-retry': 'true' },
+      }, apiType)
+
+      expect(res.statusCode).toBe(429)
+      expect(res.headers['x-should-retry']).toBe('false')
+      expect(res.headers['retry-after']).toBeUndefined()
+    },
+  )
+
+  it.each(['chat_completions', 'anthropic_passthrough'])(
+    '%s: adds no wait of its own to a server-side failure',
+    async (apiType) => {
+      const res = await relay({ status: 503, body: 'Service Unavailable' }, apiType)
+
+      expect(res.headers['retry-after']).toBeUndefined()
+      expect(res.headers['x-should-retry']).toBeUndefined()
+    },
+  )
+
+  it('passthrough: forwards the rest of the error as the upstream sent it', async () => {
+    const body = { type: 'error', error: { type: 'rate_limit_error', message: 'slow down' } }
+    const res = await relay(
+      { status: 429, body, headers: { 'retry-after': '30', 'request-id': 'req_upstream' } },
+      'anthropic_passthrough',
+    )
+
+    expect(res.statusCode).toBe(429)
+    expect(res.headers['request-id']).toBe('req_upstream')
+    expect(res.ended).toBe(JSON.stringify(body))
   })
 })

@@ -6,36 +6,21 @@
  * events, driving the activity chip and viewer chrome. Live pty output
  * (`terminal:data`) is consumed directly by the TerminalViewer's xterm
  * instance, not buffered here.
+ *
+ * Removal is an event, never a guess: entries leave this map only on a
+ * `removed` lifecycle event. The main process's registry is the bound, and it
+ * is not reproducible here — see `TerminalContext.dropSession`.
  */
 
 import { create } from 'zustand'
 import { api } from '../api'
 import { canvasLifecycle } from '../services/canvas-lifecycle'
+import { useNotificationStore } from './notification.store'
+import i18n from '../i18n'
+import { TERMINAL_NOT_FOUND } from '../../shared/types/terminal'
+import type { TerminalInfo, TerminalLifecycleEvent } from '../../shared/types/terminal'
 
-export interface TerminalInfo {
-  id: string
-  title: string
-  shell: string
-  cwd: string
-  cols: number
-  rows: number
-  owner: 'ai' | 'user'
-  /** True once the AI has operated this session via any terminal_* tool. */
-  aiTouched: boolean
-  state: 'running' | 'exited'
-  exitCode: number | null
-  lastActivityAt: number
-  createdAt: number
-  /** Owning space id — drives per-space scoping of the live-sessions tray. */
-  spaceId?: string
-}
-
-interface TerminalLifecycleEvent {
-  sessionId: string
-  type: 'created' | 'exited' | 'title' | 'ai-activity' | 'touched'
-  info?: TerminalInfo
-  aiWriting?: boolean
-}
+export type { TerminalInfo }
 
 interface TerminalState {
   /** sessionId -> info */
@@ -45,11 +30,18 @@ interface TerminalState {
 
   refresh: () => Promise<void>
   applyLifecycle: (e: TerminalLifecycleEvent) => void
-  openInCanvas: (sessionId: string, title?: string) => void
+  /** Resolves once the tab exists, so callers can report a reveal that failed. */
+  openInCanvas: (sessionId: string, title?: string) => Promise<string>
   /** User-initiated creation. The 'created' lifecycle event reconciles state (SSOT). */
   createSession: (spaceId: string) => Promise<TerminalInfo | null>
-  /** User-initiated stop. The 'exited' lifecycle event reconciles state (SSOT). */
-  killSession: (sessionId: string) => Promise<void>
+  /**
+   * Stop a terminal session. The 'exited' lifecycle event reconciles state (SSOT).
+   *
+   * Teardown paths (space switch, closeAll) pass `silent` — the session is
+   * already going away, so an error toast there interrupts a navigation the
+   * user never connected to this session.
+   */
+  killSession: (sessionId: string, opts?: { silent?: boolean }) => Promise<void>
 
   /** Running sessions, most-recently-active first (for chip + lists). */
   runningSessions: () => TerminalInfo[]
@@ -102,14 +94,18 @@ export const useTerminalStore = create<TerminalState>((set, get) => ({
         // close policy and tray membership see the new aiTouched flag.
         if (e.info) sessions.set(e.sessionId, e.info)
         break
+      case 'removed':
+        // The main process forgot the session. Without this the map would keep
+        // an entry for every terminal the app has ever run.
+        sessions.delete(e.sessionId)
+        aiWriting.delete(e.sessionId)
+        break
     }
 
     set({ sessions, aiWriting })
   },
 
-  openInCanvas: (sessionId, title) => {
-    void canvasLifecycle.openTerminal(sessionId, title)
-  },
+  openInCanvas: (sessionId, title) => canvasLifecycle.openTerminal(sessionId, title),
 
   createSession: async (spaceId) => {
     try {
@@ -123,11 +119,27 @@ export const useTerminalStore = create<TerminalState>((set, get) => ({
     }
   },
 
-  killSession: async (sessionId) => {
+  killSession: async (sessionId, opts) => {
+    const report = (detail?: string) => {
+      if (opts?.silent) return
+      useNotificationStore.getState().show({
+        id: 'terminal-kill-error',
+        title: i18n.t('Failed to stop terminal session'),
+        body: detail,
+        variant: 'error',
+        duration: 6000,
+      })
+    }
     try {
-      await api.killTerminal(sessionId)
+      const res = await api.killTerminal(sessionId)
+      if (res.success) return
+      // Already gone is the outcome the user asked for.
+      if (res.code === TERMINAL_NOT_FOUND) return
+      console.error('[Terminal Store] killSession failed:', res.error)
+      report(res.error || undefined)
     } catch (err) {
-      console.error('[Terminal Store] killSession failed:', err)
+      console.error('[Terminal Store] killSession error:', err)
+      report(err instanceof Error ? err.message : undefined)
     }
   },
 

@@ -15,8 +15,11 @@ import { useEffect, useState } from 'react'
 import { TerminalSquare, Globe, ArrowUpRight, X, ChevronDown, Zap } from 'lucide-react'
 import { Popover, PopoverTrigger, PopoverContent } from '../ui/Popover'
 import { ConfirmDialog } from '../ui/ConfirmDialog'
-import { useLiveSessions, type LiveSession } from '../../hooks/useLiveSessions'
+import { useLiveSessions, type LiveSession, type StopOutcome } from '../../hooks/useLiveSessions'
+import { useAppStore } from '../../stores/app.store'
+import { useNotificationStore } from '../../stores/notification.store'
 import { useTranslation } from '../../i18n'
+import { trackToolOpen } from '../../services/tool-session-telemetry'
 
 /** Compact "3m" style age from a ms epoch. */
 function ago(ms: number): string {
@@ -34,20 +37,25 @@ function KindIcon({ kind, size = 13, className }: { kind: LiveSession['kind']; s
 
 interface SessionRowProps {
   session: LiveSession
+  /** False when the current view is not Space — opening navigates there first. */
+  isOnSpacePage: boolean
   onOpen: () => void
   onStop: () => void
 }
 
 /** One session line inside the popover list. */
-function SessionRow({ session, onOpen, onStop }: SessionRowProps) {
+function SessionRow({ session, isOnSpacePage, onOpen, onStop }: SessionRowProps) {
   const { t } = useTranslation()
+  // The list header carries the "opens in Space" hint once, so a row only needs
+  // to name the destination in its tooltip.
+  const openLabel = isOnSpacePage ? t('Open') : t('Open in Space')
   return (
     <div className="flex items-center gap-2 px-2 py-1.5 rounded-md hover:bg-muted/60 transition-colors">
       <KindIcon
         kind={session.kind}
         className={`shrink-0 ${session.busy ? 'text-primary animate-pulse' : 'text-muted-foreground'}`}
       />
-      <button onClick={onOpen} className="flex-1 min-w-0 flex items-center gap-2 text-left" title={t('Open')}>
+      <button onClick={onOpen} className="flex-1 min-w-0 flex items-center gap-2 text-left" title={openLabel}>
         <span className={`flex-1 min-w-0 truncate text-xs text-foreground/80 ${session.kind === 'terminal' ? 'font-mono' : ''}`}>
           {session.title}
         </span>
@@ -57,18 +65,20 @@ function SessionRow({ session, onOpen, onStop }: SessionRowProps) {
       </button>
       <button
         onClick={onOpen}
-        title={t('Open')}
+        title={openLabel}
         className="shrink-0 p-1 rounded text-muted-foreground hover:text-foreground hover:bg-background/60 transition-colors"
       >
         <ArrowUpRight size={13} />
       </button>
-      <button
-        onClick={onStop}
-        title={t('Stop')}
-        className="shrink-0 p-1 rounded text-muted-foreground hover:text-destructive hover:bg-destructive/10 transition-colors"
-      >
-        <X size={13} />
-      </button>
+      {session.stoppable && (
+        <button
+          onClick={onStop}
+          title={t('Stop')}
+          className="shrink-0 p-1 rounded text-muted-foreground hover:text-destructive hover:bg-destructive/10 transition-colors"
+        >
+          <X size={13} />
+        </button>
+      )}
     </div>
   )
 }
@@ -76,6 +86,7 @@ function SessionRow({ session, onOpen, onStop }: SessionRowProps) {
 export function LiveSessionsHeader() {
   const { t } = useTranslation()
   const { sessions, busy, open, stop } = useLiveSessions()
+  const isOnSpacePage = useAppStore(s => s.view) === 'space'
   const [listOpen, setListOpen] = useState(false)
   const [pendingStop, setPendingStop] = useState<LiveSession | null>(null)
 
@@ -94,8 +105,40 @@ export function LiveSessionsHeader() {
   const confirmStop = async () => {
     const target = pendingStop
     setPendingStop(null)
-    if (target) await stop(target)
+    if (!target) return
+    const outcome = await stop(target).catch((err): StopOutcome => {
+      console.error('[LiveSessionsHeader] Failed to stop session:', err)
+      return { stopped: false, reason: 'failed' }
+    })
+    if (!outcome.stopped) {
+      // Only a failed stop is worth retrying; the other refusals are decisions.
+      const body =
+        outcome.reason === 'in-use' ? t('Another conversation is using this page right now, so it was left open.')
+        : outcome.reason === 'not-owned' ? t('This page was not opened by the AI, so it was left open.')
+        : outcome.reason === 'gone' ? t('This page is already closed.')
+        : t('The session may still be running. Try again.')
+      useNotificationStore.getState().show({
+        id: 'live-session-stop-error',
+        title: t('Could not stop session'),
+        body,
+        variant: 'error',
+        duration: 6000,
+      })
+    }
   }
+
+  // One message for every way revealing can fail — no space to land in, or the
+  // view not mounting after we navigated. It never advises an action the user
+  // may be unable to take, since the same copy has to hold on and off Space.
+  // The fixed id replaces a prior failure rather than stacking another toast.
+  const showOpenError = () =>
+    useNotificationStore.getState().show({
+      id: 'live-session-open-error',
+      title: t('Could not open session'),
+      body: t('The session is still running, but its view could not be opened. Try again.'),
+      variant: 'error',
+      duration: 6000,
+    })
 
   return (
     <>
@@ -131,15 +174,30 @@ export function LiveSessionsHeader() {
           >
             <div className="px-2 py-1 text-[11px] font-medium text-muted-foreground">
               {t('Active sessions')}
+              {!isOnSpacePage && (
+                <span className="ml-1.5 font-normal text-primary/80">
+                  {t('Opens in Space')}
+                </span>
+              )}
             </div>
             <div className="max-h-64 overflow-y-auto">
               {sessions.map(session => (
                 <SessionRow
                   key={session.id}
                   session={session}
+                  isOnSpacePage={isOnSpacePage}
                   onOpen={() => {
-                    open(session)
-                    setListOpen(false)
+                    // Dismiss only once the surface is actually open; a failure
+                    // keeps the list up so the row is still there to retry.
+                    const opening = open(session)
+                    trackToolOpen(session.kind, 'live_session', opening)
+                    opening.then(tabId => {
+                      if (tabId) setListOpen(false)
+                      else showOpenError()
+                    }).catch(err => {
+                      console.error('[LiveSessionsHeader] Failed to open session:', err)
+                      showOpenError()
+                    })
                   }}
                   onStop={() => setPendingStop(session)}
                 />
@@ -152,7 +210,9 @@ export function LiveSessionsHeader() {
       {pendingStop && (
         <ConfirmDialog
           title={t('Stop this session?')}
-          message={t('The running process will be terminated.')}
+          message={pendingStop.kind === 'browser'
+            ? t('The page will be closed.')
+            : t('The running process will be terminated.')}
           confirmLabel={t('Stop')}
           cancelLabel={t('Cancel')}
           variant="danger"

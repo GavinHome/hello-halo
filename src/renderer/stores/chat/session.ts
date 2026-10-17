@@ -3,12 +3,49 @@
  */
 import type { ChatSlice } from './internal'
 import { PULSE_READ_GRACE_PERIOD_MS, api, createEmptySessionState } from './internal'
-import type { Thought } from './internal'
+import type { Thought, PulseReadInfo } from './internal'
+import { conversationKind, backendFor } from './backend'
+import { shedBackgroundDetail } from './backend/cache'
+import { selectViewedConversationId } from './active'
+import { readTransition } from './task-read'
 
 // Store-level timer for pulseReadAt cleanup (independent of UI components)
 let _pulseCleanupTimer: ReturnType<typeof setTimeout> | null = null
 
-export const createSessionSlice: ChatSlice<'answerQuestion' | 'loadMessageThoughts' | 'cleanupPulseReadAt' | 'resetSession' | 'setSessionError' | 'markSessionStopped' | 'reset' | 'resetSpace'> = (set, get) => ({
+type TaskStateRow = {
+  conversationId: string
+  spaceId: string
+  title: string
+  state: 'unseen' | 'read'
+  originalStatus: 'completed-unseen' | 'error' | null
+  readAt: number | null
+  kept: boolean
+}
+
+/** Splits persisted rows into the two Maps chat.store tracks locally. */
+function splitTaskStateRows(rows: TaskStateRow[]): {
+  unseenCompletions: Map<string, { spaceId: string; title: string }>
+  pulseReadAt: Map<string, PulseReadInfo>
+} {
+  const unseenCompletions = new Map<string, { spaceId: string; title: string }>()
+  const pulseReadAt = new Map<string, PulseReadInfo>()
+  for (const row of rows) {
+    if (row.state === 'unseen') {
+      unseenCompletions.set(row.conversationId, { spaceId: row.spaceId, title: row.title })
+    } else if (row.readAt !== null && row.originalStatus !== null) {
+      pulseReadAt.set(row.conversationId, {
+        readAt: row.readAt,
+        originalStatus: row.originalStatus,
+        spaceId: row.spaceId,
+        title: row.title,
+        kept: row.kept,
+      })
+    }
+  }
+  return { unseenCompletions, pulseReadAt }
+}
+
+export const createSessionSlice: ChatSlice<'answerQuestion' | 'loadMessageThoughts' | 'cleanupPulseReadAt' | 'keepPulseItem' | 'removePulseItem' | 'setVisibleConversation' | 'readActiveCompletion' | 'loadPersistedTaskState' | 'syncPersistedTaskState' | 'resetSession' | 'setSessionError' | 'markSessionStopped' | 'reset' | 'resetSpace' | 'forgetConversation' | 'shedBackgroundDetail'> = (set, get) => ({
   answerQuestion: async (conversationId: string, answers: Record<string, string>) => {
     const session = get().sessions.get(conversationId)
     if (!session?.pendingQuestion) {
@@ -42,74 +79,158 @@ export const createSessionSlice: ChatSlice<'answerQuestion' | 'loadMessageThough
     }
   },
 
-  // Load thoughts for a specific message (lazy loading from separated storage)
-  // Returns the thoughts array and updates the conversation cache so subsequent reads are instant
-  loadMessageThoughts: async (spaceId: string, conversationId: string, messageId: string): Promise<Thought[]> => {
-    // Check if already loaded in cache
-    const cached = get().conversationCache.get(conversationId)
-    if (cached) {
-      const msg = cached.messages.find(m => m.id === messageId)
-      if (msg && Array.isArray(msg.thoughts)) {
-        console.log(`[ChatStore] Thoughts cache hit for ${conversationId}/${messageId}: ${msg.thoughts.length} thoughts`)
-        return msg.thoughts  // Already loaded
-      }
-    }
+  // Load thoughts for a specific message (lazy loading from separated storage).
+  // Returns them and keeps them in the conversation cache so later reads are instant.
+  loadMessageThoughts: (spaceId: string, conversationId: string, messageId: string): Promise<Thought[]> =>
+    backendFor(conversationId).loadThoughts({ set, get }, { spaceId, conversationId }, messageId),
 
-    console.log(`[ChatStore] Loading thoughts for ${conversationId}/${messageId}...`)
-    try {
-      const response = await api.getMessageThoughts(spaceId, conversationId, messageId)
-      if (response.success && response.data) {
-        const thoughts = response.data as Thought[]
-        console.log(`[ChatStore] Loaded ${thoughts.length} thoughts for ${conversationId}/${messageId}, updating cache`)
-
-        // Update the conversation cache with loaded thoughts
-        set((state) => {
-          const newCache = new Map(state.conversationCache)
-          const conversation = newCache.get(conversationId)
-          if (conversation) {
-            const updatedMessages = conversation.messages.map(m =>
-              m.id === messageId ? { ...m, thoughts } : m
-            )
-            newCache.set(conversationId, { ...conversation, messages: updatedMessages })
-          }
-          return { conversationCache: newCache }
-        })
-
-        return thoughts
-      }
-    } catch (error) {
-      console.error(`[ChatStore] Failed to load thoughts for ${conversationId}/${messageId}:`, error)
-    }
-
-    return []
-  },
-
-  // Remove expired pulse readAt entries and schedule next cleanup
+  // Remove expired pulse readAt entries and schedule next cleanup. `kept`
+  // entries (user clicked "Keep") never expire, so they're excluded from
+  // both deletion and the "when's the next check due" calculation.
   cleanupPulseReadAt: () => {
     if (_pulseCleanupTimer) { clearTimeout(_pulseCleanupTimer); _pulseCleanupTimer = null }
     const now = Date.now()
     const state = get()
     const newPulseReadAt = new Map(state.pulseReadAt)
     let changed = false
+    let earliest = Infinity
     for (const [id, info] of newPulseReadAt) {
+      if (info.kept) continue
       if (now - info.readAt >= PULSE_READ_GRACE_PERIOD_MS) {
         newPulseReadAt.delete(id)
         changed = true
+      } else {
+        earliest = Math.min(earliest, info.readAt)
       }
     }
     if (changed) {
       set({ pulseReadAt: newPulseReadAt })
     }
-    // Schedule next cleanup if entries remain
-    if (newPulseReadAt.size > 0) {
-      let earliest = Infinity
-      for (const [, info] of newPulseReadAt) {
-        earliest = Math.min(earliest, info.readAt)
-      }
+    // Schedule next cleanup if any non-kept entries remain
+    if (earliest !== Infinity) {
       const delay = Math.max(0, earliest + PULSE_READ_GRACE_PERIOD_MS - now)
       _pulseCleanupTimer = setTimeout(() => get().cleanupPulseReadAt(), delay)
     }
   },
+
+  // "Keep" — cancel the auto-removal timer, the item stays in the pulse
+  // list until explicitly removed or re-opened. Does not touch the
+  // underlying conversation/task, only this UI-side bookkeeping entry.
+  keepPulseItem: (conversationId: string) => {
+    set((state) => {
+      const info = state.pulseReadAt.get(conversationId)
+      if (!info || info.kept) return state
+      const newPulseReadAt = new Map(state.pulseReadAt)
+      newPulseReadAt.set(conversationId, { ...info, kept: true })
+      return { pulseReadAt: newPulseReadAt }
+    })
+    api.taskSetKept(conversationId, true).catch(err =>
+      console.error('[ChatStore] taskSetKept error:', err))
+  },
+
+  // "Remove" — hide immediately. Only clears this UI-side grace-period
+  // entry; the conversation and its history are untouched.
+  removePulseItem: (conversationId: string) => {
+    set((state) => {
+      if (!state.pulseReadAt.has(conversationId)) return state
+      const newPulseReadAt = new Map(state.pulseReadAt)
+      newPulseReadAt.delete(conversationId)
+      return { pulseReadAt: newPulseReadAt }
+    })
+    api.taskRemoveState(conversationId).catch(err =>
+      console.error('[ChatStore] taskRemoveState error:', err))
+  },
+
+  setVisibleConversation: (conversationId) => {
+    if (get().visibleConversationId !== conversationId) set({ visibleConversationId: conversationId })
+    if (conversationId) get().readActiveCompletion()
+  },
+
+  // Only an unseen completion: an error stays until the user opens it again.
+  readActiveCompletion: () => {
+    let persistRead: (() => void) | undefined
+    set((state) => {
+      const conversationId = selectViewedConversationId(state)
+      if (!conversationId || !state.unseenCompletions.has(conversationId)) return state
+      const session = state.sessions.get(conversationId)
+      if (session?.error && session.errorType !== 'interrupted' && !session.errorSeen) return state
+      const read = readTransition(state, conversationId, { spaceId: state.currentSpaceId!, title: '' })
+      persistRead = read?.persist
+      return read ? read.patch : state
+    })
+    if (!persistRead) return
+    persistRead()
+    get().cleanupPulseReadAt()
+  },
+
+  // Cold-start hydration from the persisted task-state table (platform/task-state),
+  // so completed-but-unseen conversations and in-progress grace periods survive
+  // an app restart instead of only living in this renderer-memory Map.
+  //
+  // Merge-only: never overwrites an entry already present locally, since by
+  // the time this resolves the user may already have generated fresher local
+  // state (e.g. selected a conversation) that must not be clobbered.
+  loadPersistedTaskState: async () => {
+    for (let attempt = 0; attempt < 5; attempt++) {
+      const before = get()
+      const res = await api.taskListState()
+      if (res.success) {
+        const current = get()
+        if (current.unseenCompletions !== before.unseenCompletions || current.pulseReadAt !== before.pulseReadAt) {
+          await get().syncPersistedTaskState()
+          return
+        }
+        const { unseenCompletions: fetched, pulseReadAt: fetchedRead } = splitTaskStateRows((res.data ?? []) as TaskStateRow[])
+
+        set((state) => {
+          const unseenCompletions = new Map(state.unseenCompletions)
+          const pulseReadAt = new Map(state.pulseReadAt)
+          for (const [id, info] of fetched) {
+            if (!unseenCompletions.has(id) && !pulseReadAt.has(id)) unseenCompletions.set(id, info)
+          }
+          for (const [id, info] of fetchedRead) {
+            if (!unseenCompletions.has(id) && !pulseReadAt.has(id)) pulseReadAt.set(id, info)
+          }
+          return { unseenCompletions, pulseReadAt }
+        })
+        // Purges any rows that already expired while the app was closed, and
+        // (re)schedules the timer for the rest — same self-healing pass the
+        // 60s in-session timer already runs on every tick.
+        get().readActiveCompletion()
+        get().cleanupPulseReadAt()
+        return
+      }
+      await new Promise(resolve => setTimeout(resolve, 500 * (attempt + 1)))
+    }
+    console.error('[ChatStore] loadPersistedTaskState: giving up after 5 attempts')
+  },
+
+  // Full resync triggered by a `task:state_changed` push — see internal.ts
+  // for why this replaces rather than merges.
+  syncPersistedTaskState: (() => {
+    let requestId = 0
+    return async () => {
+      const id = ++requestId
+      // Only the latest request may apply. Local task changes invalidate its
+      // snapshot too; re-read instead of persisting an obsolete unread row.
+      while (id === requestId) {
+        const before = get()
+        const res = await api.taskListState()
+        if (id !== requestId) return
+        if (!res.success) {
+          console.warn('[ChatStore] Cannot sync task state; local state retained:', res.error)
+          return
+        }
+        const current = get()
+        if (current.unseenCompletions !== before.unseenCompletions || current.pulseReadAt !== before.pulseReadAt) continue
+        const { unseenCompletions, pulseReadAt } = splitTaskStateRows((res.data ?? []) as TaskStateRow[])
+        set({ unseenCompletions, pulseReadAt })
+        get().readActiveCompletion()
+        get().cleanupPulseReadAt()
+        return
+      }
+    }
+  })(),
 
   // Reset a specific session to empty state (e.g., clear app chat, before new send)
   resetSession: (conversationId: string) => {
@@ -130,6 +251,7 @@ export const createSessionSlice: ChatSlice<'answerQuestion' | 'loadMessageThough
         error,
         isGenerating: false,
         isThinking: false,
+        apiRetry: null,
       })
       return { sessions: newSessions }
     })
@@ -149,6 +271,7 @@ export const createSessionSlice: ChatSlice<'answerQuestion' | 'loadMessageThough
         ...session,
         isGenerating: false,
         isThinking: false,
+        apiRetry: null,
         pendingQuestion: session.pendingQuestion?.status === 'active'
           ? { ...session.pendingQuestion, status: 'cancelled' as const }
           : session.pendingQuestion,
@@ -167,7 +290,9 @@ export const createSessionSlice: ChatSlice<'answerQuestion' | 'loadMessageThough
       sessionInitInfo: new Map(),
       unseenCompletions: new Map(),
       pulseReadAt: new Map(),
+      conversationLoadErrors: new Map(),
       currentSpaceId: null,
+      visibleConversationId: null,
       pendingPulseNavigation: null,
       pendingComposerInput: null,
       artifacts: [],
@@ -187,6 +312,11 @@ export const createSessionSlice: ChatSlice<'answerQuestion' | 'loadMessageThough
       const orphanIds = new Set(
         spaceState?.conversations.map(c => c.id) ?? []
       )
+      // Digital-human conversations are not in the space's index; the cache
+      // knows which space they were read for.
+      for (const [id, conversation] of state.conversationCache) {
+        if (conversation.spaceId === spaceId && conversationKind(id) === 'digital-human') orphanIds.add(id)
+      }
 
       const newSpaceStates = new Map(state.spaceStates)
       newSpaceStates.delete(spaceId)
@@ -197,11 +327,18 @@ export const createSessionSlice: ChatSlice<'answerQuestion' | 'loadMessageThough
       const newUnseen = new Map(state.unseenCompletions)
       const newPulseReadAt = new Map(state.pulseReadAt)
 
+      const newSessionInitInfo = new Map(state.sessionInitInfo)
+      const newDrafts = new Map(state.composerDrafts)
+      const newLoadErrors = new Map(state.conversationLoadErrors)
+
       for (const id of orphanIds) {
         newCache.delete(id)
         newSessions.delete(id)
         newUnseen.delete(id)
         newPulseReadAt.delete(id)
+        newSessionInitInfo.delete(id)
+        newDrafts.delete(id)
+        newLoadErrors.delete(id)
       }
 
       // Also clean unseenCompletions/pulseReadAt that reference this spaceId
@@ -219,6 +356,45 @@ export const createSessionSlice: ChatSlice<'answerQuestion' | 'loadMessageThough
         sessions: newSessions,
         unseenCompletions: newUnseen,
         pulseReadAt: newPulseReadAt,
+        sessionInitInfo: newSessionInitInfo,
+        composerDrafts: newDrafts,
+        conversationLoadErrors: newLoadErrors,
+      }
+    })
+  },
+
+  // Drop every trace of one conversation, wherever it lives: cache, live turn,
+  // slash-command info, unsent draft, pulse entries, and the board selection if
+  // it points at it.
+  shedBackgroundDetail: () => {
+    set((state) => shedBackgroundDetail(state))
+  },
+
+  forgetConversation: (conversationId: string) => {
+    set((state) => {
+      const drop = <V,>(map: Map<string, V>): Map<string, V> => {
+        if (!map.has(conversationId)) return map
+        const next = new Map(map)
+        next.delete(conversationId)
+        return next
+      }
+
+      let spaceStates = state.spaceStates
+      for (const [spaceId, spaceState] of state.spaceStates) {
+        if (spaceState.selectedAppChat?.conversationId !== conversationId) continue
+        if (spaceStates === state.spaceStates) spaceStates = new Map(state.spaceStates)
+        spaceStates.set(spaceId, { ...spaceState, selectedAppChat: null })
+      }
+
+      return {
+        spaceStates,
+        conversationCache: drop(state.conversationCache),
+        sessions: drop(state.sessions),
+        sessionInitInfo: drop(state.sessionInitInfo),
+        unseenCompletions: drop(state.unseenCompletions),
+        pulseReadAt: drop(state.pulseReadAt),
+        composerDrafts: drop(state.composerDrafts),
+        conversationLoadErrors: drop(state.conversationLoadErrors),
       }
     })
   }

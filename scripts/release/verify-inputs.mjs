@@ -18,10 +18,13 @@
 import fs from 'node:fs'
 import path from 'node:path'
 import { execFileSync } from 'node:child_process'
+import { createRequire } from 'node:module'
 import {
   c, log, loadManifest, gitState, sha256File, getByPath, isEmptyValue,
   readRecord, writeRecord, diffAgainstBaseline, printDiffReport, confirmSensitive,
 } from './lib.mjs'
+
+const { planStagedArtifacts } = createRequire(import.meta.url)('./staged-artifacts.cjs')
 
 function parseArgs(argv) {
   const args = { mode: 'dev', platforms: 'all', confirmSensitive: false }
@@ -49,6 +52,89 @@ function parseArgs(argv) {
   return args
 }
 
+/**
+ * Guard the invariants that decide which users a build reaches.
+ *
+ * These are all cross-field: each value is individually valid, and the build
+ * is wrong only because of how they combine. A preview build pointed at the
+ * production feed, or a production build carrying the preview channel, would
+ * package and install perfectly and then deliver the wrong release to real
+ * users — which is why this is a build gate rather than a runtime check.
+ *
+ * `expectedChannel` in the build manifest is what makes it checkable: it says
+ * out loud which kind of build this is meant to be.
+ */
+function checkUpdateChannel(product, manifest) {
+  const problems = []
+  const expected = manifest.expectedChannel
+  if (!expected) return problems
+
+  const update = product.updateConfig ?? {}
+  const channel = update.channel ?? 'stable'
+
+  if (channel !== expected) {
+    problems.push(
+      `build manifest expects the "${expected}" channel but product.json declares "${channel}"`
+    )
+  }
+
+  const otherUrl = manifest.foreignFeedUrl
+  if (otherUrl && typeof update.url === 'string' && update.url.startsWith(otherUrl)) {
+    problems.push(
+      `a "${expected}" build must not point at the other channel's feed (${update.url})`
+    )
+  }
+
+  if (update.windowsMode === 'staged') {
+    const key = update.manifestPublicKey
+    if (isEmptyValue(key)) {
+      problems.push('updateConfig.windowsMode is "staged" but manifestPublicKey is missing')
+    } else if (/REPLACE|PLACEHOLDER|CHANGEME/i.test(key)) {
+      // Shipping the placeholder would silently disable staged updates on
+      // every install, and nothing downstream would report why.
+      problems.push('updateConfig.manifestPublicKey is still a placeholder — generate a real signing key')
+    } else {
+      log.ok(`product: staged updates enabled with a signing key (${key.slice(0, 12)}…)`)
+    }
+  }
+
+  // The two channels share a data directory on purpose; that only works if
+  // they genuinely agree on which directory it is.
+  const expectedDataFolder = manifest.sharedDataFolderName
+  if (expectedDataFolder && product.dataFolderName !== expectedDataFolder) {
+    problems.push(
+      `dataFolderName must stay "${expectedDataFolder}" so both channels share one data directory, got "${product.dataFolderName}"`
+    )
+  }
+
+  if (problems.length === 0) {
+    log.ok(`product: update channel "${channel}" matches the build manifest`)
+  }
+  return problems
+}
+
+/**
+ * A release that enables staged Windows updates must be able to sign them.
+ *
+ * The packaging hook can only enforce this when electron-builder publishes
+ * itself. Release flows pack with `--publish never` and upload afterwards, so
+ * this is where such a release learns it cannot sign — before anything is built.
+ */
+function checkStagedSigning(product, args, mainRepo, version) {
+  const plan = planStagedArtifacts({
+    product,
+    builtWindows: args.platforms === 'all' || args.platforms.split(',').includes('win'),
+    publishing: args.mode === 'release',
+    signingKey: process.env.HALO_UPDATE_SIGNING_KEY,
+    outDir: path.join(mainRepo, 'dist'),
+    version,
+  })
+  if (plan.action === 'fail') return [plan.reason]
+  if (plan.warning) log.warn(plan.warning)
+  if (plan.action === 'sign') log.ok('staged updates: signing key present and matches the product public key')
+  return []
+}
+
 function fail(message) {
   log.fail(message)
   process.exit(1)
@@ -59,9 +145,14 @@ async function main() {
   const manifest = loadManifest(args.manifest)
   const mainRepo = manifest.repoPaths.main
   const recordPath = args.record ?? path.join(mainRepo, 'dist', 'build-record.json')
-  const baselinePath = args.baseline ?? path.join(manifest.dir, 'last-release-record.json')
+  // Each channel keeps its own baseline. Sharing one would make every preview
+  // build report the differences against the *stable* product, and vice versa —
+  // turning "what changed since last release" into noise for both.
+  const baselinePath =
+    args.baseline ?? path.join(manifest.dir, manifest.releaseBaseline ?? 'last-release-record.json')
 
   log.info(`variant=${manifest.variant} mode=${args.mode}`)
+  const version = JSON.parse(fs.readFileSync(path.join(mainRepo, 'package.json'), 'utf8')).version
   const problems = []
 
   // -- 1. Git state of every declared repo -----------------------------------
@@ -126,6 +217,9 @@ async function main() {
     }
   }
 
+  problems.push(...checkUpdateChannel(productContent, manifest))
+  problems.push(...checkStagedSigning(productContent, args, mainRepo, version))
+
   // -- 4. Engines + binaries -------------------------------------------------
   try {
     execFileSync(process.execPath, [
@@ -164,7 +258,6 @@ async function main() {
   }
 
   // -- 6. Baseline diff (vs last successful release) -------------------------
-  const version = JSON.parse(fs.readFileSync(path.join(mainRepo, 'package.json'), 'utf8')).version
   const current = {
     schema: 1,
     variant: manifest.variant,

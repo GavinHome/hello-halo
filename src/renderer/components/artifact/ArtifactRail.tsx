@@ -1,46 +1,62 @@
 /**
- * Artifact Rail - Side panel showing created files
+ * ArtifactRail - Space resource rail (shell)
  *
  * Desktop (>=640px): Inline panel with drag-to-resize
  * Mobile (<640px): Floating button + Overlay panel
  *
- * Supports view mode toggle: Tree (default) vs Card
- * Supports external control for Canvas integration (smart collapse)
+ * Owns only the shell: expand/collapse, drag-resize, and the top tab strip.
+ * Tab content is a sibling component per tab — Files/Skill/MCP, each a
+ * standalone component the shell just mounts by active-tab id.
+ *
+ * Browser/terminal used to be footer buttons here; they now open from
+ * Header's more menu (still the same ContentCanvas tab underneath — see
+ * `useSpaceQuickActions`), since they aren't space *resources*, they're
+ * quick actions.
  */
 
-import { useState, useEffect, useCallback, useRef } from 'react'
-import { createPortal } from 'react-dom'
-import { ArtifactCard, type ArtifactContextMenuState } from './ArtifactCard'
-import { ArtifactTree } from './ArtifactTree'
-import { api } from '../../api'
-import type { Artifact, ArtifactViewMode, ArtifactChangeEvent } from '../../types'
-import { useIsGenerating } from '../../stores/chat.store'
-import { useSpaceStore } from '../../stores/space.store'
-import { useOnboardingStore } from '../../stores/onboarding.store'
-import { useCanvasLifecycle } from '../../hooks/useCanvasLifecycle'
+import { useState, useEffect, useLayoutEffect, useCallback, useRef, useMemo } from 'react'
+import { ArtifactFilesTab } from './ArtifactFilesTab'
+import { DigitalHumansTab } from './DigitalHumansTab'
+import { SkillsTab } from './SkillsTab'
+import { McpTab } from './McpTab'
 import { useCanvasStore } from '../../stores/canvas.store'
-import { ChevronRight, FolderOpen, Monitor, LayoutGrid, FolderTree, X, Globe, TerminalSquare, Loader2 } from 'lucide-react'
-import { ONBOARDING_ARTIFACT_NAME } from '../onboarding/onboardingData'
+import { ChevronRight, X } from 'lucide-react'
 import { useTranslation } from '../../i18n'
 import { useIsMobile } from '../../hooks/useIsMobile'
-import { useUserTerminal } from '../../hooks/useUserTerminal'
-import { getBrowserHomepage } from '../../utils/browser-homepage'
-import { copyToClipboard } from '../../utils/clipboard'
+import { usePointerDrag } from '../../hooks/usePointerDrag'
+import { capCount, msBucket, trackHome } from '../../services/home-telemetry'
+import type { ArtifactRailTab as RailTab } from '../../types'
 
-// Check if running in web mode
-const isWebMode = api.isRemoteMode()
+interface TabView { tab: RailTab; firstOpen: boolean; startedAt: number }
+interface TabItems { count: number; ok: boolean }
 
-// Storage keys
-const VIEW_MODE_STORAGE_KEY = 'halo:artifact-view-mode'
+function trackTabView(view: TabView, items: TabItems) {
+  // Only Skill and MCP fetch on first open, so only they have a load to time.
+  const timed = view.firstOpen && (view.tab === 'skill' || view.tab === 'mcp')
+  trackHome('home.rail.tab.view', {
+    tab: view.tab,
+    firstOpen: view.firstOpen,
+    itemCount: capCount(items.count),
+    empty: items.count === 0,
+    loadBucket: timed ? msBucket(Date.now() - view.startedAt) : undefined,
+    ok: timed ? items.ok : undefined,
+  })
+}
 
 // Width constraints (in pixels) - Desktop only
 const MIN_WIDTH = 200
 const MAX_WIDTH = 400
 const DEFAULT_WIDTH = 300
-const COLLAPSED_WIDTH = 48
-// Below this rail width the footer drops button labels and shows icons only.
-const FOOTER_LABELS_MIN_WIDTH = 280
+// Prototype: `.rail{display:none}` unless `.body.rail-open` — collapsed
+// means fully gone, not a persistent icon strip. 0 (not e.g. 48) so no
+// border/background is left visible; content stays mounted underneath
+// (CSS `hidden`, not unmounted) purely to preserve tab-internal state
+// (tree expansion, fetched lists) across a collapse/expand cycle.
+const COLLAPSED_WIDTH = 0
 const clampWidth = (v: number) => Math.min(MAX_WIDTH, Math.max(MIN_WIDTH, v))
+// Header width besides the tab strip: side padding, collapse button, border
+// and a little air, so the tabs fit on one line without scrolling.
+const HEADER_CHROME_PX = 60
 
 interface ArtifactRailProps {
   // External control props for Canvas integration
@@ -49,169 +65,144 @@ interface ArtifactRailProps {
   // Width persistence
   initialWidth?: number             // Persisted width from config
   onWidthChange?: (width: number) => void  // Callback when user finishes resizing
+  /** The width the rail takes when open: its stored width, or wider to fit its tabs. Reported at rest, not mid-drag. */
+  onOpenWidthChange?: (width: number) => void
 }
 
-// Load initial view mode from storage
-function getInitialViewMode(): ArtifactViewMode {
-  if (typeof window === 'undefined') return 'tree'
-  const stored = localStorage.getItem(VIEW_MODE_STORAGE_KEY)
-  return (stored === 'tree' || stored === 'card') ? stored : 'tree'
-}
-
-
-function normalizeArtifactFromEvent(item: unknown, fallbackSpaceId: string): Artifact | null {
-  if (!item || typeof item !== 'object') return null
-  const candidate = item as Partial<Artifact> & {
-    path?: string
-    name?: string
-    type?: string
-    icon?: string
-    extension?: string
-    size?: number
-    createdAt?: string
-    spaceId?: string
-    id?: string
-  }
-
-  if (!candidate.path || !candidate.name) {
-    return null
-  }
-
-  return {
-    id: candidate.id || `artifact-${Date.now()}`,
-    spaceId: candidate.spaceId || fallbackSpaceId,
-    conversationId: 'all',
-    name: candidate.name,
-    type: candidate.type === 'folder' ? 'folder' : 'file',
-    path: candidate.path,
-    extension: candidate.extension || '',
-    icon: candidate.icon || 'file-text',
-    createdAt: candidate.createdAt || new Date().toISOString(),
-    relativePath: candidate.relativePath || candidate.name,
-    preview: undefined,
-    size: typeof candidate.size === 'number' ? candidate.size : undefined
-  }
+/** Tab strip — Files/Skill/MCP, each a sibling content component below. */
+function TabStrip({ active, onChange, stripRef }: {
+  active: RailTab
+  onChange: (tab: RailTab) => void
+  stripRef?: React.Ref<HTMLDivElement>
+}) {
+  const { t } = useTranslation()
+  const tabs: { id: RailTab; label: string }[] = [
+    { id: 'files', label: t('Files') },
+    { id: 'digital-humans', label: t('Digital Humans') },
+    { id: 'skill', label: t('Skill') },
+    { id: 'mcp', label: t('MCP') },
+  ]
+  return (
+    <div ref={stripRef} className="flex min-w-0 items-center gap-1 overflow-x-auto scrollbar-none">
+      {tabs.map(tab => (
+        <button
+          key={tab.id}
+          onClick={() => onChange(tab.id)}
+          className={`h-[26px] px-2.5 flex-shrink-0 whitespace-nowrap rounded-sm text-[13px] transition-colors ease-halo ${
+            active === tab.id ? 'bg-secondary text-foreground font-medium' : 'text-subtle-foreground hover:text-foreground'
+          }`}
+          aria-current={active === tab.id}
+        >
+          {tab.label}
+        </button>
+      ))}
+    </div>
+  )
 }
 
 export function ArtifactRail({
   externalExpanded,
   onExpandedChange,
   initialWidth,
-  onWidthChange
+  onWidthChange,
+  onOpenWidthChange
 }: ArtifactRailProps) {
   const { t } = useTranslation()
 
-  // Self-subscribe to space data
-  const currentSpace = useSpaceStore(state => state.currentSpace)
-  const spaceId = currentSpace?.id ?? ''
-  const isTemp = currentSpace?.isTemp ?? false
+  const [activeTab, setActiveTab] = useState<RailTab>('files')
+  // Skill/MCP each do a real fetch (disk scan / IPC call) on mount, so they
+  // must not mount until the user actually opens that tab — CSS-hidden
+  // alone isn't enough, since hidden tabs still stay in the React tree and
+  // run their effects. Once opened, a tab keeps its mount (added to this
+  // set, never removed) so switching away and back doesn't refetch.
+  const [mountedTabs, setMountedTabs] = useState<Set<RailTab>>(() => new Set<RailTab>(['files']))
 
-  // ── All useState / useRef declarations first (avoids bundler TDZ issues) ──
-  const [artifacts, setArtifacts] = useState<Artifact[]>([])
-  // Use external control if provided, otherwise internal state
+  const handleTabChange = useCallback((tab: RailTab) => {
+    setActiveTab(tab)
+    setMountedTabs(prev => (prev.has(tab) ? prev : new Set(prev).add(tab)))
+  }, [])
+
   const isControlled = externalExpanded !== undefined
   const [internalExpanded, setInternalExpanded] = useState(true)
   const isExpanded = isControlled ? externalExpanded : internalExpanded
 
-  const [isLoading, setIsLoading] = useState(false)
   const [width, setWidth] = useState(initialWidth != null ? clampWidth(initialWidth) : DEFAULT_WIDTH)
-  const widthRef = useRef(width)
   const [isDragging, setIsDragging] = useState(false)
-  const [viewMode, setViewMode] = useState<ArtifactViewMode>(getInitialViewMode)
   const [mobileOverlayOpen, setMobileOverlayOpen] = useState(false)
-  const [cardContextMenu, setCardContextMenu] = useState<ArtifactContextMenuState | null>(null)
-  const cardContextMenuRef = useRef<HTMLDivElement>(null)
   const railRef = useRef<HTMLDivElement>(null)
-  const onWidthChangeRef = useRef(onWidthChange)
-  onWidthChangeRef.current = onWidthChange
-  const isGenerating = useIsGenerating()
-  const { isActive: isOnboarding, currentStep, completeOnboarding } = useOnboardingStore()
   const isMobile = useIsMobile()
-  const {
-    available: terminalAvailable,
-    creating: terminalCreating,
-    createAndOpen: handleOpenTerminal
-  } = useUserTerminal()
 
-  // ── Callbacks ──
+  // The rail never gets narrower than its tab labels in the current language.
+  const tabStripRef = useRef<HTMLDivElement>(null)
+  const [minWidth, setMinWidth] = useState(MIN_WIDTH)
+  const minWidthRef = useRef(minWidth)
+  useLayoutEffect(() => {
+    const strip = tabStripRef.current
+    if (!isExpanded || isMobile || !strip) return
+    const next = Math.min(MAX_WIDTH, Math.max(MIN_WIDTH, strip.scrollWidth + HEADER_CHROME_PX))
+    minWidthRef.current = next
+    setMinWidth(next)
+  }, [isExpanded, isMobile, t])
+  const effectiveWidth = Math.max(width, minWidth)
+  const onOpenWidthChangeRef = useRef(onOpenWidthChange)
+  onOpenWidthChangeRef.current = onOpenWidthChange
+  // Before the page's own layout effects, so it knows the width before first paint.
+  useLayoutEffect(() => {
+    if (!isDragging) onOpenWidthChangeRef.current?.(effectiveWidth)
+  }, [effectiveWidth, isDragging])
 
-  const handleOpenFolder = useCallback(() => {
-    if (spaceId) {
-      useSpaceStore.getState().openSpaceFolder(spaceId)
+  // A tab view is emitted by the shell, which knows when a tab was activated,
+  // once the tab has reported its list — mounted-but-hidden tabs report too,
+  // so an activation can often be answered at once.
+  const tabItemsRef = useRef(new Map<RailTab, TabItems>())
+  const viewedTabsRef = useRef(new Set<RailTab>())
+  const pendingTabViewRef = useRef<TabView | null>(null)
+
+  const reportTabItems = useCallback((tab: RailTab, count: number | null, ok = true) => {
+    if (count === null) {
+      tabItemsRef.current.delete(tab)
+      return
     }
-  }, [spaceId])
-
-  // Card context menu handlers
-  const handleShowCardContextMenu = useCallback((menu: ArtifactContextMenuState) => {
-    setCardContextMenu(menu)
+    const items = { count, ok }
+    tabItemsRef.current.set(tab, items)
+    const pending = pendingTabViewRef.current
+    if (pending?.tab === tab) {
+      pendingTabViewRef.current = null
+      trackTabView(pending, items)
+    }
   }, [])
 
-  const handleCopyRelativePath = useCallback(async (relativePath: string) => {
-    try {
-      await copyToClipboard(relativePath)
-    } catch (error) {
-      console.error('[ArtifactRail] Failed to copy relative path:', error)
-    }
-    setCardContextMenu(null)
-  }, [])
+  const tabItemsListeners = useMemo(() => ({
+    files: (count: number | null, ok?: boolean) => reportTabItems('files', count, ok),
+    'digital-humans': (count: number | null, ok?: boolean) => reportTabItems('digital-humans', count, ok),
+    skill: (count: number | null, ok?: boolean) => reportTabItems('skill', count, ok),
+    mcp: (count: number | null, ok?: boolean) => reportTabItems('mcp', count, ok),
+  }), [reportTabItems])
 
-  const handleRevealInFolder = useCallback(async (path: string) => {
-    if (isWebMode) return
-    try {
-      await api.showArtifactInFolder(path)
-    } catch (error) {
-      console.error('[ArtifactRail] Failed to show in folder:', error)
+  const isRailVisible = isMobile ? mobileOverlayOpen : isExpanded
+  useEffect(() => {
+    if (!isRailVisible) {
+      pendingTabViewRef.current = null
+      return
     }
-    setCardContextMenu(null)
-  }, [])
-
-  // ── Effects ──
+    const view = { tab: activeTab, firstOpen: !viewedTabsRef.current.has(activeTab), startedAt: Date.now() }
+    viewedTabsRef.current.add(activeTab)
+    const items = tabItemsRef.current.get(activeTab)
+    if (items) {
+      pendingTabViewRef.current = null
+      trackTabView(view, items)
+    } else {
+      pendingTabViewRef.current = view
+    }
+  }, [isRailVisible, activeTab])
 
   // Sync width when initialWidth arrives from async config load
   useEffect(() => {
     if (initialWidth !== undefined && !isDragging) {
       const clamped = clampWidth(initialWidth)
       setWidth(clamped)
-      widthRef.current = clamped
     }
   }, [initialWidth, isDragging])
-
-  // Dismiss card context menu on outside click or Escape
-  useEffect(() => {
-    if (!cardContextMenu) return
-    const handlePointerDown = (e: MouseEvent) => {
-      if (cardContextMenuRef.current && !cardContextMenuRef.current.contains(e.target as Node)) {
-        setCardContextMenu(null)
-      }
-    }
-    const handleEscape = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') setCardContextMenu(null)
-    }
-    document.addEventListener('mousedown', handlePointerDown)
-    document.addEventListener('keydown', handleEscape)
-    return () => {
-      document.removeEventListener('mousedown', handlePointerDown)
-      document.removeEventListener('keydown', handleEscape)
-    }
-  }, [cardContextMenu])
-
-  // Adjust card context menu position to stay within viewport (P1 fix)
-  useEffect(() => {
-    if (!cardContextMenu || !cardContextMenuRef.current) return
-    const rect = cardContextMenuRef.current.getBoundingClientRect()
-    const vw = window.innerWidth
-    const vh = window.innerHeight
-    let { x, y } = cardContextMenu
-    if (x + rect.width > vw) x = vw - rect.width - 8
-    if (y + rect.height > vh) y = vh - rect.height - 8
-    if (x < 0) x = 8
-    if (y < 0) y = 8
-    cardContextMenuRef.current.style.left = `${x}px`
-    cardContextMenuRef.current.style.top = `${y}px`
-  }, [cardContextMenu])
-
-  // Canvas lifecycle for opening browser
-  const { openUrl } = useCanvasLifecycle()
 
   // When Canvas is open, disable transition to prevent layout flicker during resize/close
   const isCanvasOpen = useCanvasStore(state => state.isOpen)
@@ -219,77 +210,35 @@ export function ArtifactRail({
   // Handle expand/collapse toggle
   const handleToggleExpanded = useCallback(() => {
     const newExpanded = !isExpanded
+    trackHome('home.rail.toggle', { open: newExpanded, surface: 'header_button' })
 
     // UI-first optimization: When Canvas is open, directly update DOM
     // before React state update to ensure layout resizes immediately
     if (isCanvasOpen && railRef.current) {
-      const targetWidth = newExpanded ? width : COLLAPSED_WIDTH
+      const targetWidth = newExpanded ? effectiveWidth : COLLAPSED_WIDTH
       railRef.current.style.width = `${targetWidth}px`
     }
 
-    // Then update React state (will re-render but width is already correct)
     if (isControlled) {
       onExpandedChange?.(newExpanded)
     } else {
       setInternalExpanded(newExpanded)
     }
-  }, [isExpanded, isControlled, onExpandedChange, isCanvasOpen, width])
+  }, [isExpanded, isControlled, onExpandedChange, isCanvasOpen, effectiveWidth])
 
-  // Check if we're in onboarding view-artifact step
-  const isOnboardingViewStep = isOnboarding && currentStep === 'view-artifact'
-
-  // Handle artifact click during onboarding
-  // Delay completion so user can see the file open first
-  const handleOnboardingArtifactClick = useCallback(() => {
-    if (isOnboardingViewStep) {
-      // Let the ArtifactCard's click handler open the file first
-      // Then complete onboarding after a short delay
-      setTimeout(() => {
-        completeOnboarding()
-      }, 500)
-    }
-  }, [isOnboardingViewStep, completeOnboarding])
-
-  // Toggle view mode and persist
-  const toggleViewMode = useCallback(() => {
-    setViewMode(prev => {
-      const next = prev === 'card' ? 'tree' : 'card'
-      localStorage.setItem(VIEW_MODE_STORAGE_KEY, next)
-      return next
-    })
-  }, [])
-
-  // Handle drag resize (desktop only)
-  const handleMouseDown = useCallback((e: React.MouseEvent) => {
-    if (isMobile) return
-    e.preventDefault()
-    setIsDragging(true)
-  }, [isMobile])
-
-  useEffect(() => {
-    if (!isDragging || isMobile) return
-
-    const handleMouseMove = (e: MouseEvent) => {
-      if (!railRef.current) return
-      const newWidth = window.innerWidth - e.clientX
-      const clampedWidth = Math.min(MAX_WIDTH, Math.max(MIN_WIDTH, newWidth))
-      setWidth(clampedWidth)
-      widthRef.current = clampedWidth
-    }
-
-    const handleMouseUp = () => {
+  const railWidthAt = (clientX: number) =>
+    Math.min(MAX_WIDTH, Math.max(minWidthRef.current, window.innerWidth - clientX))
+  const handlePointerDown = usePointerDrag({
+    enabled: !isMobile && isExpanded,
+    onStart: () => setIsDragging(true),
+    onMove: ({ clientX }) => setWidth(railWidthAt(clientX)),
+    onEnd: ({ clientX }) => {
+      const nextWidth = railWidthAt(clientX)
+      setWidth(nextWidth)
       setIsDragging(false)
-      onWidthChangeRef.current?.(widthRef.current)
-    }
-
-    document.addEventListener('mousemove', handleMouseMove)
-    document.addEventListener('mouseup', handleMouseUp)
-
-    return () => {
-      document.removeEventListener('mousemove', handleMouseMove)
-      document.removeEventListener('mouseup', handleMouseUp)
-    }
-  }, [isDragging, isMobile])
+      onWidthChange?.(nextWidth)
+    },
+  })
 
   // Close mobile overlay when switching to desktop
   useEffect(() => {
@@ -298,225 +247,46 @@ export function ArtifactRail({
     }
   }, [isMobile, mobileOverlayOpen])
 
-  // Load artifacts from the main process
-  const loadArtifacts = useCallback(async () => {
-    if (!spaceId) return
-
-    try {
-      setIsLoading(true)
-      const response = await api.listArtifacts(spaceId)
-      if (response.success && response.data) {
-        setArtifacts(response.data as Artifact[])
-      }
-    } catch (error) {
-      console.error('[ArtifactRail] Failed to load artifacts:', error)
-    } finally {
-      setIsLoading(false)
-    }
-  }, [spaceId])
-
-  // Load artifacts on mount and when space changes
-  useEffect(() => {
-    loadArtifacts()
-  }, [loadArtifacts])
-
-  // Refresh artifacts when generation completes (debounced)
-  useEffect(() => {
-    if (!isGenerating) {
-      const timer = setTimeout(loadArtifacts, 500)
-      return () => clearTimeout(timer)
-    }
-  }, [isGenerating, loadArtifacts])
-
-  // Subscribe to artifact change events for incremental updates
-  useEffect(() => {
-    if (!spaceId) return
-
-    // Initialize watcher for this space
-    api.initArtifactWatcher(spaceId).catch(err => {
-      console.error('[ArtifactRail] Failed to init watcher:', err)
-    })
-
-    // Subscribe to change events
-    const cleanup = api.onArtifactChanged((event: ArtifactChangeEvent) => {
-      if (event.spaceId !== spaceId) return
-
-      console.log('[ArtifactRail] Artifact changed:', event.type, event.relativePath)
-
-      const normalizedArtifact = event.item
-        ? normalizeArtifactFromEvent(event.item, spaceId)
-        : null
-
-      switch (event.type) {
-        case 'add':
-        case 'addDir':
-          if (normalizedArtifact) {
-            setArtifacts(prev => {
-              if (prev.some(a => a.path === normalizedArtifact.path)) return prev
-              return [normalizedArtifact, ...prev]
-            })
-          } else {
-            loadArtifacts()
-          }
-          break
-
-        case 'unlink':
-        case 'unlinkDir':
-          setArtifacts(prev => prev.filter(a => a.path !== event.path))
-          break
-
-        case 'change':
-          if (normalizedArtifact) {
-            setArtifacts(prev =>
-              prev.map(a => (a.path === normalizedArtifact.path ? normalizedArtifact : a))
-            )
-          } else {
-            loadArtifacts()
-          }
-          break
-      }
-    })
-
-    return cleanup
-  }, [spaceId, loadArtifacts])
-
-  // Refresh artifacts when entering view-artifact onboarding step
-  useEffect(() => {
-    if (isOnboardingViewStep) {
-      // Delay slightly to ensure file is written
-      const timer = setTimeout(loadArtifacts, 300)
-      return () => clearTimeout(timer)
-    }
-  }, [isOnboardingViewStep, loadArtifacts])
-
-  // Handle opening browser - also collapse the rail to maximize browser area
-  const handleOpenBrowser = useCallback(() => {
-    getBrowserHomepage().then(url => openUrl(url, t('Browser')))
-    // Auto-collapse rail when opening browser to maximize viewing area
-    if (isControlled) {
-      onExpandedChange?.(false)
-    } else {
-      setInternalExpanded(false)
-    }
-  }, [openUrl, isControlled, onExpandedChange])
-
-  // Shared content renderer
-  const renderContent = () => (
-    <div className="flex-1 overflow-hidden">
-      {viewMode === 'tree' ? (
-        <ArtifactTree spaceId={spaceId} />
-      ) : (
-        <div className="h-full overflow-auto p-2">
-          {isLoading ? (
-            <div className="flex flex-col items-center justify-center h-full text-center px-2">
-              <div className="w-8 h-8 rounded-full border-2 border-primary/30 border-t-primary animate-spin mb-3" />
-              <p className="text-xs text-muted-foreground">{t('Loading...')}</p>
-            </div>
-          ) : artifacts.length === 0 ? (
-            <div className="flex flex-col items-center justify-center h-full text-center px-2">
-              <div className="w-12 h-12 rounded-full border-2 border-dashed border-muted-foreground/30 flex items-center justify-center mb-3 halo-breathe">
-                <div className="w-8 h-8 rounded-full bg-gradient-to-br from-primary/20 to-transparent" />
-              </div>
-              <p className="text-xs text-muted-foreground">
-                {isTemp ? t('Ideas will crystallize here') : t('Files will appear here')}
-              </p>
-              {isGenerating && (
-                <p className="text-xs text-primary/60 mt-2 animate-pulse">
-                  {t('AI is working...')}
-                </p>
-              )}
-            </div>
-          ) : (
-            <div className="space-y-2">
-              {artifacts.map((artifact) => {
-                // Check if this is the onboarding artifact
-                const isOnboardingArtifact = artifact.name === ONBOARDING_ARTIFACT_NAME
-
-                return (
-                  <div
-                    key={artifact.id}
-                    data-onboarding={isOnboardingArtifact && isOnboardingViewStep ? 'artifact-card' : undefined}
-                    onClick={isOnboardingArtifact && isOnboardingViewStep ? handleOnboardingArtifactClick : undefined}
-                  >
-                    <ArtifactCard artifact={artifact} onShowContextMenu={handleShowCardContextMenu} />
-                  </div>
-                )
-              })}
-            </div>
-          )}
+  // Once a tab has been opened it stays mounted (CSS-hidden when inactive)
+  // so switching back doesn't re-fetch or lose state — but a tab that was
+  // never opened isn't in the DOM at all (see mountedTabs above), so Skill's
+  // disk scan and MCP's IPC call only run for a space page whose user
+  // actually opened that tab.
+  const tabContent = (
+    <>
+      <div className={`flex-1 flex flex-col overflow-hidden${activeTab === 'files' ? '' : ' hidden'}`}>
+        <ArtifactFilesTab onItemsChange={tabItemsListeners.files} />
+      </div>
+      {mountedTabs.has('digital-humans') && (
+        <div className={`flex-1 flex flex-col overflow-hidden${activeTab === 'digital-humans' ? '' : ' hidden'}`}>
+          <DigitalHumansTab onItemsChange={tabItemsListeners['digital-humans']} />
         </div>
       )}
-    </div>
-  )
-
-  // Shared footer with space-scoped tool entries (folder / browser / terminal).
-  // `compact` drops labels when the rail is too narrow for three labeled buttons.
-  // Terminal works over remote transport, so its entry survives Web mode where
-  // folder/browser (local-only) are replaced by the desktop-client hint.
-  const renderFooter = (compact: boolean) => (
-    <div className="flex-shrink-0 p-2 border-t border-border">
-      {viewMode === 'card' && artifacts.length > 0 && (
-        <p className="text-xs text-muted-foreground text-center mb-2">
-          {artifacts.length} {t('artifacts')}
-        </p>
+      {mountedTabs.has('skill') && (
+        <div className={`flex-1 flex flex-col overflow-hidden${activeTab === 'skill' ? '' : ' hidden'}`}>
+          <SkillsTab onItemsChange={tabItemsListeners.skill} />
+        </div>
       )}
-      <div className="flex items-center gap-2">
-        {isWebMode ? (
-          <div
-            className="flex-1 min-w-0 flex items-center justify-center gap-2 px-3 py-2 text-xs text-muted-foreground/50 rounded-lg cursor-not-allowed"
-            title={t('Please open folder in client')}
-          >
-            <Monitor className="w-4 h-4 flex-shrink-0" />
-            <span className="truncate">{t('Please open folder in client')}</span>
-          </div>
-        ) : (
-          <>
-            <button
-              onClick={handleOpenFolder}
-              className="flex-1 min-w-0 flex items-center justify-center gap-1.5 px-2 py-2 text-xs text-muted-foreground hover:bg-secondary hover:text-foreground rounded-lg transition-colors"
-              title={t('Open folder')}
-            >
-              <FolderOpen className="w-4 h-4 flex-shrink-0 text-amber-500" />
-              {!compact && <span className="truncate">{t('Folder')}</span>}
-            </button>
-            <button
-              onClick={handleOpenBrowser}
-              className="flex-1 min-w-0 flex items-center justify-center gap-1.5 px-2 py-2 text-xs text-muted-foreground hover:bg-secondary hover:text-foreground rounded-lg transition-colors"
-              title={t('Open browser')}
-            >
-              <Globe className="w-4 h-4 flex-shrink-0 text-blue-500" />
-              {!compact && <span className="truncate">{t('Browser')}</span>}
-            </button>
-          </>
-        )}
-        {terminalAvailable && (
-          <button
-            onClick={handleOpenTerminal}
-            disabled={terminalCreating}
-            className="flex-1 min-w-0 flex items-center justify-center gap-1.5 px-2 py-2 text-xs text-muted-foreground hover:bg-secondary hover:text-foreground rounded-lg transition-colors disabled:opacity-60"
-            title={t('Open terminal')}
-          >
-            {terminalCreating ? (
-              <Loader2 className="w-4 h-4 flex-shrink-0 animate-spin" />
-            ) : (
-              <TerminalSquare className="w-4 h-4 flex-shrink-0 text-violet-500" />
-            )}
-            {!compact && <span className="truncate">{t('Terminal')}</span>}
-          </button>
-        )}
-      </div>
-    </div>
+      {mountedTabs.has('mcp') && (
+        <div className={`flex-1 flex flex-col overflow-hidden${activeTab === 'mcp' ? '' : ' hidden'}`}>
+          <McpTab onItemsChange={tabItemsListeners.mcp} />
+        </div>
+      )}
+    </>
   )
 
   // ==================== Mobile Overlay Mode ====================
   if (isMobile) {
     return (
       <>
-        {/* Floating trigger button - z-[60] to stay above Canvas overlay (z-50) */}
+        {/* The resource trigger stays above the mobile canvas and browser guest. */}
         <button
-          onClick={() => setMobileOverlayOpen(true)}
+          onClick={() => {
+            trackHome('home.rail.toggle', { open: true, surface: 'mobile_fab' })
+            setMobileOverlayOpen(true)
+          }}
           className="
-            fixed right-0 top-1/3 z-[60]
+            fixed right-0 top-1/3 z-[var(--layer-workspace-trigger)]
             w-10 h-14
             bg-card
             border-l border-y border-border
@@ -527,19 +297,14 @@ export function ArtifactRail({
             active:scale-95
             transition-all duration-200
           "
-          aria-label={t('Open artifacts panel')}
+          aria-label={t('Open workspace resources')}
         >
-          <FolderOpen className="w-4 h-4 text-amber-500" />
-          {artifacts.length > 0 && (
-            <span className="text-[10px] font-medium text-muted-foreground">
-              {artifacts.length}
-            </span>
-          )}
+          <ChevronRight className="w-4 h-4 text-muted-foreground rotate-180" />
         </button>
 
-        {/* Overlay backdrop + panel - z-[70] to stay above Canvas overlay (z-50) */}
+        {/* The resource sheet covers both the canvas and its browser guest. */}
         {mobileOverlayOpen && (
-          <div className="fixed z-[70] flex justify-end" style={{ top: 'var(--sat, 0px)', right: 0, bottom: 0, left: 0 }}>
+          <div className="fixed z-[var(--layer-workspace-sheet)] flex justify-end" style={{ top: 'var(--sat, 0px)', right: 0, bottom: 0, left: 0 }}>
             {/* Backdrop */}
             <div
               className="absolute inset-0 bg-background/70 animate-fade-in"
@@ -558,24 +323,7 @@ export function ArtifactRail({
             >
               {/* Header */}
               <div className="p-3 border-b border-border flex items-center justify-between">
-                <div className="flex items-center gap-1.5">
-                  <span className="text-sm font-medium text-muted-foreground">{t('Artifacts')}</span>
-                  <button
-                    onClick={toggleViewMode}
-                    className={`
-                      p-1 rounded transition-all duration-200
-                      hover:bg-secondary/80
-                      ${viewMode === 'tree' ? 'bg-secondary text-primary' : 'text-muted-foreground/50 hover:text-muted-foreground'}
-                    `}
-                    title={viewMode === 'card' ? t('Switch to tree view') : t('Switch to card view')}
-                  >
-                    {viewMode === 'card' ? (
-                      <FolderTree className="w-3.5 h-3.5" />
-                    ) : (
-                      <LayoutGrid className="w-3.5 h-3.5" />
-                    )}
-                  </button>
-                </div>
+                <TabStrip active={activeTab} onChange={handleTabChange} />
                 <button
                   onClick={() => setMobileOverlayOpen(false)}
                   className="p-1 hover:bg-secondary rounded transition-colors"
@@ -585,11 +333,7 @@ export function ArtifactRail({
                 </button>
               </div>
 
-              {/* Content */}
-              {renderContent()}
-
-              {/* Footer */}
-              {renderFooter(false)}
+              {tabContent}
             </div>
           </div>
         )}
@@ -598,12 +342,12 @@ export function ArtifactRail({
   }
 
   // ==================== Desktop Inline Mode ====================
-  const displayWidth = isExpanded ? width : COLLAPSED_WIDTH
+  const displayWidth = isExpanded ? effectiveWidth : COLLAPSED_WIDTH
 
   return (
     <div
       ref={railRef}
-      className="h-full flex-shrink-0 border-l border-border bg-card/30 flex flex-col relative"
+      className={`h-full flex-shrink-0 flex flex-col relative overflow-hidden ${isExpanded ? 'border-l border-border-faint bg-card theme-dark:bg-background' : ''}`}
       style={{
         width: displayWidth,
         // Disable transition when: dragging OR Canvas is open (prevent layout flicker)
@@ -613,122 +357,35 @@ export function ArtifactRail({
       {/* Drag handle - only show when expanded */}
       {isExpanded && (
         <div
-          className={`absolute left-0 top-0 bottom-0 w-1.5 cursor-col-resize hover:bg-primary/50 transition-colors z-20 ${
+          className={`absolute left-0 top-0 bottom-0 w-1.5 cursor-col-resize touch-none hover:bg-primary/50 transition-colors z-20 ${
             isDragging ? 'bg-primary/50' : ''
           }`}
-          onMouseDown={handleMouseDown}
+          onPointerDown={handlePointerDown}
           title={t('Drag to resize')}
         />
       )}
 
-      {/* Header - height matches CanvasTabs (py-1.5 + h-7 content = ~40px) */}
-      <div className="flex-shrink-0 px-3 h-10 border-b border-border flex items-center justify-between">
-        {isExpanded && (
-          <div className="flex items-center gap-1.5">
-            <span className="text-sm font-medium text-muted-foreground">{t('Artifacts')}</span>
-            <button
-              onClick={toggleViewMode}
-              className={`
-                p-1 rounded transition-all duration-200
-                hover:bg-secondary/80
-                ${viewMode === 'tree' ? 'bg-secondary text-primary' : 'text-muted-foreground/50 hover:text-muted-foreground'}
-              `}
-              title={viewMode === 'card' ? t('Switch to tree view (developer)') : t('Switch to card view')}
-            >
-              {viewMode === 'card' ? (
-                <FolderTree className="w-3.5 h-3.5" />
-              ) : (
-                <LayoutGrid className="w-3.5 h-3.5" />
-              )}
-            </button>
-          </div>
-        )}
-        <button
-          onClick={handleToggleExpanded}
-          className="p-1 hover:bg-secondary rounded transition-colors"
-        >
-          <ChevronRight className={`w-4 h-4 transition-transform ${isExpanded ? '' : 'rotate-180'}`} />
-        </button>
-      </div>
-
-      {/* Content + Footer — CSS-hidden when collapsed to preserve ArtifactTree folder expansion state */}
-      <div className={`flex-1 flex flex-col overflow-hidden${isExpanded ? '' : ' hidden'}`}>
-        {renderContent()}
-        {renderFooter(width < FOOTER_LABELS_MIN_WIDTH)}
-      </div>
-
-      {/* Collapsed state - icon-only column of the footer tool entries */}
-      {!isExpanded && (
-        <div className="flex-1 flex flex-col items-center py-4 gap-2">
-          {isWebMode ? (
-            <div
-              className="p-2 rounded-lg cursor-not-allowed opacity-50"
-              title={t('Please open folder in client')}
-            >
-              <Monitor className="w-5 h-5 text-muted-foreground" />
-            </div>
-          ) : (
-            <>
-              <button
-                onClick={handleOpenFolder}
-                className="p-2 hover:bg-secondary rounded-lg transition-colors"
-                title={t('Open folder')}
-              >
-                <FolderOpen className="w-5 h-5 text-amber-500" />
-              </button>
-              <button
-                onClick={handleOpenBrowser}
-                className="p-2 hover:bg-secondary rounded-lg transition-colors"
-                title={t('Open browser')}
-              >
-                <Globe className="w-5 h-5 text-blue-500" />
-              </button>
-            </>
-          )}
-          {terminalAvailable && (
-            <button
-              onClick={handleOpenTerminal}
-              disabled={terminalCreating}
-              className="p-2 hover:bg-secondary rounded-lg transition-colors disabled:opacity-60"
-              title={t('Open terminal')}
-            >
-              {terminalCreating ? (
-                <Loader2 className="w-5 h-5 animate-spin text-muted-foreground" />
-              ) : (
-                <TerminalSquare className="w-5 h-5 text-violet-500" />
-              )}
-            </button>
-          )}
+      {/* Header — only rendered while expanded. Reopening is the page
+          Header's toggle button (prototype: `#railBtn`), same as this
+          button (prototype: rail-head's own `.icon-btn`) is only the
+          collapse direction — there's no icon-only strip to click when
+          closed, matching the prototype's binary show/hide. */}
+      {isExpanded && (
+        <div className="flex-shrink-0 pl-3 pr-1.5 h-10 border-b border-border-faint flex items-center justify-between">
+          <TabStrip active={activeTab} onChange={handleTabChange} stripRef={tabStripRef} />
+          <button
+            onClick={handleToggleExpanded}
+            className="w-8 h-8 flex items-center justify-center rounded-sm text-faint-foreground transition-colors ease-halo hover:bg-secondary hover:text-foreground"
+          >
+            <ChevronRight className="w-4 h-4" />
+          </button>
         </div>
       )}
 
-      {/* Card view context menu (portal to body for correct z-index) */}
-      {cardContextMenu && createPortal(
-        <div
-          ref={cardContextMenuRef}
-          role="menu"
-          className="fixed z-[9999] min-w-[180px] bg-popover border border-border rounded-lg shadow-lg py-1"
-          style={{ top: cardContextMenu.y, left: cardContextMenu.x }}
-        >
-          <button
-            role="menuitem"
-            onClick={() => handleCopyRelativePath(cardContextMenu.relativePath)}
-            className="w-full flex items-center gap-2 px-3 py-1.5 text-sm hover:bg-secondary transition-colors text-left"
-          >
-            <span>{t('Copy relative path')}</span>
-          </button>
-          {!isWebMode && (
-            <button
-              role="menuitem"
-              onClick={() => handleRevealInFolder(cardContextMenu.path)}
-              className="w-full flex items-center gap-2 px-3 py-1.5 text-sm hover:bg-secondary transition-colors text-left"
-            >
-              <span>{cardContextMenu.isFolder ? t('Open folder location') : t('Show in folder')}</span>
-            </button>
-          )}
-        </div>,
-        document.body
-      )}
+      {/* Content — CSS-hidden when collapsed to preserve tab-internal state (tree expansion, fetched lists) */}
+      <div className={`flex-1 flex flex-col overflow-hidden${isExpanded ? '' : ' hidden'}`}>
+        {tabContent}
+      </div>
     </div>
   )
 }

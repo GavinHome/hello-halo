@@ -57,17 +57,20 @@ const { registry, createLocalSession } = vi.hoisted(() => {
     displayName: '',
     proactive: false,
     lastActiveAt: 0,
+    messageCount: 0,
   }))
   return {
     createLocalSession: _createLocalSession,
-    registry: { createLocalSession: _createLocalSession },
+    registry: { createLocalSession: _createLocalSession, resetActivity: vi.fn() },
   }
 })
 
 vi.mock('../../../../src/main/services/agent/session-manager', () => ({
+  activeSessions: new Map(),
+  hasPendingSessionInput: () => false,
   v2Sessions,
   closeV2Session,
-  getOrCreateV2Session: vi.fn(),
+  acquireV2Session: vi.fn(),
   getConsumerHandle: (id: string) => consumers.get(id) ?? null,
   getRunningConsumerIds: () => Array.from(consumers.keys()),
   markTurnDispatched: vi.fn(),
@@ -88,14 +91,15 @@ vi.mock('../../../../src/main/apps/runtime/im-session-registry', () => ({
 
 vi.mock('../../../../src/main/services/agent/helpers', () => ({
   getApiCredentials: vi.fn(),
-  getApiCredentialsForSource: vi.fn(),
+  getApiCredentialsForSelection: vi.fn(),
   getWorkingDir: vi.fn(),
   getHeadlessElectronPath: vi.fn(),
   getDbMcpServers: vi.fn(),
 }))
 vi.mock('../../../../src/main/services/agent/sdk-config', () => ({
+  markMcpServerSettings: (server: unknown) => server,
   resolveCredentialsForSdk: vi.fn(),
-  buildBaseSdkOptions: vi.fn(),
+  buildUserSessionSdkOptions: vi.fn(),
 }))
 vi.mock('../../../../src/main/services/agent/permission-handler', () => ({
   createCanUseTool: vi.fn(),
@@ -106,9 +110,10 @@ vi.mock('../../../../src/main/services/analytics/analytics.service', () => ({
 
 vi.mock('../../../../src/main/services/agent/events', () => ({ emitAgentEvent: vi.fn() }))
 vi.mock('../../../../src/main/services/agent/stream-processor', () => ({ processStream: vi.fn() }))
-vi.mock('../../../../src/main/services/agent/message-utils', () => ({ buildMessageContent: vi.fn() }))
+vi.mock('../../../../src/main/services/agent/message-utils', () => ({ buildMessageContent: vi.fn(), formatCanvasContext: () => '' }))
 
 vi.mock('../../../../src/main/services/ai-browser', () => ({
+  AI_BROWSER_SYSTEM_PROMPT: '',
   createAIBrowserMcpServer: vi.fn(),
   createScopedBrowserContext: vi.fn(),
 }))
@@ -132,19 +137,38 @@ vi.mock('../../../../src/main/services/space.service', () => ({
 }))
 
 vi.mock('../../../../src/main/apps/manager', () => ({
-  getAppManager: vi.fn().mockReturnValue(null),
+  getAppManager: vi.fn().mockReturnValue({ getApp: (id: string) => ({ id, spaceId: 'new-space' }) }),
+}))
+const { environment, activityStore, resolveChatEnvironment, copySessionJsonl } = vi.hoisted(() => {
+  const environment = { spaceId: 'old-space', spacePath: '/original-space', workDir: '/original-cwd', memoryDir: '/original-memory' }
+  return {
+    environment,
+    activityStore: { getSessionEnvironment: vi.fn(), deleteSessionEnvironment: vi.fn(), pinSessionEnvironment: vi.fn() },
+    resolveChatEnvironment: vi.fn(() => environment),
+    copySessionJsonl: vi.fn(() => true),
+  }
+})
+vi.mock('../../../../src/main/apps/runtime/execution-environment', () => ({
+  resolveChatEnvironment,
+  appChatRunId: (conversationId: string, appId: string) => conversationId === `app-chat:${appId}` ? 'chat' : `chat-${conversationId.slice(`app-chat:${appId}:`.length).replace(/:/g, '-')}`,
+  legacySessionEnvironmentKey: (appId: string, runId: string) => `legacy-file:${appId}:${runId}`,
+}))
+vi.mock('../../../../src/main/apps/runtime/session-store', () => ({
+  copySessionJsonl,
+  loadChatSessionId: vi.fn(() => 'original-sdk-session'),
+  deleteChatSessionId: vi.fn(),
 }))
 vi.mock('../../../../src/main/apps/conversation-mcp', () => ({
   createHaloAppsMcpServer: vi.fn(),
 }))
 vi.mock('../../../../src/main/apps/runtime/index', () => ({
   getAppMemoryService: vi.fn().mockReturnValue(null),
+  getActivityStore: () => activityStore,
 }))
 vi.mock('../../../../src/main/apps/runtime/dispatch-inbound', () => ({
-  flushSupplementBuffer: vi.fn(),
 }))
-vi.mock('../../../../src/main/platform/memory/snapshot', () => ({
-  createMemoryStatusMcpServer: vi.fn(),
+vi.mock('../../../../src/main/services/memory-consolidation', () => ({
+  requestConsolidation: vi.fn(),
 }))
 
 // ============================================
@@ -155,9 +179,16 @@ import {
   clearAppChat,
   forkNativeChatSession,
   getAppChatConversationId,
-  buildGuestMcpServers,
 } from '../../../../src/main/apps/runtime/app-chat'
+import { filterMcpServersByPolicy } from '../../../../src/main/apps/runtime/capability-policy'
 import type { GuestPolicy } from '../../../../src/shared/types/im-channel'
+
+/** A guest is a stranger: nothing is granted unless the host said so. */
+const buildGuestMcpServers = (
+  all: Record<string, unknown>,
+  db: Record<string, unknown> | null,
+  policy?: GuestPolicy
+) => filterMcpServersByPolicy(all, db, policy, 'strict')
 
 const APP = 'target-app'
 const OTHER = 'other-app'
@@ -208,30 +239,39 @@ describe('clearAppChat trust boundary', () => {
 describe('forkNativeChatSession trust boundary', () => {
   beforeEach(() => {
     createLocalSession.mockClear()
+    resolveChatEnvironment.mockClear()
+    activityStore.pinSessionEnvironment.mockClear()
+    copySessionJsonl.mockClear()
   })
 
   it('rejects a source owned by another app', () => {
     const foreign = `${getAppChatConversationId(OTHER)}:local:direct:abc`
     expect(() => forkNativeChatSession(APP, 'space-1', foreign)).toThrow(/Invalid sourceConversationId for fork/)
     expect(createLocalSession).not.toHaveBeenCalled()
+    expect(resolveChatEnvironment).not.toHaveBeenCalled()
   })
 
   it('rejects the native default key of another app', () => {
     expect(() => forkNativeChatSession(APP, 'space-1', getAppChatConversationId(OTHER)))
       .toThrow(/Invalid sourceConversationId for fork/)
     expect(createLocalSession).not.toHaveBeenCalled()
+    expect(resolveChatEnvironment).not.toHaveBeenCalled()
   })
 
   it('rejects a non-app-chat source key', () => {
     expect(() => forkNativeChatSession(APP, 'space-1', 'random-garbage'))
       .toThrow(/Invalid sourceConversationId for fork/)
     expect(createLocalSession).not.toHaveBeenCalled()
+    expect(resolveChatEnvironment).not.toHaveBeenCalled()
   })
 
   it('allows forking from the app’s own native default session', () => {
     const result = forkNativeChatSession(APP, 'space-1', getAppChatConversationId(APP))
     expect(result.conversationId).toMatch(new RegExp(`^app-chat:${APP}:local:direct:`))
     expect(createLocalSession).toHaveBeenCalledTimes(1)
+    expect(activityStore.pinSessionEnvironment).toHaveBeenCalledWith(result.conversationId, APP, environment)
+    expect(copySessionJsonl).toHaveBeenCalledWith('/original-space', APP, expect.any(String), expect.any(String))
+    expect(createLocalSession).toHaveBeenCalledWith(APP, expect.any(String), expect.objectContaining({ pendingResumeSessionId: 'original-sdk-session' }))
   })
 
   it('allows forking from the app’s own IM session', () => {
@@ -239,6 +279,9 @@ describe('forkNativeChatSession trust boundary', () => {
     const result = forkNativeChatSession(APP, 'space-1', imKey)
     expect(result.conversationId).toMatch(new RegExp(`^app-chat:${APP}:local:direct:`))
     expect(createLocalSession).toHaveBeenCalledTimes(1)
+    expect(activityStore.pinSessionEnvironment).toHaveBeenCalledWith(result.conversationId, APP, environment)
+    expect(copySessionJsonl).toHaveBeenCalledWith('/original-space', APP, expect.any(String), expect.any(String))
+    expect(createLocalSession).toHaveBeenCalledWith(APP, expect.any(String), expect.objectContaining({ pendingResumeSessionId: 'original-sdk-session' }))
   })
 })
 
@@ -246,16 +289,14 @@ describe('buildGuestMcpServers guest MCP injection', () => {
   // The full owner MCP set as app-chat builds it before guest filtering.
   const ALL = {
     'web-search': { _: 1 },
-    'halo-memory': { _: 1 },
     'ocr': { _: 1 },
     'ai-browser': { _: 1 },
     'halo-email': { _: 1 },
   }
 
-  it('always injects filesystem-free safe MCPs (web-search, halo-memory)', () => {
+  it('always injects filesystem-free web search, without a memory MCP', () => {
     const out = buildGuestMcpServers(ALL, null, {})
-    expect(out).toHaveProperty('web-search')
-    expect(out).toHaveProperty('halo-memory')
+    expect(Object.keys(out)).toEqual(['web-search'])
   })
 
   it('does NOT inject OCR for a guest without allowOcr (reads local files)', () => {

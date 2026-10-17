@@ -1,0 +1,1566 @@
+/**
+ * Shared team types — single source of truth consumed by main + renderer.
+ * Must stay dependency-free and renderer-safe (no Node/Electron APIs).
+ */
+
+import type { CapabilityPolicy } from './capability-policy'
+import { parseTeamChatKey } from './im-keys'
+
+// ── Enumerations ──
+
+export type MemberSourcing = 'manual' | 'ai'
+export type CollabMode = 'structured' | 'free'
+export type EscalationRouting = 'user' | 'lead'
+export type TeamStatus = 'idle' | 'running' | 'waiting_user' | 'error'
+export type TaskStatus = 'pending' | 'in_progress' | 'done' | 'rejected' | 'blocked'
+export type EpochEndReason = 'completed' | 'stopped' | 'timeout' | 'error' | 'cleared'
+
+/**
+ * Execution mode of an epoch:
+ *   'run'          — a triggered one-shot run (schedule/http/webhook/file). The
+ *                    lead is woken once; quiescence (all tasks terminal + idle)
+ *                    auto-seals it.
+ *   'conversation' — a long-lived, message-driven epoch (e.g. an IM-backed team).
+ *                    Resumed per inbound message; quiescence is the normal
+ *                    "waiting for the next message" state and never auto-seals.
+ */
+export type EpochLifecycle = 'run' | 'conversation'
+
+/**
+ * Business outcome of a sealed RUN epoch, stamped at seal time (P0-4):
+ *   'output'     — the run produced at least one deliverable (task resultRef or
+ *                  finding ref).
+ *   'no_action'  — the team looked and judged nothing needed doing (quiet seal,
+ *                  no deliverables, no pending decision).
+ *   'escalation' — the run ended with a decision still waiting on the user.
+ *   'failed'     — the run was cut short (error / timeout / member unreachable).
+ * Null for conversation epochs and for runs sealed before this classification.
+ */
+export type EpochOutcome = 'output' | 'no_action' | 'escalation' | 'failed'
+
+// ── Persistent entities ──
+
+export interface Team {
+  id: string
+  name: string
+  owningSpaceId: string
+  goal: string
+  /** Null until the system provisions a lead app. */
+  leadAppId: string | null
+  memberSourcing: MemberSourcing
+  collabMode: CollabMode
+  escalationRouting: EscalationRouting
+  status: TeamStatus
+  currentEpochId: string | null
+  createdAt: number
+  updatedAt: number
+  /**
+   * Authority of this office. null = this node HOSTS the office (it is the
+   * authority). A remote node id = this is a JOINED shadow office hosted
+   * elsewhere; this node only mirrors the roster for display + relay ownership
+   * and must not edit/run it. Optional on input — the store defaults to null —
+   * and always populated on read.
+   */
+  hostNodeId?: string | null
+  /**
+   * True for a temporary space collaboration: a team the space agent assembled
+   * for one piece of work. Hidden from the Teams page and the people directory;
+   * its coordinator is the space conversation itself, not a lead app. "Save as
+   * team" clears this flag and the team becomes an ordinary persistent one.
+   */
+  ephemeral?: boolean
+  /**
+   * For an ephemeral collaboration: the space conversation acting as its
+   * coordinator. Member replies and turn-end notices are delivered into this
+   * conversation. Null for persistent teams.
+   */
+  coordinatorConversationId?: string | null
+}
+
+export interface TeamMember {
+  teamId: string
+  appId: string
+  memberName: string
+  role: string
+  isLead: boolean
+  /** Drives orphan cleanup on dissolve — only AI-sourced apps are auto-deleted. */
+  aiProvisioned: boolean
+  /** True only for the dedicated coordinator provisioned with a team. */
+  isSystemCoordinator?: boolean
+  addedAt: number
+  /**
+   * Owning node of this member. SELF_NODE_ID sentinel for a locally-owned
+   * member; a remote node id for a federated member. Optional on input — the
+   * store defaults to SELF — and always populated on read.
+   */
+  ownerNodeId?: string
+  origin?: 'local' | 'remote'
+  /** Portable owner identity (Identity.id); null for legacy/local-only members. */
+  memberIdentity?: string | null
+  /**
+   * Permission-overlay scope carried at join, stored as raw JSON so the shared
+   * type stays renderer-safe. null/undefined = default-open. The AUTHORITY
+   * parses + enforces it (contactable/visibility); the renderer treats it opaquely.
+   */
+  scopeJson?: string | null
+  /**
+   * Display name of the owning person for a remote member (the "brought by
+   * Alice" badge). Denormalized onto the member row at join/materialization so
+   * every node can label the owner from its own store — a joiner keeps no
+   * office_nodes rows for its peers, only presence projections. null for local
+   * members and for legacy rows written before the owner advertised a name.
+   */
+  ownerDisplayName?: string | null
+  /**
+   * What this member is responsible for INSIDE this team, in the owner's own
+   * words. Layered on top of the digital human's own persona, never replacing
+   * it, and scoped to this team — the same app carries a different duty in
+   * another team and none at all in its personal work. Only the owner writes it;
+   * teammates read it in full. Null/empty = nothing written yet.
+   */
+  duty?: string | null
+  /**
+   * What a TEAMMATE may make this member do, decided by its owner and enforced
+   * on the owner's own machine. Null = unrestricted (the shipped default, so an
+   * existing team behaves exactly as before). Never replicated and never shown
+   * to teammates — it protects one person's computer, so only that computer
+   * needs it.
+   */
+  delegatedPolicy?: TeamDelegatedPolicy | null
+  /**
+   * Whether this member's owner lets teammates set a periodic check on it.
+   * Derived from `delegatedPolicy` for a locally-owned member and adopted from
+   * the roster snapshot for a remote one, so any node can refuse early with a
+   * clear message instead of discovering it only at the owner. Absent = yes.
+   */
+  acceptsChecks?: boolean
+  /**
+   * Whether this member has asked its owner something and is waiting for the
+   * answer. Written by the owner (the only machine where the question can be
+   * answered) and shared with the office, so the rest of the office sees work
+   * blocked on a person rather than a member that mysteriously went quiet.
+   */
+  awaitingDecision?: boolean
+}
+
+/**
+ * The owner's answer to "what may my teammates make this digital human do".
+ * Read in permissive mode: an unset switch grants, so the switches only ever
+ * take capabilities away.
+ */
+export interface TeamDelegatedPolicy extends CapabilityPolicy {
+  /** Whether teammates may put a periodic check on this member. Unset = yes. */
+  allowChecks?: boolean
+}
+
+/** Directed collaboration edge (structured mode only). */
+export interface TeamEdge {
+  teamId: string
+  fromAppId: string
+  toAppId: string
+  sync: boolean
+}
+
+export interface BlackboardTask {
+  id: string
+  teamId: string
+  epochId: string
+  title: string
+  assigneeAppId: string | null
+  status: TaskStatus
+  /** File path to a produced artifact, not inline content. */
+  resultRef: string | null
+  note: string | null
+  parentId: string | null
+  createdByAppId: string
+  createdAt: number
+  updatedAt: number
+}
+
+export interface BlackboardFinding {
+  id: string
+  teamId: string
+  epochId: string
+  authorAppId: string
+  body: string | null
+  ref: string | null
+  createdAt: number
+}
+
+// ── Activity (what actually happened, as opposed to what state things are in) ──
+
+/**
+ * What kind of coordination act an activity row records.
+ *
+ * Reads (`team_read_board`, `team_read_artifact`) are deliberately absent: they
+ * change nothing, they are frequent, and a feed full of "X looked at the board"
+ * pushes the acts that matter off the screen.
+ */
+export type TeamActivityKind =
+  | 'message'
+  | 'reply'
+  | 'task_post'
+  | 'task_update'
+  | 'finding'
+  | 'check_set'
+  | 'check_stop'
+  | 'run_end'
+  | 'decision'
+
+/**
+ * The state an act recorded — one notion, read against the act's kind:
+ *   a message  → 'sent' (accepted for delivery) or 'undelivered' (never arrived,
+ *                which is the opposite of "no reply yet", not a flavour of it);
+ *   a reply    → how the turn the message started ended;
+ *   a task_update → the status the task was put into.
+ */
+export type TeamActivityStatus =
+  | 'sent'
+  | 'undelivered'
+  | 'ok'
+  | 'timeout'
+  | 'error'
+  | 'escalation'
+  | TaskStatus
+
+/**
+ * One recorded coordination act. Append-only: a reply is a NEW row pointing back
+ * at the message it answers (`correlationId`), never an edit of that message —
+ * so the stream stays immutable, replicates as a single idempotent insert, and
+ * needs no pre-image to roll back.
+ *
+ * The team's directed messages exist nowhere else as messages: each one only
+ * passes through the sender's transcript (as a tool argument) and the receiver's
+ * (as a turn input), on machines that may not be the same. This table is the
+ * only place the office's own record of "who contacted whom" lives.
+ */
+export interface TeamActivity {
+  id: string
+  teamId: string
+  epochId: string
+  kind: TeamActivityKind
+  /** Who acted. */
+  actorAppId: string
+  /** Who it was aimed at (message/reply/check); null for board writes. */
+  targetAppId: string | null
+  /** One line, already human-readable — what a feed row and a digest line show. */
+  subject: string
+  /** Full text, kept for detail-on-demand. Never rendered in a list or a digest. */
+  body: string | null
+  /** The task / finding / check / message id this act concerns. */
+  refId: string | null
+  /** Ties a reply to the message that caused it. */
+  correlationId: string | null
+  status: TeamActivityStatus | null
+  createdAt: number
+}
+
+// ── The record of what a borrowed turn actually did ──
+
+/**
+ * One tool call made by a digital human while someone other than its owner was
+ * driving it — what ran, or what was refused and why.
+ *
+ * Kept apart from `team_activity`, which is the OFFICE's record and replicates
+ * to every node: this is the owner's record of their own machine, so it never
+ * leaves it. The distinction is the same one the delegated policy draws — what
+ * the office needs to coordinate, versus what one person needs to see about
+ * their own computer.
+ */
+export interface TeamToolAudit {
+  id: string
+  teamId: string
+  epochId: string
+  /** The digital human that ran (or was stopped from running) the tool. */
+  appId: string
+  /** The teammate that drove this turn; null when a person was driving. */
+  actorAppId: string | null
+  /**
+   * Whether the request came from outside the owner's own people — a teammate
+   * on another machine, or a guest of an IM chat the team answers. Always true
+   * for rows written since the owner's own digital humans stopped being held to
+   * a policy; false only on older rows.
+   */
+  external: boolean
+  /** Tool name as the engine reports it (`Bash`, `mcp__ai-browser__…`). */
+  toolName: string
+  /**
+   * One line naming what the call was aimed at — the command, the path, the URL.
+   * A summary, never the full input: this is a list to scan, and a tool input
+   * can carry a file's entire contents.
+   */
+  detail: string
+  decision: 'allowed' | 'denied'
+  /** Why it was refused. Null when it ran. */
+  reason: string | null
+  createdAt: number
+}
+
+/** Tool detail lines are scanned in a list, so they stay to one short line. */
+export const TEAM_AUDIT_DETAIL_MAX = 160
+
+/** Subject lines are one line and short — a feed row, not a preview pane. */
+export const TEAM_ACTIVITY_SUBJECT_MAX = 80
+
+/** Collapse a message body to a single readable subject line. */
+export function toActivitySubject(text: string, max = TEAM_ACTIVITY_SUBJECT_MAX): string {
+  const firstLine = text.split('\n').find((l) => l.trim().length > 0)?.trim() ?? ''
+  const collapsed = firstLine.replace(/\s+/g, ' ')
+  return collapsed.length > max ? `${collapsed.slice(0, max - 1)}…` : collapsed
+}
+
+export interface TeamWorkItem {
+  entryAppId?: string | null
+  id: string
+  teamId: string
+  title: string | null
+  status: 'open' | 'completed'
+  createdBy: string | null
+  createdAt: number
+  updatedAt: number
+}
+
+export interface TeamEpoch {
+  /** Business metadata projected from this epoch; its id equals the epoch id. */
+  workItem?: TeamWorkItem
+
+  id: string
+  teamId: string
+  startedAt: number
+  endedAt: number | null
+  endReason: EpochEndReason | null
+  summary: string | null
+  /** Execution mode; defaults to 'run' for rows created before migration v3. */
+  lifecycle: EpochLifecycle
+  /**
+   * For 'conversation' epochs: the chat this epoch serves, so each IM chat gets
+   * its own long-lived epoch (independent context). Format is opaque to the
+   * store; dispatch uses `${instanceId}:${chatId}`. Null for 'run' epochs.
+   */
+  chatKey?: string | null
+  /**
+   * User-facing name of a conversation epoch (the session list label). Null →
+   * the label is derived (IM chat name / member name / first-message digest).
+   */
+  title?: string | null
+  /** Outcome classification of a sealed run epoch (see {@link EpochOutcome}). */
+  outcome?: EpochOutcome | null
+  /** What started a run epoch (mirrors team_epochs.trigger_type). */
+  triggerType?: TeamRunTriggerType
+  /**
+   * When a turn last entered this epoch. A conversation outlives its creation by
+   * weeks, so this — not `startedAt` — is how recent it actually is. Falls back
+   * to `startedAt` for rows written before migration v11.
+   */
+  lastActivityAt?: number
+}
+
+// ── Periodic checks (member-level recurring wake, scoped to one epoch) ──
+
+/**
+ * A standing instruction one member left for another: "from now on, every N,
+ * take a look at this". It exists only while the thing it belongs to (a run or
+ * a conversation) is open, and any member — or the user — can stop it.
+ *
+ * The alarm itself lives on the machine that OWNS the target member, so the
+ * person who set it can shut their computer without stopping it, and a target
+ * whose owner is away simply does not wake (which is the honest outcome — that
+ * digital human could not have done the work either).
+ *
+ * The row is office-shared: it rides the same replication plane as the board, so
+ * every node — and every teammate's `team_read_board` — sees the same list.
+ */
+export interface TeamCheck {
+  id: string
+  teamId: string
+  epochId: string
+  targetAppId: string
+  /** The member that asked for it (self-checks are allowed). */
+  createdByAppId: string
+  /** Verbatim standing instruction, delivered on every wake. */
+  instruction: string
+  /**
+   * The restricted turn that set this check served a request from outside, so
+   * the wakes it causes serve that request too — a local creator does not
+   * launder it into the owner's. A replicated row's value is a claim by the
+   * machine that wrote it and only ever narrows (see `checks.ts`).
+   */
+  origin?: TeamRequestOrigin
+  schedule: TeamCheckSchedule
+  runCount: number
+  createdAt: number
+  updatedAt: number
+  lastRunAt: number | null
+}
+
+/**
+ * Same expressive range as a digital human's own scheduled work, deliberately —
+ * a check IS scheduled work, just aimed at a teammate. It mirrors the platform
+ * scheduler's `Schedule` rather than importing it, because this file has to stay
+ * renderer-safe and the scheduler is a main-process module.
+ */
+export type TeamCheckSchedule =
+  | { kind: 'every'; every: string }
+  | { kind: 'cron'; cron: string; timezone?: string }
+  | { kind: 'once'; once: number }
+
+/**
+ * A check as shown to a person or read by an agent: ids resolved to member
+ * names on the producing side, so neither a board nor a panel has to look them
+ * up. `reachable` is false when the target's owner is offline — the check is
+ * still set, but it will not fire until they are back.
+ */
+export interface TeamCheckView {
+  id: string
+  epochId: string
+  targetAppId: string
+  targetMemberName: string
+  createdByMemberName: string
+  instruction: string
+  schedule: TeamCheckSchedule
+  runCount: number
+  lastRunAt: number | null
+  reachable: boolean
+  /** Display name of the person whose machine runs it; null when it is yours. */
+  targetOwner?: string | null
+}
+
+// ── Conversations (office-shared session objects) ──
+
+/**
+ * Kind of a team conversation, derived from its chatKey namespace:
+ *   'native' — created in the Halo UI ("New session"), user ↔ team (lead).
+ *   'im'     — an inbound IM chat handled by the team (read-only in Halo).
+ *   'member' — a 1:1 side-thread with a specific teammate (member direct chat).
+ *   'run'    — one execution of the team's goal.
+ *   'collab' — the one conversation a temporary space collaboration works in,
+ *              coordinated by the space conversation that assembled the team.
+ *              A collaboration has exactly this conversation and cannot open
+ *              another, so a reader that finds it has found the whole room.
+ */
+export type TeamConversationKind = 'native' | 'im' | 'member' | 'run' | 'collab'
+
+/**
+ * A renderer-facing projection of one open conversation epoch. Labels are
+ * resolved on the MAIN side (the down-send generates the human name; the
+ * renderer performs zero translation). The list is office-shared: every node
+ * sees the same conversations because the epochs replicate.
+ */
+export interface TeamConversation {
+  workItemId?: string
+  completed?: boolean
+  createdByMe?: boolean
+  involvedMe?: boolean
+  triggerType?: TeamRunTriggerType
+  summary?: string | null
+  artifactCount?: number
+
+  epochId: string
+  teamId: string
+  kind: TeamConversationKind
+  /** Human label: title, IM chat name, or the member's name. */
+  label: string
+  /** True when Halo can only watch (IM chats are answered in the IM app). */
+  readonly: boolean
+  /** For kind='member': the teammate this thread belongs to. */
+  memberAppId?: string
+  /** IM channel type for kind='im' (e.g. 'wecom-bot'), for the badge. */
+  channel?: string
+  startedAt: number
+  /** When a turn last entered it — how recent this thread actually is. */
+  lastActivityAt: number
+  /** True while a member is actively serving this conversation right now. */
+  active?: boolean
+  /** True when a decision inside this conversation is waiting on any teammate. */
+  waitingUser?: boolean
+  /** True only when this machine's user can answer the waiting decision. */
+  waitingForMe?: boolean
+  /** Members whose owners currently owe a decision in this task. */
+  waitingMemberAppIds?: string[]
+}
+
+/** One busy assignment of a member: which thing it is serving, with a label. */
+export interface RosterBusyEntry {
+  epochId: string
+  label: string
+  kind: EpochLifecycle
+}
+
+/** A decision waiting on the user, aggregated per team (survives run seal). */
+export interface TeamPendingEscalation {
+  entry?: import('./app-types').ActivityEntry
+  appId: string
+  memberName: string
+  entryId: string
+  question: string
+  epochId?: string
+  taskId?: string
+}
+
+// ── Where a request came from ──
+
+/**
+ * Who set a team turn in motion, when it was not the owner's own machine.
+ * Absent = the owner's own: the owner, their digital humans on this machine, or
+ * the runtime waking one of them.
+ *
+ *   'colleague' — it entered this machine from another one (an office wake, a
+ *                 person's 1:1 from another machine). Held to the member's
+ *                 delegated policy, where an unsaved one, or one granting
+ *                 everything, withholds nothing.
+ *   'guest'     — a guest of an IM chat a team member fronts. Held to the
+ *                 member's delegated policy, where silence refuses.
+ */
+export type TeamRequestOrigin = 'colleague' | 'guest'
+
+/**
+ * What a record written before origins had kinds stands for, given the piece of
+ * work it belongs to. Its `external: true` covered both kinds, and a guest's
+ * request never leaves the conversation of the IM chat it came from, so one in
+ * such a conversation — or in one that cannot be found — is a guest's, and any
+ * other a colleague's.
+ */
+export function legacyExternalOrigin(epoch: Pick<TeamEpoch, 'chatKey'> | null | undefined): TeamRequestOrigin {
+  if (!epoch) return 'guest'
+  return epoch.chatKey && parseTeamChatKey(epoch.chatKey) ? 'guest' : 'colleague'
+}
+
+// ── Runtime-only structures (not persisted) ──
+
+/** In-memory message envelope used by the Message Bus. */
+export interface TeamEnvelope {
+  id: string
+  teamId: string
+  epochId: string
+  /** Null when a person wrote it: no digital human is behind the message. */
+  fromAppId: string | null
+  toAppId: string
+  body: string
+  correlationId: string
+  taskRef?: string
+  createdAt: number
+}
+
+/** Per-turn context injected by the Bus when waking a member. Transparent to the LLM. */
+export interface TeamTriggerContext {
+  teamId: string
+  epochId: string
+  correlationId: string
+  /**
+   * The teammate this turn came from. Null when no digital human is behind it:
+   * a run start, a person's message or a self-wake. The office record and the
+   * circuit budget both key on it.
+   */
+  fromAppId: string | null
+  /**
+   * Someone is holding a completion receipt for this turn. Only a non-agent
+   * caller sets it (a person's cross-machine 1:1 chat); it changes nothing about
+   * how the turn runs or what the member is told.
+   */
+  wait: boolean
+  taskId?: string
+  /**
+   * Drives inbound header rendering. 'periodic_check', 'human_message' and
+   * 'member_stopped' are delivered verbatim — the first and last carry their own
+   * header, and the middle one is a person's words, which no teammate framing
+   * may impersonate.
+   */
+  kind?: 'run_start' | 'message' | 'periodic_check' | 'human_message' | 'member_stopped'
+  /**
+   * Position of this turn in the chain that caused it; the circuit breaker's
+   * `maxForwardDepth` counts it. Must travel with the trigger — a chain that
+   * restarts at 0 on every hop never reaches the limit.
+   */
+  forwardDepth?: number
+  /**
+   * Who set THIS turn in motion, when it was not the owner's own machine — read
+   * per turn, never remembered for the next one. It decides what the turn may
+   * do (`app-chat`) and is the only thing that does.
+   *
+   * Stamped where a request crosses into this node — an inbound office wake, the
+   * office-credential 1:1 endpoint, a guest's IM message. From there it travels
+   * only on what a RESTRICTED turn itself sets in motion: the checks it sets,
+   * the question it asks, and — a guest's only — its `team_send`s. A turn
+   * running with the owner's full reach hands nothing on, and neither does any
+   * other runtime wake — except the notice reporting a guest's turn, for that
+   * one wake.
+   *
+   * A value arriving on the wire is the sender's claim: it is honored only when
+   * it narrows ('guest'), and otherwise replaced by 'colleague'. An older
+   * build's `external` mark is read through {@link legacyExternalOrigin}.
+   */
+  origin?: TeamRequestOrigin
+  /**
+   * The facts a turn-end notice reports, sent with the notice to a lead on
+   * another machine so that machine renders the notice itself. A notice is the
+   * runtime's own report, not anyone's request, so it carries no colleague's
+   * standing — which only holds while its words are the runtime's: a notice
+   * arriving without readable facts is handled as any other message from that
+   * machine.
+   */
+  turnEnded?: TeamTurnEndReport
+  /**
+   * A person's own 1:1 chat that crossed from another machine. Its `kind` is
+   * normalized to 'message' on arrival (the peer wrote it, so it buys no
+   * verbatim framing or owner reading); this only keeps the turn out of the
+   * lead's turn reports, as the same chat on one machine is. Reporting only.
+   */
+  personalChat?: boolean
+}
+
+/**
+ * How a member's turn ended, in the only vocabulary the system can prove. There
+ * is deliberately no `completed`: nothing here can see whether the work is done.
+ */
+export type MemberTurnFate =
+  | { kind: 'ended' }
+  | { kind: 'error'; message: string }
+  | { kind: 'timeout' }
+  /** The wake never became a turn — so nothing about the member was observed. */
+  | { kind: 'never_ran'; reason: string }
+  /**
+   * A person stopped it by hand (the renderer/HTTP stop action) — never a
+   * failure to chase. Distinct from `error`: a hard stop lands in the same
+   * unconditional-reject path a crash does, so without this the lead would
+   * be sent after a teammate that was deliberately interrupted.
+   */
+  | { kind: 'stopped' }
+
+/** One member's ending, as a turn-end notice reports it (see `team/turn-report.ts`). */
+export interface TeamTurnEnding {
+  memberName: string
+  fate: MemberTurnFate
+  /**
+   * What the member filed during the turn; null when the turn was not watched
+   * end to end — "recorded nothing" and "not observed" are different claims.
+   */
+  did: string[] | null
+  requestSummary?: string
+  finalReply?: string
+}
+
+export interface TeamTurnEndReport {
+  endings: TeamTurnEnding[]
+  /** Endings dropped from a notice that grew too long, counted rather than lost. */
+  dropped: number
+}
+
+export interface TeamContext {
+  teamId: string
+  epochId: string
+  taskId?: string
+  /**
+   * The restricted turn that asked the question served a request from outside.
+   * Persisted with the question so the turn its answer resumes — possibly after
+   * a restart — serves that request too.
+   */
+  origin?: TeamRequestOrigin
+  /**
+   * Written by builds before origins had kinds; read through
+   * {@link legacyExternalOrigin}.
+   */
+  external?: boolean
+}
+
+// ── Triggers ──
+
+/**
+ * A team is triggerable the same ways a single digital human is. 'schedule'
+ * maps to a scheduler job; 'webhook' | 'file' | 'wecom' map to EventRouter
+ * subscriptions (same multi-subscriber path the app runtime uses). All share the
+ * team_triggers table — adding one needs no migration.
+ */
+export type TeamTriggerSourceType = 'schedule' | 'webhook' | 'file' | 'wecom'
+
+/** Config for a 'schedule' trigger (mirrors the platform scheduler). */
+export interface TeamScheduleConfig {
+  every?: string
+  cron?: string
+}
+
+/** Config for a 'webhook' trigger. Field names mirror the app WebhookSourceConfig. */
+export interface TeamWebhookConfig {
+  /** Path segment under POST /hooks/* this team listens on. */
+  path?: string
+  /** Optional HMAC secret used by the WebhookSource to verify signatures. */
+  secret?: string
+}
+
+/** Config for a 'file' trigger. Field names mirror the app FileSourceConfig. */
+export interface TeamFileConfig {
+  /** Glob matched against the changed file's relative path, e.g. "*.csv". */
+  pattern?: string
+  /** Directory substring the changed file's absolute path must contain. */
+  path?: string
+}
+
+/** Config for a 'wecom' trigger. Field names mirror the app WecomSourceConfig. */
+export interface TeamWecomConfig {
+  /** Chat id to match; omitted = any inbound WeCom message. */
+  chatId?: string
+}
+
+/** Discriminated config union for a team trigger, by sourceType. */
+export type TeamTriggerConfig =
+  | TeamScheduleConfig
+  | TeamWebhookConfig
+  | TeamFileConfig
+  | TeamWecomConfig
+
+export interface TeamTrigger {
+  id: string
+  teamId: string
+  sourceType: TeamTriggerSourceType
+  config: TeamTriggerConfig | Record<string, unknown>
+  enabled: boolean
+  createdAt: number
+}
+
+export interface TeamTriggerInput {
+  sourceType: TeamTriggerSourceType
+  config: TeamTriggerConfig | Record<string, unknown>
+  enabled?: boolean
+}
+
+export type TeamRunTriggerType = 'manual' | 'schedule' | 'http' | 'event'
+
+/** Distinct from TeamTriggerContext, which is the per-turn envelope inside an epoch. */
+export interface TeamRunTrigger {
+  type: TeamRunTriggerType
+  triggerId?: string
+}
+
+// ── Roster projection (derived, not persisted) ──
+
+export type TeamMemberRuntimeStatus = 'working' | 'idle' | 'error' | 'waiting_user'
+
+/**
+ * Reachability of a teammate, orthogonal to its activity status. Derived from the
+ * federation presence FSM: 'online' = the owner is reachable (a local member is
+ * always online); 'offline' = the owner is confirmed unreachable. Deliberately
+ * two-valued — the FSM's transient 'suspect' maps to 'online' so a brief network
+ * flap never makes a teammate look gone (and never provokes a needless reassign).
+ */
+export type TeamMemberPresence = 'online' | 'offline'
+
+export interface RosterMember {
+  appId: string
+  memberName: string
+  role: string
+  /** What this member is responsible for in this team, in its owner's words. */
+  duty?: string | null
+  isLead: boolean
+  spaceId: string | null
+  status: TeamMemberRuntimeStatus
+  currentTaskTitle?: string
+  /**
+   * Display name of the person who owns/brought this teammate. Null when the
+   * member runs on THIS machine (owned by you). Lets a teammate reason about
+   * "whose digital human this is" for coordination and accountability.
+   */
+  owner?: string | null
+  /**
+   * True when this member runs on the same machine as the reader (shared
+   * filesystem). False when it runs on a teammate's machine — a local file path
+   * produced here is NOT readable there, so deliverables must be published as
+   * team artifacts / findings instead of passed as bare paths.
+   */
+  sameMachine?: boolean
+  /** Reachability (see {@link TeamMemberPresence}). Absent → treat as online. */
+  presence?: TeamMemberPresence
+  /**
+   * Everything this member is serving RIGHT NOW (a run and/or conversations),
+   * each with a human label generated on the producing side (P0-2). Lets a
+   * board focused on one thing say "busy with another conversation" truthfully.
+   */
+  busy?: RosterBusyEntry[]
+}
+
+export interface BlackboardSnapshot {
+  tasks: BlackboardTask[]
+  findings: BlackboardFinding[]
+  roster: RosterMember[]
+  /** Periodic checks currently running in this epoch, so anyone can stop one. */
+  checks: TeamCheckView[]
+  /**
+   * What has happened in this epoch, newest last. Distinct from the lists above:
+   * those are current state, this is the record of the acts that produced it —
+   * including the directed messages, which no other table holds.
+   */
+  activities: TeamActivity[]
+}
+
+// ── Joined-office materialization (host → joiner roster projection) ──
+
+/**
+ * One member of a joined office as supplied to the store for materialization.
+ * `ownerNodeId` is ABSOLUTE (the true owning node id, never the SELF sentinel);
+ * the store remaps it to SELF-relative for the receiving node. Structurally a
+ * superset-compatible mirror of the federation RosterMemberSnap wire shape so
+ * the manager can pass a roster frame's member straight through.
+ */
+export interface JoinedOfficeMemberSnap {
+  appId: string
+  memberName: string
+  role: string
+  /**
+   * The member's team duty as the authority knows it. A node keeps its OWN
+   * members' duty (the owner writes it, and their edit may not have reached the
+   * authority yet) and adopts this value for everyone else's.
+   */
+  duty?: string | null
+  /**
+   * Whether this member's owner lets teammates put a periodic check on it. Only
+   * this one bit of the owner's policy travels — enough for another node to
+   * refuse early with a clear message; the policy itself never leaves its owner.
+   */
+  acceptsChecks?: boolean
+  isLead: boolean
+  ownerNodeId: string
+  memberIdentity: string | null
+  /** Owner's display name, persisted for the badge on nodes without peer node rows. */
+  ownerDisplayName?: string | null
+  /**
+   * The member's live runtime status on the authority, so a joiner's topology
+   * animates the working pulse in step with the host. Authority-local
+   * (idle/working/waiting_user/error) and transient — never persisted as a
+   * column; the joiner overlays it onto the rendered roster. Absent → 'idle'.
+   */
+  status?: TeamMemberRuntimeStatus
+  /** Title of the task a working member is on, for the node summary. */
+  currentTaskTitle?: string
+  /** Live busy assignments with authority-generated labels (see RosterBusyEntry). */
+  busy?: RosterBusyEntry[]
+}
+
+/**
+ * The roster projection a joiner materializes into its local store as a shadow
+ * office. Renderer-safe and federation-free so apps/team owns no upward import;
+ * the federation RosterSnapshot is structurally compatible and passed through.
+ */
+export interface JoinedOfficeSnapshot {
+  team: {
+    id: string
+    name: string
+    goal: string
+    leadAppId: string | null
+    collabMode: CollabMode
+    /** The host's own node id — the authority of this office (persisted as the shadow office's host_node_id). */
+    hostNodeId: string
+    /**
+     * The office's currently-open run epoch, if any. Persisted as the shadow
+     * office's current_epoch_id so a joiner can bind the live run from its own
+     * store (e.g. after a refresh), not only from the in-memory join.
+     */
+    epochId?: string
+    /**
+     * The office's live run status on the authority (idle/running/...), so a
+     * joiner's run banner reflects "running" the moment the host starts a run.
+     * Persisted as the shadow office's status. Absent → 'idle'.
+     */
+    status?: TeamStatus
+  }
+  members: JoinedOfficeMemberSnap[]
+  edges: Array<{ fromAppId: string; toAppId: string }>
+}
+
+// ── Tool I/O shapes (MCP server "halo-team") ──
+
+export interface TeamSendInput {
+  to: string
+  message: string
+  purpose?: 'update' | 'result'
+}
+export interface TeamSendAsyncResult {
+  messageId: string
+  /**
+   * What happened to the send. Nothing is ever auto-delivered back, so this
+   * receipt is all the sender learns:
+   *   - 'undelivered' the target's owner was offline/unreachable at send time.
+   *                   There is no offline outbox, so it will NOT arrive later.
+   *   - 'queued'      the target is mid-turn and the message waits in its
+   *                   mailbox, to be read after that turn ends.
+   *                   Only knowable for a locally-owned target — a remote one
+   *                   queues on its OWNER, so it reads as a plain hand-over.
+   *   - 'mid_turn'    the target is mid-turn and the message went INTO that
+   *                   turn: they see it at their next step rather than after
+   *                   finishing. Nothing was interrupted, and no turn started
+   *                   for this message, so any answer still comes as their own
+   *                   `team_send`.
+   * Absent → handed over to the target's session now.
+   */
+  delivery?: 'undelivered' | 'queued' | 'mid_turn'
+  /**
+   * The target runs on another machine, so nothing here can say it actually
+   * started: the message was accepted for its owner's machine, and whether that
+   * machine woke the member is only knowable there. Callers must not report a
+   * remote hand-over as "delivered" — a lead told that waited 75 minutes on a
+   * member that never ran, with no way to tell waiting from never-arrived.
+   */
+  remoteTarget?: boolean
+}
+/**
+ * Receipt for a send that waited on the woken turn's ending. Not reachable from
+ * `team_send` — only a person's cross-machine 1:1 chat asks for one, so its UI
+ * can distinguish "sent" from "never arrived".
+ */
+export interface TeamSendSyncResult {
+  from: string
+  message: string
+  /**
+   * Delivery truth, so a non-delivery is never mistaken for a real (empty) reply:
+   *   - 'ok'          the turn ran and reported back (message may still be empty).
+   *   - 'queued'      the target was mid-turn; the message is in its mailbox and
+   *                   will be delivered when that turn ends. Nothing failed, and
+   *                   no reply is coming on THIS call — the completion that would
+   *                   answer it belongs to a turn this message did not start.
+   *   - 'mid_turn'    the target was mid-turn and the message went into that
+   *                   turn, so they are reading it now. Like 'queued' it starts
+   *                   no turn of its own, hence no reply on THIS call.
+   *   - 'timeout'     it was reachable but did not finish within the wait window.
+   *   - 'undelivered' the wake never reached the owner (offline/unreachable) or no
+   *                   completion signal ever came back — definitively NOT a reply.
+   * This is the seam the durable feed outbox later feeds (delivered/pending/failed).
+   */
+  status: 'ok' | 'queued' | 'mid_turn' | 'timeout' | 'undelivered'
+}
+
+export interface TeamPostTaskInput {
+  title: string
+  assignee: string
+  parentId?: string
+}
+export interface TeamPostTaskResult {
+  taskId: string
+}
+
+export interface TeamUpdateTaskInput {
+  taskId: string
+  status: TaskStatus
+  resultRef?: string
+  note?: string
+}
+
+export interface TeamPostFindingInput {
+  content?: string
+  ref?: string
+}
+export interface TeamPostFindingResult {
+  findingId: string
+}
+
+export interface TeamReadBoardFilter {
+  mine?: boolean
+  status?: TaskStatus
+}
+
+// ── Service-layer inputs ──
+
+export interface TeamMemberInput {
+  appId: string
+  memberName?: string
+  role?: string
+  duty?: string
+  /**
+   * What people on other computers may make it do here, chosen as it is added.
+   * Omitted: read-only once the team reaches another computer, unset before
+   * then (the first invite sets every member at once).
+   */
+  delegatedPolicy?: TeamDelegatedPolicy
+}
+
+/**
+ * What the owner of a member may change about it inside one team. Omitted
+ * fields are left alone; only the node that owns the member may apply this.
+ */
+export interface UpdateTeamMemberInput {
+  duty?: string
+  delegatedPolicy?: TeamDelegatedPolicy | null
+}
+
+export interface CreateTeamInput {
+  name: string
+  goal: string
+  owningSpaceId: string
+  memberSourcing: MemberSourcing
+  collabMode: CollabMode
+  escalationRouting: EscalationRouting
+  members?: TeamMemberInput[]
+  leadAppId?: string | null
+}
+
+export interface UpdateTeamInput {
+  name?: string
+  goal?: string
+  memberSourcing?: MemberSourcing
+  collabMode?: CollabMode
+  escalationRouting?: EscalationRouting
+  leadAppId?: string | null
+}
+
+export interface ProposedMember {
+  memberName: string
+  role: string
+  responsibility: string
+}
+
+export const AI_MEMBER_HARD_LIMIT = 5
+
+// ── Renderer aggregates (team.store projections) ──
+
+/**
+ * A team member whose digital human runs on THIS machine — the only members a
+ * node can drive directly (a remote member's app is not installed here).
+ */
+export interface TeamLocalMember {
+  appId: string
+  memberName: string
+  isLead: boolean
+  isSystemCoordinator?: boolean
+}
+
+export interface TeamListItem {
+  id: string
+  name: string
+  status: TeamStatus
+  memberCount: number
+  hasWaitingUser: boolean
+  /** How many decisions are waiting on the user (drives the "N waiting" badge). */
+  waitingCount?: number
+  /**
+   * Surfaced so the renderer can hide lead apps from the digital-humans list
+   * (leads are an internal coordination role, not standalone humans).
+   */
+  leadAppId: string | null
+  /**
+   * Members of this team that run on this machine, lead first. Lets a picker
+   * offer "team → member" targets (e.g. binding an IM channel to one teammate)
+   * without a detail fetch per team — the roster is already read here for
+   * `memberCount`.
+   */
+  localMembers: TeamLocalMember[]
+  /**
+   * Set when this office is hosted by another node — this reader joined it.
+   * `hostNodeId != null` is the established "did I join this, or do I own
+   * it" check, repeated as-is across renderer (`isJoined`/`readOnly` in
+   * SettingsTab/LiveTab/TeamView) and main (`apps/team/service.ts`,
+   * `location-aware-blackboard.ts`'s OWNED/SHADOW split).
+   */
+  hostNodeId?: string | null
+  /** True for a temporary space collaboration (hidden from the Teams page). */
+  ephemeral?: boolean
+  updatedAt: number
+}
+
+export interface TeamDetail {
+  team: Team
+  members: TeamMember[]
+  edges: TeamEdge[]
+  roster: RosterMember[]
+  tasks: BlackboardTask[]
+  findings: BlackboardFinding[]
+  /** The office's own record of what happened, newest last (see TeamActivity). */
+  activities?: TeamActivity[]
+  /**
+   * Decisions currently waiting on the user, persisted in the members' activity
+   * feeds — they survive a run seal (P0-5) and drive the cross-tab banner.
+   */
+  pendingEscalations?: TeamPendingEscalation[]
+  /** Periodic checks running across this office's open runs and conversations. */
+  checks?: TeamCheckView[]
+  /**
+   * The epoch `tasks`/`findings`/`activities` were read from; null when no board
+   * is open. A board event for any other epoch does not belong to this view.
+   */
+  boardEpochId?: string | null
+  /**
+   * Whether this team reaches another computer: it was joined from one, has a
+   * member from one, or an invite to it was ever created. Until then an unset
+   * delegated policy is nobody's concern; from then on each member of yours
+   * holds one you chose.
+   */
+  crossesMachines?: boolean
+}
+
+export interface TeamEpochSummary {
+  id: string
+  startedAt: number
+  /** When a turn last entered it — the sort key for a list of work. */
+  lastActivityAt: number
+  endedAt: number | null
+  endReason: EpochEndReason | null
+  summary: string | null
+  taskCount: number
+  doneCount: number
+  lifecycle: EpochLifecycle
+  /** Human label for a conversation epoch (main-side resolved); null for runs. */
+  label?: string | null
+  outcome?: EpochOutcome | null
+  triggerType?: TeamRunTriggerType
+  /** Count of files the run produced (task resultRefs + finding refs, deduped). */
+  artifactCount?: number
+}
+
+export interface EpochBoard {
+  epoch: TeamEpoch
+  tasks: BlackboardTask[]
+  findings: BlackboardFinding[]
+  members: TeamMember[]
+  /** What happened during this run/conversation, newest last. */
+  activities?: TeamActivity[]
+}
+
+/**
+ * A produced file/folder. Renderer-safe mirror of the services `Artifact` shape
+ * so both the team service (producer) and the renderer (consumer) share one
+ * contract; structurally identical to the renderer `Artifact` type so it can be
+ * passed straight to the shared ArtifactCard.
+ */
+export interface TeamArtifact {
+  id: string
+  spaceId: string
+  conversationId: string
+  name: string
+  type: 'file' | 'folder'
+  path: string
+  relativePath: string
+  extension: string
+  icon: string
+  createdAt: string
+  preview?: string
+  size?: number
+}
+
+/** Files produced by one member during a run, grouped for the team artifacts view. */
+export interface TeamArtifactGroup {
+  appId: string
+  memberName: string
+  spaceId: string | null
+  /**
+   * The run these files belong to. Carried rather than left to the caller: a
+   * listing requested without an epoch resolves one here, and opening a file
+   * has to name the same run the listing used.
+   */
+  epochId: string
+  artifacts: TeamArtifact[]
+}
+
+/**
+ * Why a shared file could not be opened. The renderer writes the sentence, so
+ * the reason crosses as a code — the main process holds no translations.
+ */
+export type TeamArtifactOpenFailure = 'not-found' | 'ambiguous' | 'unreachable' | 'unavailable' | 'too-large' | 'error'
+
+/** Outcome of opening a shared file, whichever machine produced it. */
+export interface TeamArtifactOpenResult {
+  ok: boolean
+  ref: string
+  /** Absolute path on THIS machine. Present when ok. */
+  path?: string
+  /** Owner display name when the file came from another machine; null when local. */
+  owner?: string | null
+  /** True when `path` is a read-only copy of a teammate's file, not the file itself. */
+  copied?: boolean
+  /**
+   * The copy is a kind of file the OS would run rather than display. Show it
+   * in its folder instead of opening it: a click on a shared file must never
+   * execute what someone else's digital human produced.
+   */
+  revealOnly?: boolean
+  reason?: TeamArtifactOpenFailure
+}
+
+// ── Space collaboration projection (renderer card + space agent status) ──
+
+export interface CollabMemberSummary {
+  appId: string
+  memberName: string
+  role: string
+  status: TeamMemberRuntimeStatus
+  /** Title of the board task this member is currently on, when one is open. */
+  currentTaskTitle?: string
+}
+
+/** The ephemeral collaboration bound to one space conversation, compactly. */
+export interface CollabSummary {
+  teamId: string
+  name: string
+  goal: string
+  epochId: string
+  /** False once the collaboration epoch is sealed (work finished). */
+  active: boolean
+  /** True once the user kept this team ("save as team"). */
+  saved: boolean
+  members: CollabMemberSummary[]
+}
+
+// ── Observability event payloads ──
+
+/**
+ * What a `team:updated` changed, so a listener reloads only that. 'status' is
+ * the office row alone (carried on the event); 'members' the roster, members and
+ * edges; 'board' the open board's tasks, findings, activity and checks; 'epochs'
+ * the run history; 'conversations' the task list.
+ */
+export type TeamUpdatedChange = 'status' | 'members' | 'board' | 'epochs' | 'conversations'
+
+export interface TeamUpdatedEvent {
+  teamId: string
+  team?: Team
+  /** Absent → treat everything as changed (every emitter predating the hint). */
+  changed?: TeamUpdatedChange[]
+  /**
+   * The office's status as a viewer observes it, which `team.status` is not:
+   * that field is the persisted RUN status and knows nothing about a member
+   * working outside a run. A listener that refreshes its row from `team.status`
+   * alone resets a working office back to idle — prefer this when present.
+   */
+  liveStatus?: TeamStatus
+  removed?: boolean
+  /**
+   * Why the office left this node's list. Only set for a removal the user did NOT
+   * initiate, so the renderer can tell them (vs staying silent for a self leave /
+   * self dissolve). 'dissolved-remote' = the host closed an office this node joined.
+   */
+  removedReason?: 'dissolved-remote'
+  /**
+   * Set when the office host removed a member THIS node brought — a kick the
+   * local user did not initiate, so the renderer tells them instead of the row
+   * silently vanishing. Name is best-effort (the local mirror may have already
+   * converged past the removed row).
+   */
+  memberKicked?: { appId: string; memberName?: string }
+  /**
+   * Set when an optimistic board write of this node could not be confirmed by
+   * the office authority and was rolled back — the renderer tells the user a
+   * recent board update did not stick (and refetches the open board).
+   */
+  boardWriteDiscarded?: boolean
+}
+
+export interface TeamBlackboardEvent {
+  teamId: string
+  epochId: string
+  kind: 'task' | 'finding' | 'activity'
+  task?: BlackboardTask
+  finding?: BlackboardFinding
+  activity?: TeamActivity
+}
+
+export interface TeamMessageEvent {
+  teamId: string
+  epochId: string
+  fromAppId: string
+  toAppId: string
+  fromMemberName: string
+  toMemberName: string
+  messageId: string
+  ts: number
+}
+
+/** One node's reachability within an office, as projected by the federation FSM. */
+export interface TeamPresenceNode {
+  nodeId: string
+  /** Portable owner identity (Identity.id) of the node. */
+  identity: string
+  /** Human-readable owner name; null until the node advertises one. */
+  displayName: string | null
+  status: 'online' | 'suspect' | 'offline'
+  lastSeen: number
+}
+
+/** Office-scoped presence frame (teamId === officeId). */
+export interface TeamPresenceEvent {
+  teamId: string
+  nodes: TeamPresenceNode[]
+}
+
+/**
+ * Office-level liveness signal, distinct from the persisted run TeamStatus. It is
+ * a transient overlay describing whether the office is currently reachable:
+ *   'paused'   — the office is resting (e.g. the person who runs it stepped away);
+ *                work picks back up when someone is online again.
+ *   'resumed'  — the office reconnected and is live again.
+ *   'authority-changed' — coordination quietly moved between machines; surfaced
+ *                the same calm way as a reconnect (no user action needed).
+ *   'access-lost' — this machine's membership was refused on re-entry;
+ *                reconnecting alone cannot fix it, the user needs a fresh invite.
+ *   'update-required' — the office runs another Halo version; this machine (or
+ *                the host) must update before it can rejoin.
+ * The renderer maps each kind to humanized, location-free copy; the wire kind
+ * itself is code-only and never shown to a user.
+ */
+export type TeamOfficeStatusKind = 'paused' | 'resumed' | 'authority-changed' | 'access-lost' | 'update-required'
+
+/**
+ * Resolved once a join/re-join is refused as VERSION_INCOMPATIBLE: which side
+ * is actually behind, so the toast tells the right person what to do.
+ *   'self' — this machine's Halo is the one behind; checking for updates helps.
+ *   'peer' — the team's current host is behind, including a host too old to
+ *            report its version; `peerName` is that person's display name from
+ *            this node's last-synced roster, null when unknown. Checking for
+ *            updates on THIS machine cannot help, so no action is offered.
+ */
+export interface TeamVersionMismatch {
+  direction: 'self' | 'peer'
+  peerName?: string | null
+}
+
+export interface TeamOfficeStatusEvent {
+  teamId: string
+  kind: TeamOfficeStatusKind
+  /** Present only when kind is 'update-required'. */
+  versionMismatch?: TeamVersionMismatch
+}
+
+// ── Name constants (frozen — do not rename) ──
+
+/**
+ * The team MCP server name, and also the id of the space-side toolset (the
+ * broker keys its server record by toolset id, so the two are the same string
+ * by construction). Both packagings of the server share it — see
+ * `conversation-mcp/team-mcp.ts`.
+ */
+export const TEAM_MCP_SERVER_NAME = 'halo-team'
+
+/** Sentinel owner-node id for a locally-owned team member (not federated). */
+export const SELF_NODE_ID = 'SELF'
+
+/**
+ * Undelivered reason for a remote turn this node stopped waiting on because it
+ * is shutting its federation down: the far side may still be running it.
+ */
+export const REMOTE_WAIT_ABANDONED_REASON = 'federation-stopped'
+
+// ── Space coordinator (ephemeral collaboration) ──
+
+/**
+ * Addressing name members use to reach the coordinator of an ephemeral
+ * collaboration — the space agent itself. It occupies a member row so name
+ * resolution, roster rendering and the activity record all work unchanged, but
+ * its "appId" is a sentinel: no app is installed behind it, and the delivery
+ * layer routes anything addressed to it into the space conversation.
+ */
+export const SPACE_COORDINATOR_MEMBER_NAME = 'coordinator'
+
+const SPACE_COORDINATOR_APP_PREFIX = 'space-conv-'
+
+/**
+ * Sentinel appId representing a space conversation acting as a team
+ * coordinator. Filename-safe (rides in team session keys) and parseable so the
+ * bus can route deliveries for it away from app-chat.
+ */
+export function spaceCoordinatorAppId(conversationId: string): string {
+  return `${SPACE_COORDINATOR_APP_PREFIX}${conversationId}`
+}
+
+/** The conversationId behind a coordinator sentinel appId, or null. */
+export function parseSpaceCoordinatorAppId(appId: string): string | null {
+  return appId.startsWith(SPACE_COORDINATOR_APP_PREFIX)
+    ? appId.slice(SPACE_COORDINATOR_APP_PREFIX.length)
+    : null
+}
+
+/**
+ * Prefix of a published artifact ref naming a file in the team folder of its
+ * piece of work (`team:<member folder>/<path>`) rather than in the producer's
+ * working directory. A colon cannot appear in a Windows file name, so no real
+ * project path is mistaken for one.
+ */
+export const TEAM_FOLDER_REF_PREFIX = 'team:'
+
+export function isTeamFolderRef(ref: string): boolean {
+  return ref.startsWith(TEAM_FOLDER_REF_PREFIX)
+}
+
+/**
+ * Whether a member runs on someone else's machine (federated), as opposed to
+ * being locally owned. A remote member's run transcript is not locally reloadable
+ * — it exists only as relayed live frames until owner-served history arrives.
+ */
+export function isRemoteMember(member: {
+  origin?: 'local' | 'remote'
+  ownerNodeId?: string
+}): boolean {
+  return member.origin === 'remote' && member.ownerNodeId !== SELF_NODE_ID
+}
+
+/**
+ * Project a roster down to the members this machine can drive directly, lead
+ * first. Shared so every surface that offers a member as a target agrees on
+ * which ones are offerable and in what order.
+ */
+export function toLocalMembers(members: readonly TeamMember[]): TeamLocalMember[] {
+  return members
+    .filter((m) => !isRemoteMember(m))
+    .sort((a, b) => Number(b.isLead) - Number(a.isLead))
+    .map((m) => ({ appId: m.appId, memberName: m.memberName, isLead: m.isLead, isSystemCoordinator: m.isSystemCoordinator === true }))
+}
+
+/**
+ * Whether a member's pending decision is THIS reader's to make. "Waiting for a
+ * decision" is addressed to exactly one person — the one whose machine the
+ * member runs on, since the question itself lives only in that machine's
+ * activity feed. Every other node can be told the office is blocked, but must
+ * never be asked to answer.
+ *
+ * Unknown ownership counts as ours: that is the single-machine case, where there
+ * is no one else it could belong to.
+ */
+export function awaitsOurDecision(member: Pick<RosterMember, 'status' | 'sameMachine'>): boolean {
+  return member.status === 'waiting_user' && member.sameMachine !== false
+}
+
+/**
+ * App ids currently serving as a team lead. Leads are an internal coordination
+ * role, not standalone digital humans, so the apps list hides them from
+ * "pick a member" pickers. Does not distinguish dissolved teams — a team must
+ * clear its `leadAppId` on dissolve/demotion for that lead to become pickable
+ * again.
+ */
+export function leadAppIdSet(teams: readonly Pick<TeamListItem, 'leadAppId'>[]): Set<string> {
+  return new Set(teams.map(tm => tm.leadAppId).filter((id): id is string => !!id))
+}
+
+/**
+ * The checks running on one member inside one piece of work.
+ *
+ * A check only exists within the run or conversation it was set in, while
+ * `TeamDetail.checks` spans the whole office — so every surface bound to a
+ * single piece of work has to narrow by both. Omitting `epochId` (a surface
+ * showing the member across the team, or a floor with nothing focused) keeps
+ * them all.
+ */
+export function checksForMember(
+  checks: readonly TeamCheckView[],
+  appId: string,
+  epochId?: string | null
+): TeamCheckView[] {
+  return checks.filter((c) => c.targetAppId === appId && (!epochId || c.epochId === epochId))
+}
+
+/**
+ * Whether a remote member's relayed live activity should be shown as a transient
+ * transcript. True only while the member is remote, nothing is actively streaming,
+ * no locally-loaded messages exist yet (owner history not arrived), and some
+ * relayed content/thoughts were captured. Yields automatically once real history
+ * populates `messageCount`.
+ */
+export function shouldShowRelayedTranscript(args: {
+  isRemote: boolean
+  hasStreaming: boolean
+  messageCount: number
+  streamingContentLength: number
+  thoughtCount: number
+}): boolean {
+  return (
+    args.isRemote &&
+    !args.hasStreaming &&
+    args.messageCount === 0 &&
+    (args.streamingContentLength > 0 || args.thoughtCount > 0)
+  )
+}
+
+/** Coordination tools, built once and served by both packagings of the server. */
+export const TEAM_TOOL_NAMES = {
+  send: 'team_send',
+  postTask: 'team_post_task',
+  updateTask: 'team_update_task',
+  postFinding: 'team_post_finding',
+  readBoard: 'team_read_board',
+  readArtifact: 'team_read_artifact',
+  /** Lead only: read a member's record of the run. */
+  readMember: 'team_read_member',
+  complete: 'team_complete',
+  schedule: 'team_schedule',
+  unschedule: 'team_unschedule',
+} as const
+
+/**
+ * Tools only a space conversation gets: assembling and keeping a temporary
+ * collaboration, and delegating to a saved team. Meaningless to a member, who
+ * is already inside exactly one team.
+ */
+export const SPACE_TEAM_TOOL_NAMES = {
+  collabStart: 'collab_start',
+  collabSave: 'collab_save',
+  list: 'team_list',
+  run: 'team_run',
+  status: 'team_status',
+} as const
+
+export const TEAM_MIGRATION_NAMESPACE = 'app_team'
+
+export const TEAM_EVENTS = {
+  updated: 'team:updated',
+  blackboard: 'team:blackboard',
+  message: 'team:message',
+  presence: 'team:presence',
+  officeStatus: 'team:office-status',
+  /** A halo:// office-invite deep link arrived; payload: { link: string }. */
+  inviteLink: 'team:invite-link',
+  /** A member's local transcript replica grew; payload: { teamId, appId, epochId }. */
+  memberHistory: 'team:member-history',
+} as const
+
+export const TEAM_IPC = {
+  list: 'team:list',
+  get: 'team:get',
+  create: 'team:create',
+  update: 'team:update',
+  dissolve: 'team:dissolve',
+  addMember: 'team:add-member',
+  updateMember: 'team:update-member',
+  removeMember: 'team:remove-member',
+  cancelCheck: 'team:cancel-check',
+  setEdges: 'team:set-edges',
+  proposeMembers: 'team:propose-members',
+  run: 'team:run',
+  pause: 'team:pause',
+  getDetail: 'team:get-detail',
+  listArtifacts: 'team:list-artifacts',
+  openArtifact: 'team:open-artifact',
+  listTriggers: 'team:list-triggers',
+  setTrigger: 'team:set-trigger',
+  removeTrigger: 'team:remove-trigger',
+  generateInvite: 'team:generate-invite',
+  revokeInvite: 'team:revoke-invite',
+  joinOffice: 'team:join-office',
+  leaveOffice: 'team:leave-office',
+  sendToMember: 'team:send-to-member',
+  stopMember: 'team:stop-member',
+  listConversations: 'team:list-conversations',
+  openConversation: 'team:open-conversation',
+  renameConversation: 'team:rename-conversation',
+  archiveConversation: 'team:archive-conversation',
+  /** One-shot pull of an invite link that arrived via halo:// before the renderer was up. */
+  consumePendingInvite: 'team:consume-pending-invite',
+  /** The ephemeral collaboration bound to a space conversation, if any. */
+  collabForConversation: 'team:collab-for-conversation',
+  /** Keep an ephemeral collaboration as a persistent team. */
+  saveCollab: 'team:save-collab',
+} as const
+
+export const TEAM_CIRCUIT_DEFAULTS = {
+  maxMessages: 2000,
+  maxForwardDepth: 8,
+} as const
+
+/** Default member turn timeout (ms) when `agent.teamTurnTimeoutMs` is unset. */
+export const TEAM_DEFAULT_TURN_TIMEOUT_MS = 60 * 60 * 1000
+
+/** Default cap on team member turns running at once on this machine, when `agent.teamMaxConcurrentTurns` is unset. */
+export const TEAM_DEFAULT_MAX_CONCURRENT_TURNS = 10
+
+// ── Session-key helper (re-exported SSOT) ──
+
+export {
+  buildTeamSessionKey,
+  isTeamSessionKey,
+  memberChatKey,
+  parseMemberChatKey,
+  nativeConversationChatKey,
+  isNativeConversationChatKey,
+  spaceCollabChatKey,
+  parseSpaceCollabChatKey,
+} from './im-keys'

@@ -1,0 +1,77 @@
+import { api } from '../api'
+import { useAppsStore } from '../stores/apps.store'
+import { useAppsPageStore } from '../stores/apps-page.store'
+import { usePeopleViewStore, type TeamNavigationTarget } from '../stores/people-view.store'
+import { useTeamStore } from '../stores/team.store'
+import { useAppStore } from '../stores/app.store'
+
+export function openPersonTeam(target: TeamNavigationTarget, returnPerson: string | null = null) {
+  usePeopleViewStore.setState({ teamTarget: target, returnPerson, returnInbox: useAppsPageStore.getState().currentTab === 'inbox', returnTeam: null })
+  useTeamStore.getState().selectTeam(target.teamId)
+  useAppsPageStore.getState().setCurrentTab('team')
+  useAppStore.getState().navigate('apps')
+}
+
+export interface WorkNavigationTarget {
+  appId: string
+  entryId?: string
+  teamId?: string
+  epochId?: string
+  runId?: string
+}
+
+export async function openWorkNotification(target: WorkNavigationTarget) {
+  let decision: boolean | undefined
+  if (target.entryId) {
+    try {
+      const result = await api.appGetActivityEntry(target.appId, target.entryId)
+      if (result.success && result.data) {
+        const entry = result.data
+        useAppsStore.getState().handleNewActivityEntry(target.appId, entry)
+        decision = entry.type === 'escalation'
+        target = { ...target, teamId: entry.content.source?.teamId ?? entry.content.teamContext?.teamId ?? target.teamId, epochId: entry.content.source?.epochId ?? entry.content.teamContext?.epochId ?? target.epochId }
+      } else console.warn('[PeopleNavigation] Notification record unavailable', { appId: target.appId, entryId: target.entryId, error: result.error })
+    } catch (error) { console.warn('[PeopleNavigation] Notification record lookup failed', { appId: target.appId, entryId: target.entryId, error }) }
+  }
+  useAppsPageStore.getState().setInitialAppId(null)
+  if (target.teamId) {
+    const current = useAppsPageStore.getState()
+    openPersonTeam({ teamId: target.teamId, epochId: target.epochId, appId: target.appId, entryId: target.entryId, decision }, current.currentTab === 'my-digital-humans' ? current.selectedAppId : null)
+    return
+  }
+  useAppsPageStore.getState().setCurrentTab('my-digital-humans')
+  if (target.entryId) {
+    usePeopleViewStore.setState({ focusEntry: { appId: target.appId, entryId: target.entryId } })
+    useAppsPageStore.getState().openActivityThread(target.appId)
+  } else if (target.runId) useAppsPageStore.getState().openSessionDetail(target.appId, target.runId)
+  else useAppsPageStore.getState().openActivityThread(target.appId)
+  useAppStore.getState().navigate('apps')
+}
+
+/**
+ * The navigation entry for the Digital Humans page. Coming from elsewhere it
+ * returns to where the page was left (tab and open detail); pressed while
+ * already on the page it goes back to the digital-humans tab.
+ */
+export function openDigitalHumansPage() {
+  if (useAppStore.getState().view === 'apps') {
+    useAppsPageStore.getState().setCurrentTab('my-digital-humans')
+  }
+  useAppStore.getState().navigate('apps')
+}
+
+/** Open a digital human's page on its activity thread. */
+export function openPersonActivity(appId: string) {
+  useAppsPageStore.getState().setInitialAppId(null)
+  useAppsPageStore.getState().setCurrentTab('my-digital-humans')
+  useAppsPageStore.getState().openActivityThread(appId)
+  useAppStore.getState().navigate('apps')
+}
+
+/** Open a digital human's settings at its model choice. */
+export function openPersonModelSettings(appId: string) {
+  useAppsPageStore.getState().setInitialAppId(null)
+  useAppsPageStore.getState().setCurrentTab('my-digital-humans')
+  useAppsPageStore.getState().openAppConfigAt(appId, 'settings-group-model-capabilities')
+  useAppStore.getState().navigate('apps')
+}

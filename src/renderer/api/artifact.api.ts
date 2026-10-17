@@ -4,13 +4,21 @@
  */
 import {
   getAuthToken,
+  getRemoteServerUrl,
   httpRequest,
+  isCapacitor,
   isElectron,
   onEvent,
 } from './_shared'
 import type {
   ApiResponse,
 } from './_shared'
+import { MAX_PREVIEW_DOCUMENT_SIZE, formatPreviewSize } from '../../shared/constants/artifact-preview'
+import type { ArtifactChangeBatchEvent, FileQueryResult, ResolvedArtifactPath } from '../../shared/types/artifact'
+
+// Batches raised inside this renderer (a lapsed space hold: changes were lost),
+// delivered to the same subscribers as those from main.
+const localChangedBatchListeners = new Set<(data: ArtifactChangeBatchEvent) => void>()
 
 export const artifactApi = {
   // ===== Artifact =====
@@ -19,6 +27,22 @@ export const artifactApi = {
       return window.halo.listArtifacts(spaceId, maxDepth)
     }
     return httpRequest('GET', `/api/spaces/${spaceId}/artifacts?maxDepth=${maxDepth}`)
+  },
+
+  // Best path matches for a typed query; only `limit` items cross processes
+  queryArtifactFiles: async (spaceId: string, query: string, limit: number): Promise<ApiResponse<FileQueryResult>> => {
+    if (isElectron()) {
+      return window.halo.queryArtifactFiles(spaceId, query, limit)
+    }
+    return httpRequest('GET', `/api/spaces/${spaceId}/artifacts/query?q=${encodeURIComponent(query)}&limit=${limit}`)
+  },
+
+  // Which mentioned paths are existing files or folders of the space (one stat each, no scan)
+  resolveArtifactPaths: async (spaceId: string, paths: string[], baseDir?: string): Promise<ApiResponse<ResolvedArtifactPath[]>> => {
+    if (isElectron()) {
+      return window.halo.resolveArtifactPaths(spaceId, paths, baseDir)
+    }
+    return httpRequest('POST', `/api/spaces/${spaceId}/artifacts/resolve`, { paths, ...(baseDir ? { baseDir } : {}) })
   },
 
   listArtifactsTree: async (spaceId: string): Promise<ApiResponse> => {
@@ -36,41 +60,42 @@ export const artifactApi = {
     return httpRequest('POST', `/api/spaces/${spaceId}/artifacts/children`, { dirPath })
   },
 
-  // Initialize file watcher for a space
-  initArtifactWatcher: async (spaceId: string): Promise<ApiResponse> => {
+  // Declare that this client shows / stopped showing a space (see services/artifact-space-holds)
+  retainArtifactSpace: async (spaceId: string, clientId: string): Promise<ApiResponse> => {
     if (isElectron()) {
-      return window.halo.initArtifactWatcher(spaceId)
+      return window.halo.retainArtifactSpace(spaceId, clientId)
     }
-    // In remote mode, watcher is managed by server
-    return { success: true }
+    return httpRequest('POST', `/api/spaces/${spaceId}/artifacts/retain`, { clientId })
   },
 
-  // Subscribe to artifact change events
-  onArtifactChanged: (callback: (data: {
-    type: 'add' | 'change' | 'unlink' | 'addDir' | 'unlinkDir'
-    path: string
-    relativePath: string
-    spaceId: string
-    item?: unknown
-  }) => void) => {
+  releaseArtifactSpace: async (spaceId: string, clientId: string): Promise<ApiResponse> => {
     if (isElectron()) {
-      return window.halo.onArtifactChanged(callback)
+      return window.halo.releaseArtifactSpace(spaceId, clientId)
     }
-    // In remote mode, use WebSocket events
-    return onEvent('artifact:changed', callback)
+    return httpRequest('POST', `/api/spaces/${spaceId}/artifacts/release`, { clientId })
+  },
+
+  // Subscribe to file changes: one event per flush per space, not one per file
+  onArtifactChangedBatch: (callback: (data: ArtifactChangeBatchEvent) => void) => {
+    localChangedBatchListeners.add(callback)
+    const offRemote = isElectron()
+      ? window.halo.onArtifactChangedBatch(callback)
+      : onEvent<ArtifactChangeBatchEvent>('artifact:changed-batch', callback)
+    return () => {
+      localChangedBatchListeners.delete(callback)
+      offRemote()
+    }
+  },
+
+  // Deliver a batch to this renderer's subscribers only (never sent to main)
+  emitLocalArtifactChangedBatch: (batch: ArtifactChangeBatchEvent): void => {
+    for (const listener of Array.from(localChangedBatchListeners)) listener(batch)
   },
 
   // Subscribe to tree update events (pre-computed data, zero IPC round-trips)
   onArtifactTreeUpdate: (callback: (data: {
     spaceId: string
     updatedDirs: Array<{ dirPath: string; children: unknown[] }>
-    changes: Array<{
-      type: 'add' | 'change' | 'unlink' | 'addDir' | 'unlinkDir'
-      path: string
-      relativePath: string
-      spaceId: string
-      item?: unknown
-    }>
   }) => void) => {
     if (isElectron()) {
       return window.halo.onArtifactTreeUpdate(callback)
@@ -103,28 +128,66 @@ export const artifactApi = {
     return { success: false, error: 'Cannot open folder in remote mode' }
   },
 
-  // Download artifact (remote mode only - triggers browser download)
-  downloadArtifact: (filePath: string): void => {
+  // Download artifact: the desktop opens the file; elsewhere the browser or the
+  // phone saves it from a link that carries a short-lived ticket, never the token.
+  downloadArtifact: async (filePath: string): Promise<ApiResponse> => {
     if (isElectron()) {
-      // In Electron, just open the file
-      window.halo.openArtifact(filePath)
-      return
+      void window.halo.openArtifact(filePath)
+      return { success: true }
     }
-    // In remote mode, trigger download via browser with token in URL
-    const token = getAuthToken()
-    const url = `/api/artifacts/download?path=${encodeURIComponent(filePath)}&token=${encodeURIComponent(token || '')}`
+    // Asked for first, so a missing file is reported here instead of a link
+    // opening onto an error page.
+    const issued = await httpRequest<{ ticket: string }>('POST', '/api/artifacts/download-ticket', { path: filePath })
+    if (!issued.success || !issued.data?.ticket) {
+      return { success: false, error: issued.error || 'Download failed' }
+    }
+    // On the Halo server's own address: the mobile app's page is local to the
+    // phone, and a reverse proxy may serve Halo under a path prefix.
+    const url = `${getRemoteServerUrl()}/api/artifacts/file/${encodeURIComponent(issued.data.ticket)}`
+    if (isCapacitor()) {
+      // The app's web view cannot save files: the native shell hands the link
+      // to the system (Android's download listener, the system browser on iOS).
+      window.open(url, '_blank')
+      return { success: true }
+    }
     const link = document.createElement('a')
     link.href = url
     link.download = filePath.split('/').pop() || 'download'
     document.body.appendChild(link)
     link.click()
     document.body.removeChild(link)
+    return { success: true }
   },
 
-  // Get download URL for an artifact (for use with fetch or direct links)
+  // Remote clients only: put one file from this device into the space's working
+  // directory. The file is the request body, so the browser streams it.
+  uploadArtifactFile: async (spaceId: string, file: File): Promise<ApiResponse<{ path: string; name: string; size: number }>> => {
+    const baseUrl = getRemoteServerUrl()
+    if (!baseUrl) return { success: false, error: 'Server URL not configured' }
+    const token = getAuthToken()
+    try {
+      const res = await fetch(`${baseUrl}/api/spaces/${encodeURIComponent(spaceId)}/artifacts/upload?name=${encodeURIComponent(file.name)}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/octet-stream', ...(token ? { Authorization: `Bearer ${token}` } : {}) },
+        body: file,
+      })
+      const body = await res.json().catch(() => null)
+      if (!res.ok || !body?.success || !body.data) {
+        // A proxy or tunnel in between answers 413 with a page of its own.
+        const code = body?.code ?? (res.status === 413 ? 'TOO_LARGE' : undefined)
+        return { success: false, error: body?.error || `Upload failed (${res.status})`, ...(code ? { code } : {}) }
+      }
+      return { success: true, data: body.data }
+    } catch (error) {
+      return { success: false, error: (error as Error).message }
+    }
+  },
+
+  // For this page's own use only (the image viewer's source): it carries the
+  // access token, so it is never handed to another app or saved as a download.
   getArtifactDownloadUrl: (filePath: string): string => {
     const token = getAuthToken()
-    return `/api/artifacts/download?path=${encodeURIComponent(filePath)}&token=${encodeURIComponent(token || '')}`
+    return `${getRemoteServerUrl()}/api/artifacts/download?path=${encodeURIComponent(filePath)}&token=${encodeURIComponent(token || '')}`
   },
 
   // Read artifact content for Content Canvas
@@ -134,6 +197,85 @@ export const artifactApi = {
     }
     // In remote mode, fetch content via API
     return httpRequest('GET', `/api/artifacts/content?path=${encodeURIComponent(filePath)}`)
+  },
+
+  /**
+   * Read a document as raw bytes for the Canvas office/PDF viewers.
+   *
+   * Both transports are native end to end — IPC structured clone on desktop,
+   * the browser's own decoder on the download route in remote mode — so no
+   * base64 string is ever built and the main thread never runs a decode loop.
+   *
+   * The remote half enforces MAX_PREVIEW_DOCUMENT_SIZE here rather than at the
+   * route: /api/artifacts/download exists to serve files of any size, so the
+   * preview caller is the only place the preview's own ceiling belongs.
+   */
+  readArtifactBytes: async (filePath: string): Promise<ApiResponse<Uint8Array>> => {
+    if (isElectron()) {
+      const response = await window.halo.readArtifactBytes(filePath)
+      if (!response.success || !response.data) {
+        return { success: false, error: response.error || 'Failed to read file' }
+      }
+      return { success: true, data: response.data }
+    }
+    const baseUrl = getRemoteServerUrl()
+    if (!baseUrl) {
+      return { success: false, error: 'Server URL not configured' }
+    }
+    const token = getAuthToken()
+    const tooLarge = (size?: number): ApiResponse<Uint8Array> => ({
+      success: false,
+      error: size === undefined
+        ? `File too large to preview (limit ${formatPreviewSize(MAX_PREVIEW_DOCUMENT_SIZE)})`
+        : `File too large to preview: ${formatPreviewSize(size)} ` +
+          `(limit ${formatPreviewSize(MAX_PREVIEW_DOCUMENT_SIZE)})`,
+    })
+
+    try {
+      const res = await fetch(`${baseUrl}/api/artifacts/download?path=${encodeURIComponent(filePath)}`, {
+        headers: token ? { Authorization: `Bearer ${token}` } : undefined,
+      })
+      if (!res.ok) {
+        // Failures come back as the standard JSON envelope, not file bytes.
+        const detail = await res.json().catch(() => null)
+        return { success: false, error: detail?.error || `Failed to read file (${res.status})` }
+      }
+
+      // Our route sets Content-Length, so an oversized file is normally rejected
+      // before a single byte moves.
+      const declared = Number(res.headers.get('content-length'))
+      if (Number.isFinite(declared) && declared > MAX_PREVIEW_DOCUMENT_SIZE) {
+        return tooLarge(declared)
+      }
+
+      // A proxy that re-encodes the response drops Content-Length, so the limit
+      // cannot rely on it: read incrementally and abort once the budget is gone.
+      // arrayBuffer() would have to buffer the whole body first, which is the
+      // thing the limit exists to prevent.
+      if (!res.body) return { success: true, data: new Uint8Array(await res.arrayBuffer()) }
+      const reader = res.body.getReader()
+      const chunks: Uint8Array[] = []
+      let received = 0
+      for (;;) {
+        const { done, value } = await reader.read()
+        if (done) break
+        received += value.byteLength
+        if (received > MAX_PREVIEW_DOCUMENT_SIZE) {
+          await reader.cancel()
+          return tooLarge(Number.isFinite(declared) && declared > 0 ? declared : undefined)
+        }
+        chunks.push(value)
+      }
+      const bytes = new Uint8Array(received)
+      let offset = 0
+      for (const chunk of chunks) {
+        bytes.set(chunk, offset)
+        offset += chunk.byteLength
+      }
+      return { success: true, data: bytes }
+    } catch (error) {
+      return { success: false, error: (error as Error).message }
+    }
   },
 
   // Save artifact content (CodeViewer edit mode)
@@ -148,7 +290,7 @@ export const artifactApi = {
   detectFileType: async (filePath: string): Promise<ApiResponse<{
     isText: boolean
     canViewInCanvas: boolean
-    contentType: 'code' | 'markdown' | 'html' | 'image' | 'pdf' | 'text' | 'json' | 'csv' | 'binary'
+    contentType: 'code' | 'markdown' | 'html' | 'image' | 'pdf' | 'text' | 'json' | 'csv' | 'xlsx' | 'docx' | 'pptx' | 'binary'
     language?: string
     mimeType: string
   }>> => {

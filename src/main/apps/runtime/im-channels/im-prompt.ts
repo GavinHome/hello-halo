@@ -48,6 +48,12 @@ export interface ImNotifyContext {
 
 const NO_NOTIFY_TOOLS: ImNotifyContext = { channelsConfigured: false, notifyBotAvailable: false }
 
+/** Appended only with an invited action, never paid for by ordinary IM turns. */
+export function buildRelayActionInstructions(): string {
+  return 'Use this action only to submit what the owner actually said, never decide for them. ' +
+    'If the target or meaning is unclear, ask first. Confirm success naturally; report an already answered, closed or expired question honestly.'
+}
+
 /**
  * Cross-session relay semantics. Rendered for every IM session (not gated on
  * owners) because the tag contract must be defined wherever the tag can
@@ -64,8 +70,8 @@ function buildRelayContextSection(notifyBotAvailable: boolean): string {
     '### Messages You Pushed Here Earlier',
     '',
     'A `<relay-context>` block may be appended at the END of a message. It lists',
-    'messages YOU pushed into this chat earlier from other sessions via',
-    '`notify_bot`, which produced no record here at the time:',
+    'messages YOU pushed via `notify_bot`, or private questions for the owner,',
+    'delivered without a turn here:',
     '',
     '- `<pushed>` / `<pushed-file>` — what was delivered to this chat',
     '- `at` — when it was delivered; judge for yourself whether it is still relevant',
@@ -120,7 +126,8 @@ function buildNotificationsSection(
       '  2. The app\'s task definition requires pushing to a designated contact',
       '  3. Reporting an outcome back to a relayed request\'s `reply_to`',
       '',
-      'Do NOT use notify_bot to reply to the current session.',
+      'Do NOT use notify_bot to reply to the current session: your reply already',
+      'reaches it, and notify_bot refuses to send there.',
       ...(guestNote ? ['Guest users (non-owners) cannot trigger notify_bot.'] : []),
     )
   }
@@ -144,6 +151,18 @@ export function buildImEntry(
     : buildDirectEntry(session, ownerIds, notify)
 }
 
+/**
+ * Which text is the reply: what the chat receives is the text written after the
+ * turn's last tool call, so an answer followed by bookkeeping arrives as the
+ * bookkeeping's closing line.
+ */
+const REPLY_IS_THE_LAST_TEXT = [
+  'Only the text you write after your last tool call is delivered, once your',
+  'turn ends; text written before a tool call is not. Do finishing work —',
+  'updating memory or notes — before you write the answer, and end with the',
+  'answer itself.',
+]
+
 function buildGroupEntry(session: ImSessionContext, ownerIds: string[] | undefined, notify: ImNotifyContext): string {
   const lines: string[] = [
     '## IM Session Context',
@@ -151,6 +170,7 @@ function buildGroupEntry(session: ImSessionContext, ownerIds: string[] | undefin
     'You are a bot in an IM platform. Users @-mention you in group chats',
     'or send you private messages. Your text output is automatically',
     'delivered as a bot reply to this conversation.',
+    ...REPLY_IS_THE_LAST_TEXT,
     '',
     'To send a file to this conversation, use `send_file_to_chat` — it is',
     'pre-bound to this session, you only provide the file path.',
@@ -193,6 +213,7 @@ function buildDirectEntry(session: ImSessionContext, ownerIds: string[] | undefi
     'You are a bot in an IM platform. This is a private chat session.',
     'Your text output is automatically delivered as a bot reply to',
     'this conversation.',
+    ...REPLY_IS_THE_LAST_TEXT,
     '',
     'To send a file to this conversation, use `send_file_to_chat` — it is',
     'pre-bound to this session, you only provide the file path.',

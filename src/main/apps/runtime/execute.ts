@@ -15,11 +15,12 @@
 import { join } from 'path'
 import { tmpdir } from 'os'
 import { randomUUID } from 'crypto'
-import { createSession, query as agentSdkQuery } from '../../services/agent/resolved-sdk'
-import type { InstalledApp } from '../manager'
-import { resolvePermission } from '../../../shared/apps/app-types'
-import type { MemoryService, MemoryCallerScope } from '../../platform/memory'
-import { buildMemorySnapshot, createMemoryStatusMcpServer } from '../../platform/memory/snapshot'
+import { createSession, getEngineCapabilities } from '../../services/agent/resolved-sdk'
+import { getAppManager, type InstalledApp } from '../manager'
+import { missingConnections, resolveExecutionEnvironment, validateExecutionEnvironment, validateEnvironmentConnections } from './execution-environment'
+import { createPersonContextMcpServer, personContextPrompt } from './person-context-tool'
+import { addRunTokenUsage, resolvePermission, type RunTokenUsage } from '../../../shared/apps/app-types'
+import { resolveMemoryLayout, type MemoryService, type MemoryCallerScope } from '../../platform/memory'
 import type { ActivityStore } from './store'
 import type {
   TriggerContext,
@@ -27,33 +28,56 @@ import type {
   RunStatus,
   ActivityEntry,
 } from './types'
-import { RunExecutionError } from './errors'
+import { MissingConnectionsError, RunExecutionError } from './errors'
 import { buildAppSystemPrompt, buildInitialMessage, buildEscalationResumeMessage } from './prompt'
 import { buildDisabledCapabilitiesGuidance, buildUnconfiguredCapabilitiesGuidance } from './prompt/capabilities'
 import { resolveNotifyAvailability } from './notify-availability'
 import { mergeConfigWithDefaults } from './config-defaults'
 import { createReportToolServer } from './report-tool'
 import type { ReportToolContext } from './report-tool'
+import { TurnCutPoint } from './escalation-cut'
 import { createNotifyToolServer } from './notify-tool'
 import { FileExportGate } from './file-export-gate'
-import { truncateUtf16Safe } from './text-truncate'
 import { getImSessionRegistry } from './im-session-registry'
 import { autoSyncRunResult } from './im-auto-sync'
-import { getApiCredentials, getApiCredentialsForSource, getHeadlessElectronPath, getWorkingDir, getMcpServersForRequires } from '../../services/agent/helpers'
-import { resolveCredentialsForSdk, buildBaseSdkOptions, buildSdkEnv } from '../../services/agent/sdk-config'
-import { applyReasoningEffort } from '../../services/agent/reasoning-effort'
-import { getOrCreateV2Session } from '../../services/agent/session-manager'
+import { getApiCredentialsForSelection, getHeadlessElectronPath, getMcpServersForRequires } from '../../services/agent/helpers'
+import { resolveCredentialsForSdk, buildUserSessionSdkOptions } from '../../services/agent/sdk-config'
+import { toEngineSystemPrompt } from '../../services/agent/system-prompt'
+import {
+  formatReferencesBlock,
+  acquireV2Session,
+  createSessionState,
+  registerActiveSession,
+  unregisterActiveSession,
+  explainEngineError,
+  type V2SessionLease,
+} from '../../services/agent'
+import { applyReasoningEffort, pickReasoningEffort } from '../../services/agent/reasoning-effort'
+import { admitTransientSession } from './session-budget'
 import { createAIBrowserMcpServer, createScopedBrowserContext } from '../../services/ai-browser'
 import { createTerminalMcpServer, getGlobalTerminalContext, isTerminalAvailable } from '../../services/ai-terminal'
-import { createWebSearchMcpServer } from '../../services/web-search'
 import { createOcrMcpServer } from '../../services/ocr'
 import { createApiRefMcpServer, HALO_API_TOOLSET_ID } from '../../services/api-ref'
-import { createOfficialDocsSession } from '../../services/official-docs-mcp'
+import { buildBaseToolset } from '../../services/agent/toolsets/base'
 import { createEmailMcpServer } from '../../services/email-mcp'
+import { createConversationCollabMcpServer, resolveConversationCollab } from './conversation-collab'
+import { buildRunSenderKey } from '../../../shared/apps/im-keys'
+import { closeRunSender, openRunSender } from './run-conversation-source'
 import { getConfig, resolveClaudeConfigDir } from '../../foundation/config.service'
-import { getSpace, getSpaceDir } from '../../services/space.service'
 import { openSessionWriter, type SessionWriter } from './session-store'
-import { registerActiveRun, unregisterActiveRun } from './active-runs'
+import {
+  prepareMemoryForTurn,
+  finalizeMemoryAfterTurn,
+  memoryPromptOptions,
+  loadSpaceTopicsForTurn,
+  appMemoryGuard,
+  appMemorySettings,
+} from './turn/memory-lifecycle'
+import { appConsolidationInputs } from './memory-control'
+import { registerActiveRun, unregisterActiveRun, notifyActiveRunReady, type RunSupplement } from './active-runs'
+import { describeSelfInstance, formatInstanceTag } from './live-instances'
+import { stopEngineOnAbort } from './engine-stop'
+import { renderTriggerContext } from './event-input'
 
 // ============================================
 // Types
@@ -84,6 +108,10 @@ export interface ExecuteRunOptions {
   existingRunId?: string
   /** Existing session key matching the run record (required when existingRunId is set). */
   existingSessionKey?: string
+  /** Original inputs retained as separate transcript rows when one turn receives a batch. */
+  recordedInputs?: RunSupplement[]
+  /** Accepted additions still pending when a safety cut closes the engine remain unprocessed. */
+  onPendingInputAbandoned?: () => void
   /**
    * Fired exactly once, after the run record is inserted/reopened and before
    * the AI session is built. Used by the runtime service to dispatch the
@@ -104,6 +132,8 @@ interface StreamResult {
   finalText: string
   /** Total input + output tokens consumed */
   totalTokens: number
+  /** The same turns' usage with cache reads and writes, for showing what a run processed */
+  usage?: RunTokenUsage
   /** Whether the AI reported an error via report_to_user */
   aiReportedError: boolean
   /** Error text from the SDK result message when aiReportedError was set */
@@ -117,9 +147,6 @@ interface StreamResult {
 // ============================================
 // Constants
 // ============================================
-
-/** Default max turns per stream cycle for automation runs when not configured by user */
-const DEFAULT_MAX_TURNS = 100
 
 /**
  * Max auto-continue attempts when AI ends without calling report_to_user.
@@ -176,13 +203,15 @@ const SESSION_KEY_PREFIX = 'app-run'
  * @throws RunExecutionError on unrecoverable failure
  */
 export async function executeRun(options: ExecuteRunOptions): Promise<AppRunResult> {
-  const { app, trigger, store, memory, abortSignal, emitEntry, existingRunId, existingSessionKey, onRunStarted } = options
+  const { trigger, store, memory, abortSignal, emitEntry, existingRunId, existingSessionKey, onRunStarted } = options
+  let app = options.app
 
   // Guard: executeRun is only valid for automation apps.
   // This narrows app.spec to AutomationSpec for the rest of the function.
   if (app.spec.type !== 'automation') {
     throw new RunExecutionError('unknown', 'unknown', `executeRun called for non-automation app type: ${app.spec.type}`)
   }
+  const appSpec = app.spec
 
   // For continue_followup and escalation_followup (with existingRunId), reuse the
   // existing run record. For all other triggers, generate a new run ID and insert fresh.
@@ -192,7 +221,23 @@ export async function executeRun(options: ExecuteRunOptions): Promise<AppRunResu
   const sessionKey = existingSessionKey ?? `${SESSION_KEY_PREFIX}-${runId.slice(0, 8)}`
   const startedAt = Date.now()
 
+  const manager = getAppManager()
+  if (!manager) throw new RunExecutionError(app.id, runId, 'App manager is unavailable')
+  const originalRun = existingRunId ? store.getRun(existingRunId) : undefined
+  const originalEnvironment = originalRun?.environment
+  if (existingRunId && !originalEnvironment) {
+    throw new RunExecutionError(app.id, runId, 'The original execution environment is unavailable; restore it before continuing')
+  }
+  const environment = originalEnvironment ?? resolveExecutionEnvironment(app, manager)
+  if (existingRunId) store.pinRunEnvironment(existingRunId, environment)
+  app = { ...app, spaceId: environment.spaceId }
+
   const runTag = runId.slice(0, 8)
+  const selfInstance = describeSelfInstance({
+    runId,
+    triggerType: originalRun?.triggerType ?? trigger.type,
+  })
+  const selfTag = formatInstanceTag(selfInstance)
   console.log(
     `[Runtime][${runTag}] ▶ Starting run: app=${app.id}, trigger=${trigger.type}, ` +
     `appName="${app.spec.name}", spaceId=${app.spaceId}` +
@@ -210,6 +255,7 @@ export async function executeRun(options: ExecuteRunOptions): Promise<AppRunResu
       triggerType: trigger.type,
       triggerData: trigger.eventPayload ?? (trigger.escalation ? { escalation: trigger.escalation } : undefined),
       startedAt,
+      environment,
     })
   }
 
@@ -226,12 +272,32 @@ export async function executeRun(options: ExecuteRunOptions): Promise<AppRunResu
 
   // Track escalation from report_to_user callback
   let escalationEntryId: string | undefined
+  const escalationEntryIds = new Set<string>()
 
   // Session reference for cleanup
   let session: any = null
+  let sessionLease: V2SessionLease | undefined
+  let managedSessionActive = false
+  let releaseEngineStop: (() => void) | undefined
+  // Closed once, through its lease when it has one: by a stop the engine did
+  // not answer in time, or when the run ends.
+  let sessionClosed = false
+  const closeSession = (): void => {
+    if (sessionClosed) return
+    sessionClosed = true
+    if (sessionLease) sessionLease.close()
+    else session.close()
+  }
+
+  // Sender key while the run can message other conversations (opened in try, closed in finally)
+  let runSenderKey: string | undefined
 
   // Scoped browser context for this run (created in try, cleaned up in finally)
   let scopedBrowserCtx: ReturnType<typeof createScopedBrowserContext> | undefined
+
+  // The turns finished so far, kept in reach of catch: a run that fails with an
+  // exception still records the tokens they used.
+  let streamResult: StreamResult | undefined
 
   // ── Build memory scope (before try so it's available in catch) ─────
   const memoryScope: MemoryCallerScope = {
@@ -239,21 +305,35 @@ export async function executeRun(options: ExecuteRunOptions): Promise<AppRunResu
     spaceId: app.spaceId!, // Automation apps always have a spaceId
     // Use space.path (not workingDir) to match the directory layout that
     // AppManager creates: {space.path}/.halo/apps/{appId}/memory/
-    spacePath: getSpace(app.spaceId!)?.path ?? '',
+    spacePath: environment.spacePath,
     appId: app.id,
+    appDataPath: environment.memoryDir,
   }
 
   try {
+    if ((trigger.type === 'continue_followup' || trigger.type === 'escalation_followup') &&
+      (!existingRunId || !existingSessionKey || !(trigger.continue?.sessionId || trigger.escalation?.sessionId))) {
+      throw new Error('The original execution context is unavailable; no replacement task was started')
+    }
+    validateExecutionEnvironment(environment)
+    validateEnvironmentConnections(environment, app, manager)
+    // Checked before anything reaches a model: a run short of a connection it
+    // declares does not start, and the timeline says what to install or enable.
+    const unusable = missingConnections(app, manager, app.spaceId!)
+    if (unusable.length > 0) throw new MissingConnectionsError(unusable)
     // ── 1. Resolve credentials and working directory ─────
     //    (needed early: workDir feeds into system prompt,
     //     modelInfo feeds into base prompt's model display)
     const config = getConfig()
-    const credentials = app.userOverrides?.modelSourceId
-      ? await getApiCredentialsForSource(config, app.userOverrides.modelSourceId, app.userOverrides.modelId)
-      : await getApiCredentials(config)
-    const resolvedCreds = await resolveCredentialsForSdk(credentials)
+    // Its own account and model, or the global selection when it has none or
+    // its account was removed.
+    const credentials = await getApiCredentialsForSelection(app.userOverrides)
+    // The digital human's own thinking level, as in its chats; unset, the
+    // model's configured effort decides.
+    const pickedEffort = pickReasoningEffort(app.userOverrides?.chatReasoningEffort)
+    const resolvedCreds = await resolveCredentialsForSdk(credentials, pickedEffort)
     const electronPath = getHeadlessElectronPath()
-    const workDir = getWorkingDir(app.spaceId!)
+    const workDir = environment.workDir
 
     console.log(
       `[Runtime][${runTag}] Credentials resolved: provider=${credentials.provider}, ` +
@@ -261,7 +341,14 @@ export async function executeRun(options: ExecuteRunOptions): Promise<AppRunResu
     )
 
     // ── 2. Build system prompt ─────────────────────────────
-    const memoryInstructions = memory.getPromptInstructions()
+    const memorySettings = appMemorySettings(app)
+    const memoryInstructions = memorySettings.enabled
+      ? memory.getPromptInstructions('run', {
+          ...memoryPromptOptions(app.id, app.spec),
+          layout: resolveMemoryLayout(memoryScope, 'app'),
+          authorTag: selfTag,
+        })
+      : ''
     const usesAIBrowser = resolvePermission(app, 'ai-browser')
     const usesTerminal = resolvePermission(app, 'ai-terminal') && isTerminalAvailable()
     const usesEmail = resolvePermission(app, 'email') // gated on channel config below
@@ -272,6 +359,14 @@ export async function executeRun(options: ExecuteRunOptions): Promise<AppRunResu
     // sensible default for an automation that never needs it. A spec can still
     // declare it, and the user can grant it in Capabilities.
     const usesHaloApi = resolvePermission(app, HALO_API_TOOLSET_ID, false)
+    // Off unless the owner switched conversation collaboration on. A run is always
+    // the owner's, and acts under its own sender key: what it sends is a one-way
+    // notice, and nothing sent back can reach its digital human's chats.
+    const runSender = buildRunSenderKey(app.id, runId)
+    const conversationCollab = resolveConversationCollab(app, { conversationId: runSender, delegated: false, team: false })
+    if (conversationCollab) {
+      runSenderKey = openRunSender({ appId: app.id, runId, spaceId: app.spaceId!, name: app.spec.name, startedAt })
+    }
 
     // ── Merge config_schema defaults into userConfig ─────
     //    Ensures defaults are available even if the user never opened the config panel.
@@ -299,7 +394,7 @@ export async function executeRun(options: ExecuteRunOptions): Promise<AppRunResu
 
     const systemPrompt = buildAppSystemPrompt({
       appId: app.id,
-      appSpec: app.spec,
+      appSpec,
       memoryInstructions,
       triggerContext: trigger.description,
       userConfig: mergedConfig,
@@ -315,7 +410,7 @@ export async function executeRun(options: ExecuteRunOptions): Promise<AppRunResu
         imContactsAvailable: notifyAvail.imContactsAvailable,
       }) ?? undefined,
       notifyToolsAvailable: notifyAvail.anyNotifyToolAvailable,
-    })
+    }) + '\n\n' + personContextPrompt({ authority: 'owner', appId: app.id })
 
     console.log(
       `[Runtime][${runTag}] ── SYSTEM PROMPT ──────────────────────────\n` +
@@ -324,22 +419,16 @@ export async function executeRun(options: ExecuteRunOptions): Promise<AppRunResu
     )
 
     // ── 3. Build initial message ───────────────────────────
-    //    Build memory snapshot for trigger-time injection.
-    //    This gives the AI immediate memory context without a tool call.
-    const memorySnapshot = await buildMemorySnapshot(memoryScope)
-    console.log(
-      `[Runtime][${runTag}] Memory snapshot: exists=${memorySnapshot.exists}, ` +
-      `lines=${memorySnapshot.totalLines}, size=${memorySnapshot.sizeBytes}B, ` +
-      `headers=${memorySnapshot.headers.length}, archive=${memorySnapshot.archiveTotalCount}`
-    )
-
-    // ── 3a. Pre-insert timestamp heading in # History ─────
-    //    Gives the AI a ready-made heading to Edit with its summary.
-    //    Uses the same YYYY-MM-DD-HHmm format as run file names.
-    //    Reuses rawContent from the snapshot to avoid a redundant file read.
-    const runTimestamp = formatRunTimestamp(new Date())
-    await preInsertHistoryHeading(memorySnapshot.memoryFilePath, runTimestamp, memorySnapshot.rawContent)
-    console.log(`[Runtime][${runTag}] Pre-inserted History heading: ## ${runTimestamp}`)
+    //    Build memory snapshot + pre-insert History heading. With memory off
+    //    the run neither reads nor writes it.
+    const freshRun = !isResuming
+    const memorySnapshot = memorySettings.enabled && freshRun
+      ? (await prepareMemoryForTurn(memoryScope, { byLabel: selfTag })).snapshot
+      : null
+    // Only a fresh run opens with memory; a resumed one already holds it.
+    const spaceTopics = memorySnapshot && freshRun
+      ? await loadSpaceTopicsForTurn(memoryScope, { enabledForApp: app.userOverrides?.spaceMemoryAccess === true })
+      : null
 
     // Resuming runs (continue or escalation follow-up) send minimal messages
     // so the model can resume naturally from its restored session context.
@@ -349,10 +438,11 @@ export async function executeRun(options: ExecuteRunOptions): Promise<AppRunResu
       : (trigger.type === 'escalation_followup' && existingRunId && trigger.escalation)
         ? buildEscalationResumeMessage(trigger.escalation)
         : buildInitialMessage({
-            triggerContext: trigger.description,
+            triggerContext: renderTriggerContext(trigger),
             userConfig: mergedConfig,
             appName: app.spec.name,
             memorySnapshot,
+            spaceTopics,
           })
 
     console.log(
@@ -364,18 +454,17 @@ export async function executeRun(options: ExecuteRunOptions): Promise<AppRunResu
     // ── 3b. Create scoped browser context for this run ────
     //    Scoped context isolates activeViewId from user's interactive browser
     //    and other concurrent runs, while sharing the same session/cookies.
+    //    A run the user started from the desktop carries its run key, so its
+    //    pages open in the main window and the live-session tray names them
+    //    after the digital human; every other run stays in the hidden host.
     scopedBrowserCtx = usesAIBrowser
-      ? createScopedBrowserContext()
+      ? createScopedBrowserContext(trigger.watchable ? { liveView: { conversationId: runSender, spaceId: app.spaceId! } } : undefined)
       : undefined
 
     // ── 4. Create MCP servers ──────────────────────────────
-    //    Register the lightweight memory_status tool (structural metadata only).
-    //    The AI uses native Read/Edit/Write on memory.md directly.
-    const memoryMcpServer = createMemoryStatusMcpServer(memoryScope)
-
     // Resolve plans directory for file-based data_path guidance in report_to_user.
     // Uses the same CC config directory that the SDK session uses for consistency.
-    const configDir = resolveClaudeConfigDir(config.agent?.configDirMode)
+    const configDir = resolveClaudeConfigDir()
     const plansDir = join(configDir, 'plans')
 
     const reportContext: ReportToolContext = {
@@ -392,6 +481,7 @@ export async function executeRun(options: ExecuteRunOptions): Promise<AppRunResu
       reportContext,
       (entryId: string) => {
         escalationEntryId = entryId
+        escalationEntryIds.add(entryId)
         console.log(`[Runtime] Escalation created: entry=${entryId}, app=${app.id}`)
       },
       emitEntry
@@ -402,7 +492,7 @@ export async function executeRun(options: ExecuteRunOptions): Promise<AppRunResu
     // cwd) + tmpdir. memoryScope.spacePath is intentionally NOT reused here:
     // memory lives under space.path (internal storage), while exportable
     // files live under workingDir||path — see getSpaceDir().
-    const exportGate = new FileExportGate([getSpaceDir(app.spaceId!), tmpdir()])
+    const exportGate = new FileExportGate([environment.workDir, tmpdir()])
     const notifyMcpServer = createNotifyToolServer({
       appId: app.id,
       appName: app.spec.name,
@@ -415,6 +505,7 @@ export async function executeRun(options: ExecuteRunOptions): Promise<AppRunResu
       relay: {
         sessionKey,
         isOwner: true,
+        permissionIdentity: () => 'owner',
         quote: trigger.description,
       },
     })
@@ -440,13 +531,12 @@ export async function executeRun(options: ExecuteRunOptions): Promise<AppRunResu
       app.spaceId!
     )
 
-    // A run has no person to ask what a screen looks like, so the one context
-    // that most needs Halo's own documentation was the one that shipped
-    // without it. The authoring gate the session half carries is unused here:
-    // spec creation is not a tool a run holds.
-    const { server: docsMcpServer } = createOfficialDocsSession()
+    // Starts from the base toolset. Excluded: `halo-apps` — an unattended run
+    // does not manage digital humans. Documentation stays: a run has no person
+    // to ask what a screen looks like.
+    const baseToolset = buildBaseToolset({ spaceId: app.spaceId!, exclude: ['halo-apps'] })
 
-    const sdkOptions = await buildBaseSdkOptions({
+    const sdkOptions = await buildUserSessionSdkOptions({
       selfApiAccess: usesHaloApi,
       credentials: resolvedCreds,
       workDir,
@@ -456,20 +546,25 @@ export async function executeRun(options: ExecuteRunOptions): Promise<AppRunResu
       stderrHandler: (data: string) => {
         console.error(`[Runtime][${app.id}] CLI stderr:`, data)
       },
+      memoryGuard: appMemoryGuard(memoryScope, runTag, memorySettings),
       // Built-in server ids below are mirrored in shared/apps/builtin-mcp.ts — keep in sync.
       mcpServers: {
         ...requiredMcpServers,              // declared MCP dependencies
-        'halo-memory': memoryMcpServer,     // built-in: persistent memory
         'halo-report': reportMcpServer,     // built-in: completion signal
         'halo-notify': notifyMcpServer,     // built-in: user notification
-        'halo-docs': docsMcpServer,         // built-in: Halo's own documentation
-        'web-search': createWebSearchMcpServer(), // built-in: web search
+        'halo-person-context': createPersonContextMcpServer({ authority: 'owner', appId: app.id, environmentSpaceId: app.spaceId!, capabilityMode: 'automation' }),
+        ...baseToolset,                     // built-in: web search, Halo documentation
         'ocr': createOcrMcpServer(),              // built-in: on-device image OCR
         ...(usesAIBrowser ? { 'ai-browser': createAIBrowserMcpServer(scopedBrowserCtx, workDir) } : {}),
         ...(usesTerminal
           ? { 'ai-terminal': createTerminalMcpServer(getGlobalTerminalContext(workDir), { spaceId: app.spaceId!, workDir }) }
           : {}),
         ...(usesHaloApi ? { 'halo-api-ref': createApiRefMcpServer() } : {}),
+        // Acts under the run's own sender key: what it sends is a one-way notice,
+        // and only a reply to a wait the run is blocked in reaches it.
+        ...(conversationCollab
+          ? { 'halo-conversations': await createConversationCollabMcpServer({ spaceId: app.spaceId!, conversationId: runSender }, conversationCollab) }
+          : {}),
         ...(usesEmail && config.notificationChannels?.email?.enabled
           ? { 'halo-email': createEmailMcpServer(config.notificationChannels.email) }
           : {}),
@@ -477,8 +572,7 @@ export async function executeRun(options: ExecuteRunOptions): Promise<AppRunResu
     })
 
     // Override SDK options for automation context
-    sdkOptions.systemPrompt = systemPrompt
-    sdkOptions.maxTurns = config.agent?.maxTurns ?? DEFAULT_MAX_TURNS
+    sdkOptions.systemPrompt = toEngineSystemPrompt(systemPrompt)
     // Token-level partials OFF: a run is headless and emits no renderer events,
     // so there is no live consumer for token frames. processStream persists one
     // aggregate block-level message (thinking / tool-call / tool-result / text) per
@@ -486,7 +580,7 @@ export async function executeRun(options: ExecuteRunOptions): Promise<AppRunResu
     // back by polling (see DESIGN.md §2.10), which is enough to watch a run's steps.
     sdkOptions.includePartialMessages = false
     // Enable extended thinking for automation runs (same as interactive chat)
-    applyReasoningEffort(sdkOptions, true, resolvedCreds.capabilities)
+    applyReasoningEffort(sdkOptions, true, resolvedCreds.capabilities, pickedEffort)
 
     const mcpServerNames = sdkOptions.mcpServers ? Object.keys(sdkOptions.mcpServers) : []
     console.log(
@@ -498,7 +592,7 @@ export async function executeRun(options: ExecuteRunOptions): Promise<AppRunResu
 
     // Session creation strategy:
     //   escalation_followup / continue_followup → restore existing session via
-    //     getOrCreateV2Session to recover full conversation context.
+    //     acquireV2Session to recover full conversation context.
     //   All other triggers → create a fresh session.
     const escalationResumeId = trigger.escalation?.sessionId
     const continueResumeId = trigger.continue?.sessionId
@@ -509,7 +603,7 @@ export async function executeRun(options: ExecuteRunOptions): Promise<AppRunResu
     // would silently spawn a consumer.
     if (trigger.type === 'escalation_followup' && escalationResumeId) {
       console.log(`[Runtime][${runTag}] Restoring session for escalation followup: ${escalationResumeId}`)
-      session = await getOrCreateV2Session(
+      sessionLease = await acquireV2Session(
         app.spaceId!,
         sessionKey,
         sdkOptions,
@@ -518,7 +612,7 @@ export async function executeRun(options: ExecuteRunOptions): Promise<AppRunResu
       )
     } else if (trigger.type === 'continue_followup' && continueResumeId) {
       console.log(`[Runtime][${runTag}] Restoring session for user-initiated continue: ${continueResumeId}`)
-      session = await getOrCreateV2Session(
+      sessionLease = await acquireV2Session(
         app.spaceId!,
         sessionKey,
         sdkOptions,
@@ -526,19 +620,38 @@ export async function executeRun(options: ExecuteRunOptions): Promise<AppRunResu
         workDir
       )
     } else {
-      if (trigger.type === 'continue_followup') {
-        console.warn(`[Runtime][${runTag}] continue_followup has no sessionId — starting fresh session`)
-      }
+      admitTransientSession(runTag)
       session = await createSession(sdkOptions)
+    }
+    if (sessionLease) session = sessionLease.session
+    // A stop from outside the run (stop, task closed, person removed, quit)
+    // must reach the engine, or a silent run never notices it.
+    if (abortSignal) {
+      releaseEngineStop = stopEngineOnAbort(
+        abortSignal,
+        { interrupt: session.interrupt?.bind(session), close: closeSession },
+        { canInterrupt: getEngineCapabilities()?.features.interrupt ?? false, runTag },
+      )
+    }
+    if (isResuming) {
+      registerActiveSession(sessionKey, createSessionState(app.spaceId!, sessionKey, abortController))
+      managedSessionActive = true
     }
     console.log(`[Runtime][${runTag}] V2 session created, sending initial message`)
 
     // ── 5b. Open session writer for "View process" ────────
-    const spacePath = getSpace(app.spaceId!)?.path ?? ''
+    const spacePath = environment.spacePath
     let sessionWriter: SessionWriter | undefined
+    // A follow-up from the run-detail view may carry the places the user pointed
+    // at: recorded as references, read by the engine expanded ahead of the text.
+    const followupReferences = trigger.type === 'continue_followup' ? trigger.continue?.references : undefined
     if (spacePath) {
       sessionWriter = openSessionWriter(spacePath, app.id, runId)
-      sessionWriter.writeTrigger(initialMessage)
+      if (options.recordedInputs?.length) {
+        for (const input of options.recordedInputs) sessionWriter.writeTrigger(input.text, undefined, undefined, undefined, input.references)
+      } else {
+        sessionWriter.writeTrigger(initialMessage, undefined, undefined, undefined, followupReferences)
+      }
     }
 
     // ── 5c. Make the run injectable ────────────────────────
@@ -546,16 +659,35 @@ export async function executeRun(options: ExecuteRunOptions): Promise<AppRunResu
     //    inject a mid-run supplement (active-runs.ts): it writes the supplement to
     //    the run JSONL and pushes it into the live SDK session. The run itself is
     //    headless — it emits no renderer events; the run-detail view reads the JSONL.
-    registerActiveRun({
+    const activeRunHandle = {
       runId,
       appId: app.id,
       spaceId: app.spaceId!,
+      triggerType: trigger.type,
+      startedAt,
       session,
       writer: sessionWriter,
-    })
+    }
+    registerActiveRun(activeRunHandle)
+    const hasUnansweredEscalation = (): boolean => {
+      for (const entryId of escalationEntryIds) {
+        if (store.getEntry(entryId)?.userResponse) escalationEntryIds.delete(entryId)
+      }
+      escalationEntryId = escalationEntryIds.values().next().value
+      return escalationEntryIds.size > 0
+    }
 
     // ── 6. Process stream (headless: persist JSONL + detect report_to_user) ──
-    let streamResult = await processStream(session, initialMessage, abortController, runTag, sessionWriter)
+    streamResult = await processStream(
+      session,
+      formatReferencesBlock(followupReferences, workDir) + initialMessage,
+      abortController,
+      runTag,
+      sessionWriter,
+      hasUnansweredEscalation,
+      runId,
+      options.onPendingInputAbandoned
+    )
 
     // A free-text follow-up to an already-completed run (continue.interactive) is
     // a conversational turn: reply once and stop. The report_to_user auto-continue
@@ -585,12 +717,23 @@ export async function executeRun(options: ExecuteRunOptions): Promise<AppRunResu
         sessionWriter.writeTrigger(`[Auto-continue #${autoContinueCount}] ${AUTO_CONTINUE_FULL}`)
       }
 
-      const nextResult = await processStream(session, AUTO_CONTINUE_FULL, abortController, runTag, sessionWriter)
+      registerActiveRun(activeRunHandle)
+      const nextResult = await processStream(
+        session,
+        AUTO_CONTINUE_FULL,
+        abortController,
+        runTag,
+        sessionWriter,
+        hasUnansweredEscalation,
+        runId,
+        options.onPendingInputAbandoned
+      )
 
       // Merge results: accumulate text and tokens, take latest flags
       streamResult = {
         finalText: streamResult.finalText + nextResult.finalText,
         totalTokens: streamResult.totalTokens + nextResult.totalTokens,
+        usage: addRunTokenUsage(streamResult.usage, nextResult.usage),
         aiReportedError: nextResult.aiReportedError,
         aiReportedErrorDetail: nextResult.aiReportedErrorDetail,
         reportToolCalled: nextResult.reportToolCalled,
@@ -605,6 +748,8 @@ export async function executeRun(options: ExecuteRunOptions): Promise<AppRunResu
         `error=${streamResult.aiReportedError}`
       )
     }
+    // The engine's part is over: a stop arriving from here on has nothing to end.
+    releaseEngineStop?.()
 
     // ── 7. Record completion ───────────────────────────────
     const finishedAt = Date.now()
@@ -613,10 +758,12 @@ export async function executeRun(options: ExecuteRunOptions): Promise<AppRunResu
     let finalStatus: RunStatus
     let outcome: AppRunResult['outcome']
     let finalErrorMessage: string | undefined
+    // Stopped from outside: the stop, not the model, is why nothing was reported.
+    const stopped = abortSignal?.aborted === true
 
     // Escalation is detected via the onEscalation callback closure,
     // which sets escalationEntryId when report_to_user(type="escalation") is called.
-    if (escalationEntryId) {
+    if (hasUnansweredEscalation()) {
       finalStatus = 'waiting_user'
       outcome = 'useful'
     } else if (streamResult.aiReportedError) {
@@ -630,11 +777,15 @@ export async function executeRun(options: ExecuteRunOptions): Promise<AppRunResu
       // a conversational reply has nothing to report, so it completes normally.
       finalStatus = 'error'
       outcome = 'error'
-      finalErrorMessage = `AI ended without reporting results after ${autoContinueCount} auto-continue attempt(s)`
-      console.warn(
-        `[Runtime][${runTag}] AI never called report_to_user after ` +
-        `${autoContinueCount} auto-continue attempt(s) — marking as error`
-      )
+      if (stopped) {
+        finalErrorMessage = 'Stopped before reporting results'
+      } else {
+        finalErrorMessage = `AI ended without reporting results after ${autoContinueCount} auto-continue attempt(s)`
+        console.warn(
+          `[Runtime][${runTag}] AI never called report_to_user after ` +
+          `${autoContinueCount} auto-continue attempt(s) — marking as error`
+        )
+      }
     } else {
       finalStatus = 'ok'
       outcome = streamResult.finalText.length > 0 ? 'useful' : 'noop'
@@ -659,28 +810,40 @@ export async function executeRun(options: ExecuteRunOptions): Promise<AppRunResu
       )
     }
 
-    // Insert an error activity entry when AI never called report_to_user,
-    // so the failure is visible in the Activity Thread.
-    if (outcome === 'error' && !streamResult.reportToolCalled && !escalationEntryId) {
-      const noReportEntry: ActivityEntry = {
+    // Every run recorded as failed gets a failure entry that says why — also one
+    // that reported before the engine failed, whose report alone reads as success.
+    if (outcome === 'error' && !escalationEntryId) {
+      const reason = finalErrorMessage ?? 'No reason was given'
+      const failureEntry: ActivityEntry = {
         id: randomUUID(),
         appId: app.id,
         runId,
         type: 'run_error',
         ts: finishedAt,
         sessionKey,
-        content: {
-          summary: `AI ended without reporting results after ${autoContinueCount} auto-continue attempt(s). ` +
-            'The model may have encountered an issue or exhausted its context.',
-          status: 'error',
-          durationMs,
-          error: 'report_to_user not called',
-        },
+        content: streamResult.aiReportedError
+          ? {
+            summary: streamResult.reportToolCalled
+              ? `This run finally ended with an error: ${reason}`
+              : `Run failed: ${reason}`,
+            status: 'error',
+            durationMs,
+            error: reason,
+          }
+          : stopped
+            ? { summary: 'Stopped before it reported results.', status: 'error', durationMs }
+            : {
+              summary: `AI ended without reporting results after ${autoContinueCount} auto-continue attempt(s). ` +
+                'The model may have encountered an issue or exhausted its context.',
+              status: 'error',
+              durationMs,
+              error: 'report_to_user not called',
+            },
       }
       try {
-        emitEntry ? emitEntry(noReportEntry) : store.insertEntry(noReportEntry)
+        emitEntry ? emitEntry(failureEntry) : store.insertEntry(failureEntry)
       } catch (insertErr) {
-        console.error('[Runtime] Failed to insert no-report error entry:', insertErr)
+        console.error('[Runtime] Failed to insert run failure entry:', insertErr)
       }
     }
 
@@ -706,8 +869,8 @@ export async function executeRun(options: ExecuteRunOptions): Promise<AppRunResu
       })
     }
 
-    // ── 7c. Save session summary to memory ────────────────
-    await saveRunSessionSummary(memory, memoryScope, {
+    // ── 7c. Save session summary + size-guarded compaction ─
+    await finalizeMemoryAfterTurn(memory, memoryScope, {
       appName: app.spec.name,
       runId,
       trigger,
@@ -717,10 +880,7 @@ export async function executeRun(options: ExecuteRunOptions): Promise<AppRunResu
       finalText: streamResult.finalText,
       escalation: !!escalationEntryId,
       runTag,
-    })
-
-    // ── 7d. Check if memory needs compaction ─────────────
-    await checkAndCompactMemory(memory, memoryScope, app, runTag)
+    }, appConsolidationInputs(app, selfInstance.id))
 
     return {
       appId: app.id,
@@ -731,6 +891,7 @@ export async function executeRun(options: ExecuteRunOptions): Promise<AppRunResu
       finishedAt,
       durationMs,
       tokensUsed: streamResult.totalTokens || undefined,
+      tokenUsage: streamResult.usage,
       finalText: streamResult.finalText || undefined,
       errorMessage: finalErrorMessage,
     }
@@ -739,13 +900,16 @@ export async function executeRun(options: ExecuteRunOptions): Promise<AppRunResu
     const durationMs = finishedAt - startedAt
     const errorMessage = err instanceof Error ? err.message : String(err)
 
-    console.error(`[Runtime][${runTag}] ✗ Run failed: app=${app.id}, duration=${durationMs}ms:`, err)
+    const missing = err instanceof MissingConnectionsError ? err.missing : undefined
+    if (missing) console.warn(`[Runtime][${runTag}] ✗ Run not started: app=${app.id}: ${errorMessage}`)
+    else console.error(`[Runtime][${runTag}] ✗ Run failed: app=${app.id}, duration=${durationMs}ms:`, err)
 
     // Record failure
     store.completeRun(runId, {
       status: 'error',
       finishedAt,
       durationMs,
+      tokensUsed: streamResult?.totalTokens || undefined,
       errorMessage,
     })
 
@@ -757,12 +921,14 @@ export async function executeRun(options: ExecuteRunOptions): Promise<AppRunResu
       type: 'run_error',
       ts: finishedAt,
       sessionKey,
-      content: {
-        summary: `Run failed: ${errorMessage}`,
-        status: 'error',
-        durationMs,
-        error: errorMessage,
-      },
+      content: missing
+        ? { summary: errorMessage, status: 'error', durationMs, missingConnections: missing }
+        : {
+          summary: `Run failed: ${errorMessage}`,
+          status: 'error',
+          durationMs,
+          error: errorMessage,
+        },
     }
 
     try {
@@ -771,18 +937,18 @@ export async function executeRun(options: ExecuteRunOptions): Promise<AppRunResu
       console.error('[Runtime] Failed to insert error activity entry:', insertErr)
     }
 
-    // Save error session summary to memory
-    await saveRunSessionSummary(memory, memoryScope, {
+    // Save error session summary to memory (no compaction on the error path)
+    await finalizeMemoryAfterTurn(memory, memoryScope, {
       appName: app.spec.name,
       runId,
       trigger,
       outcome: 'error',
       durationMs,
-      tokensUsed: 0,
+      tokensUsed: streamResult?.totalTokens ?? 0,
       finalText: `Error: ${errorMessage}`,
       escalation: false,
       runTag,
-    })
+    }, appConsolidationInputs(app, selfInstance.id), { saveSessionSummary: true, consolidate: false })
 
     return {
       appId: app.id,
@@ -792,6 +958,8 @@ export async function executeRun(options: ExecuteRunOptions): Promise<AppRunResu
       startedAt,
       finishedAt,
       durationMs,
+      tokensUsed: streamResult?.totalTokens || undefined,
+      tokenUsage: streamResult?.usage,
       errorMessage,
     }
   } finally {
@@ -801,16 +969,21 @@ export async function executeRun(options: ExecuteRunOptions): Promise<AppRunResu
     //    The run-detail view detects completion from the app runtime status
     //    (broadcast separately by the service) and reloads the JSONL transcript.
     unregisterActiveRun(runId)
+    releaseEngineStop?.()
+    if (runSenderKey) closeRunSender(runSenderKey)
 
     // ── 9. Close session ────────────────────────────────────
     // Always close the session. Escalation follow-up recovers context
     // via CC's disk-based resume (sessionId), not process reuse.
     if (session) {
       try {
-        session.close()
+        closeSession()
         console.log(`[Runtime][${runTag}] Session closed`)
       } catch (closeErr) {
         console.error(`[Runtime] Failed to close session: run=${runId}:`, closeErr)
+      } finally {
+        sessionLease?.release()
+        if (managedSessionActive) unregisterActiveSession(sessionKey)
       }
     }
 
@@ -826,6 +999,27 @@ export async function executeRun(options: ExecuteRunOptions): Promise<AppRunResu
 // Stream Processing
 // ============================================
 
+/** Take a turn's token usage from its result message. */
+function noteResultUsage(result: StreamResult, m: any): void {
+  // On the halo engine `usage` already includes sub-agents' tokens.
+  if (m.usage) {
+    result.totalTokens = (m.usage.input_tokens || 0) + (m.usage.output_tokens || 0)
+  }
+  if (m.cumulative_usage) {
+    result.totalTokens =
+      (m.cumulative_usage.input_tokens || 0) + (m.cumulative_usage.output_tokens || 0)
+  }
+  const usage = m.cumulative_usage ?? m.usage
+  if (usage) {
+    result.usage = {
+      inputTokens: usage.input_tokens || 0,
+      outputTokens: usage.output_tokens || 0,
+      cacheReadTokens: usage.cache_read_input_tokens || 0,
+      cacheCreationTokens: usage.cache_creation_input_tokens || 0,
+    }
+  }
+}
+
 /**
  * Process the V2 session stream for a headless automation run.
  *
@@ -840,13 +1034,19 @@ export async function executeRun(options: ExecuteRunOptions): Promise<AppRunResu
  * block-level messages arrive — one JSONL append per completed block.
  *
  * Returns the StreamResult shape the completion logic in executeRun expects.
+ *
+ * @param turnAskedUser whether this turn has raised an escalation; when it has,
+ *   the run is ended at the next safe point (see escalation-cut.ts).
  */
 async function processStream(
   session: any,
   message: string,
   abortController: AbortController,
   runTag: string,
-  writer?: SessionWriter
+  writer?: SessionWriter,
+  turnAskedUser?: () => boolean,
+  runId?: string,
+  onPendingInputAbandoned?: () => void
 ): Promise<StreamResult> {
   const result: StreamResult = {
     finalText: '',
@@ -855,70 +1055,92 @@ async function processStream(
     reportToolCalled: false,
   }
 
+  // Stopped before this turn was sent (e.g. while the engine was starting): do not start it.
+  if (abortController.signal.aborted) {
+    console.log(`[Runtime][${runTag}] Run stopped before its turn was sent`)
+    if (runId) unregisterActiveRun(runId)
+    return result
+  }
+
   session.send(message)
+  if (runId) notifyActiveRunReady(runId)
 
   let messageCount = 0
   let toolUseCount = 0
+  const cutPoint = new TurnCutPoint()
 
+  let stopNoticed = false
   try {
-    for await (const sdkMessage of session.stream()) {
-      if (abortController.signal.aborted) {
-        console.log(`[Runtime][${runTag}] Run aborted during stream processing`)
-        break
-      }
-      if (!sdkMessage || typeof sdkMessage !== 'object') continue
+    do {
+      for await (const sdkMessage of session.stream()) {
+        if (!sdkMessage || typeof sdkMessage !== 'object') continue
+        const msgType = (sdkMessage as { type?: string }).type
 
-      const msgType = (sdkMessage as { type?: string }).type
-      messageCount++
+        // Stopped: nothing more is handled, but the interrupted turn still reports
+        // its tokens in the result that ends the stream (a stop that is not
+        // answered closes the engine, which ends it too — see engine-stop.ts).
+        if (abortController.signal.aborted) {
+          if (!stopNoticed) {
+            stopNoticed = true
+            console.log(`[Runtime][${runTag}] Run aborted during stream processing`)
+          }
+          if (msgType === 'result') noteResultUsage(result, sdkMessage)
+          continue
+        }
 
-      // Persist assistant/user messages to the run JSONL for "View process" reload.
-      // (No stream_event frames arrive — partials are off.)
-      if (writer && (msgType === 'assistant' || msgType === 'user')) {
-        writer.writeEvent(sdkMessage as Record<string, unknown>)
-      }
+        messageCount++
 
-      if (msgType === 'assistant') {
-        const content = (sdkMessage as any).message?.content
-        if (Array.isArray(content)) {
-          for (const block of content) {
-            if (block.type === 'text' && typeof block.text === 'string') {
-              result.finalText += block.text
-            }
-            if (block.type === 'tool_use') {
-              toolUseCount++
-              // report_to_user (MCP name: mcp__halo-report__report_to_user) is the
-              // definitive completion signal for automation runs.
-              if (typeof block.name === 'string' && block.name.includes('report_to_user')) {
-                result.reportToolCalled = true
+        // Persist assistant/user messages to the run JSONL for "View process" reload.
+        // (No stream_event frames arrive — partials are off.)
+        if (writer && (msgType === 'assistant' || msgType === 'user')) {
+          writer.writeEvent(sdkMessage as Record<string, unknown>)
+        }
+
+        if (msgType === 'assistant') {
+          const content = (sdkMessage as any).message?.content
+          if (Array.isArray(content)) {
+            for (const block of content) {
+              if (block.type === 'text' && typeof block.text === 'string') {
+                result.finalText += block.text
+              }
+              if (block.type === 'tool_use') {
+                toolUseCount++
+                // report_to_user (MCP name: mcp__halo-report__report_to_user) is the
+                // definitive completion signal for automation runs.
+                if (typeof block.name === 'string' && block.name.includes('report_to_user')) {
+                  result.reportToolCalled = true
+                }
               }
             }
           }
         }
-      }
 
-      if (msgType === 'result') {
-        const m = sdkMessage as any
-        if (m.usage) {
-          result.totalTokens = (m.usage.input_tokens || 0) + (m.usage.output_tokens || 0)
-        }
-        if (m.cumulative_usage) {
-          result.totalTokens =
-            (m.cumulative_usage.input_tokens || 0) + (m.cumulative_usage.output_tokens || 0)
-        }
-        if (m.is_error || m.error_during_execution) {
-          result.aiReportedError = true
-          if (typeof m.result === 'string' && m.result.length > 0) {
-            result.aiReportedErrorDetail = m.result
+        if (msgType === 'result') {
+          const m = sdkMessage as any
+          noteResultUsage(result, m)
+          if (m.is_error || m.error_during_execution) {
+            result.aiReportedError = true
+            if (typeof m.result === 'string' && m.result.length > 0) {
+              result.aiReportedErrorDetail = explainEngineError(m.result)
+            }
+            console.warn(`[Runtime][${runTag}] AI reported error in result message`)
           }
-          console.warn(`[Runtime][${runTag}] AI reported error in result message`)
+        }
+
+        // Capture the CC session id so a user can later resume / continue this run.
+        if (msgType === 'system' && (sdkMessage as any).subtype === 'init' && (sdkMessage as any).session_id) {
+          result.sessionId = (sdkMessage as any).session_id
+        }
+
+        // The run asked the user something: it is over, and the transcript the
+        // answer will resume against is now complete.
+        if (cutPoint.observe(sdkMessage) && turnAskedUser?.()) {
+          console.log(`[Runtime][${runTag}] Escalation raised — ending the run here; the answer resumes it`)
+          abortController.abort()
+          break
         }
       }
-
-      // Capture the CC session id so a user can later resume / continue this run.
-      if (msgType === 'system' && (sdkMessage as any).subtype === 'init' && (sdkMessage as any).session_id) {
-        result.sessionId = (sdkMessage as any).session_id
-      }
-    }
+    } while (!abortController.signal.aborted && session.hasPendingInput?.())
   } catch (streamErr) {
     if (abortController.signal.aborted) {
       console.log(`[Runtime][${runTag}] Stream aborted (expected)`)
@@ -930,6 +1152,10 @@ async function processStream(
         streamErr instanceof Error ? streamErr.message : String(streamErr)
       )
     }
+  } finally {
+    // Close acceptance before any asynchronous run finalization can receive a late message.
+    if (runId) unregisterActiveRun(runId)
+    if (abortController.signal.aborted && session.hasPendingInput?.()) onPendingInputAbandoned?.()
   }
 
   console.log(
@@ -939,626 +1165,4 @@ async function processStream(
   )
 
   return result
-}
-
-// ============================================
-// Session Summary
-// ============================================
-
-/** Max length for the summary content written to memory */
-const MAX_SUMMARY_LENGTH = 2000
-
-/** Parameters for building a session summary */
-interface RunSummaryContext {
-  appName: string
-  runId: string
-  trigger: TriggerContext
-  outcome: AppRunResult['outcome']
-  durationMs: number
-  tokensUsed: number
-  finalText: string
-  escalation: boolean
-  runTag: string
-}
-
-/**
- * Save a session summary to the app's memory archive.
- *
- * Generates a concise markdown summary from the run context and writes it
- * to memory/{date}-{slug}.md via MemoryService.saveSessionSummary().
- * This is a best-effort operation -- failures are logged but not re-thrown.
- */
-async function saveRunSessionSummary(
-  memory: MemoryService,
-  scope: MemoryCallerScope,
-  ctx: RunSummaryContext
-): Promise<void> {
-  // Skip noop runs -- they have no meaningful content to summarize
-  if (ctx.outcome === 'noop') {
-    console.log(`[Runtime][${ctx.runTag}] Skipping session summary (noop run)`)
-    return
-  }
-
-  try {
-    const summaryContent = buildSummaryContent(ctx)
-    const slug = buildSummarySlug(ctx)
-
-    await memory.saveSessionSummary(scope, 'app', { content: summaryContent, slug })
-    console.log(`[Runtime][${ctx.runTag}] Session summary saved (slug=${slug})`)
-  } catch (err) {
-    // Best-effort: do not fail the run if summary write fails
-    console.error(`[Runtime][${ctx.runTag}] Failed to save session summary:`, err)
-  }
-}
-
-/**
- * Build a concise markdown summary from the run context.
- */
-function buildSummaryContent(ctx: RunSummaryContext): string {
-  const lines: string[] = []
-
-  lines.push(`**App:** ${ctx.appName}`)
-  lines.push(`**Trigger:** ${ctx.trigger.type}`)
-  lines.push(`**Outcome:** ${ctx.outcome}`)
-  lines.push(`**Duration:** ${ctx.durationMs}ms`)
-
-  if (ctx.tokensUsed > 0) {
-    lines.push(`**Tokens:** ${ctx.tokensUsed}`)
-  }
-
-  if (ctx.escalation) {
-    lines.push(`**Escalation:** yes`)
-  }
-
-  // Include the AI's output (truncated to keep file sizes manageable)
-  if (ctx.finalText.trim()) {
-    const truncated = ctx.finalText.length > MAX_SUMMARY_LENGTH
-      ? truncateUtf16Safe(ctx.finalText, MAX_SUMMARY_LENGTH) + '\n\n*(truncated)*'
-      : ctx.finalText
-    lines.push('')
-    lines.push('## Output')
-    lines.push('')
-    lines.push(truncated)
-  }
-
-  return lines.join('\n')
-}
-
-/**
- * Generate a filename slug from the run context.
- * Produces slugs like "run-daily-report" or "run-error".
- */
-function buildSummarySlug(ctx: RunSummaryContext): string {
-  const prefix = ctx.outcome === 'error' ? 'error' : 'run'
-  // Use first few words of the app name for a human-readable slug
-  const appSlug = ctx.appName
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, '-')
-    .replace(/^-|-$/g, '')
-    .slice(0, 30)
-  return `${prefix}-${appSlug}`
-}
-
-// ============================================
-// Memory Compaction
-// ============================================
-
-/** Max content length to send for LLM compaction (to control token usage) */
-const MAX_COMPACTION_INPUT_LENGTH = 50000
-
-/**
- * Max LLM output tokens for compaction.
- *
- * Set deliberately high so the model is never the truncation constraint.
- * Actual output length is guided by prompt instructions (target 60-120 lines),
- * not by this limit. A hard cutoff would produce malformed markdown.
- */
-const COMPACTION_MAX_TOKENS = 16384
-
-/** Max retry attempts when LLM output fails format validation */
-const COMPACTION_MAX_RETRIES = 2
-
-/** Abort timeout for the one-shot agent-SDK compaction query */
-const COMPACTION_AGENT_SDK_TIMEOUT_MS = 120_000
-
-/**
- * Only Claude locks its OAuth tokens to first-party clients (api.anthropic.com
- * rejects bare @anthropic-ai/sdk calls with 403 even with a valid token), so
- * only Claude OAuth compaction must go through the agent SDK's cli.js
- * subprocess, which carries Anthropic's request signing. Copilot/智谱 OAuth
- * ride the same local OpenAI-compat router as their normal chat turns
- * (resolveCredentialsForSdk → encoded BackendConfig), which is not
- * first-party-locked (#121).
- *
- * Delegated sources join the first-party bucket too: they hold no key at all,
- * and the CLI subprocess is their only credential carrier — a raw SDK call
- * would reach the router with an empty key and no routing header, fail, and
- * silently fall back to the heuristic compaction summary.
- */
-export function providerRequiresFirstPartyClient(
-  provider: string,
-  oauthProvider?: string,
-  delegatedAuth?: boolean
-): boolean {
-  return delegatedAuth || (provider === 'oauth' && oauthProvider === 'claude')
-}
-
-/**
- * Check if app memory needs compaction and perform it if necessary.
- *
- * Flow:
- * 1. Check if memory.md exceeds the compaction threshold (100KB)
- * 2. Read the current content before archiving
- * 3. Archive the old memory.md to memory/ directory
- * 4. Generate a concise LLM summary with format validation and retry
- * 5. Write the summary as the new memory.md
- *
- * This is a best-effort operation -- failures are logged but not re-thrown.
- */
-async function checkAndCompactMemory(
-  memory: MemoryService,
-  scope: MemoryCallerScope,
-  app: InstalledApp,
-  runTag: string
-): Promise<void> {
-  try {
-    const needsCompaction = await memory.needsCompaction(scope, 'app')
-    if (!needsCompaction) return
-
-    console.log(`[Runtime][${runTag}] Memory compaction triggered for app=${app.id}`)
-
-    // Read the current content BEFORE archiving (so we can summarize it)
-    const currentContent = await memory.read(scope, { scope: 'app', mode: 'full' })
-    if (!currentContent) {
-      console.log(`[Runtime][${runTag}] Memory file empty/missing, skipping compaction`)
-      return
-    }
-
-    // Archive the old memory.md
-    const { archived, needsSummary } = await memory.compact(scope, 'app')
-    if (!needsSummary) {
-      console.log(`[Runtime][${runTag}] Compaction complete, no summary needed`)
-      return
-    }
-
-    console.log(`[Runtime][${runTag}] Memory archived to ${archived}, generating LLM summary...`)
-
-    // Generate compaction summary via LLM (with validation + retry)
-    const summary = await generateCompactionSummary(
-      currentContent,
-      app.spec.name,
-      app,
-      runTag
-    )
-
-    // Write the summary as the new memory.md
-    await memory.write(scope, {
-      scope: 'app',
-      content: summary,
-      mode: 'replace'
-    })
-
-    console.log(
-      `[Runtime][${runTag}] Memory compacted: ` +
-      `old=${(currentContent.length / 1024).toFixed(1)}KB → ` +
-      `new=${(summary.length / 1024).toFixed(1)}KB`
-    )
-  } catch (err) {
-    // Best-effort: compaction failure should not break the run
-    console.error(`[Runtime][${runTag}] Memory compaction failed:`, err)
-  }
-}
-
-/**
- * Validate that compacted memory contains the two mandatory H1 headings.
- *
- * Both `# now` and `# History` must appear as standalone H1 lines.
- * Without them, downstream functions (preInsertHistoryHeading, snapshot
- * injection) will produce corrupt state.
- */
-function isValidCompaction(content: string): boolean {
-  return /^# now\s*$/m.test(content) && /^# History\s*$/m.test(content)
-}
-
-/** Build the compaction prompt for the LLM */
-function buildCompactionPrompt(content: string, appName: string): string {
-  return (
-    `You are compacting the memory file for an automation app called "${appName}".\n\n` +
-    `## Current Memory Content\n\n${content}\n\n` +
-    `## Output Format\n\n` +
-    `You MUST produce output in exactly this structure:\n\n` +
-    '```\n' +
-    `# now\n\n` +
-    `## State | one-line summary\n` +
-    `(current state values only — drop stale/superseded entries)\n\n` +
-    `## EntityName\n` +
-    `(active entities only — merge duplicates, drop entities not seen recently)\n\n` +
-    `## Patterns\n` +
-    `(proven patterns only — drop one-off observations)\n\n` +
-    `## Errors\n` +
-    `(unresolved errors only — drop resolved ones)\n\n` +
-    `# History\n\n` +
-    `## YYYY-MM-DD-HHmm | summary\n` +
-    `(keep the most recent ~10 entries, drop older ones)\n` +
-    '```\n\n' +
-    `## Rules\n\n` +
-    `- Output ONLY the compacted markdown, no explanations or commentary\n` +
-    `- Every entry in \`# now\` must be current and actionable\n` +
-    `- Aim for roughly 60–120 lines total\n` +
-    `- Both \`# now\` and \`# History\` H1 headings are MANDATORY — never omit them\n` +
-    `- Preserve the original entity names and data values exactly\n` +
-    `- Older History entries are already archived in memory/run/ files, safe to drop`
-  )
-}
-
-/**
- * Generate a concise summary of memory content via direct LLM API call,
- * with format validation and multi-turn retry.
- *
- * Flow:
- * 1. Send compaction prompt to LLM
- * 2. Validate output contains `# now` and `# History`
- * 3. If invalid, retry with feedback (up to COMPACTION_MAX_RETRIES times)
- * 4. After all retries exhausted, keep the last LLM output as-is
- * 5. Only fall back to code-based extraction on API-level failures
- *
- * Provider fork (#121): first-party-locked providers (Claude OAuth) reject
- * bare @anthropic-ai/sdk calls with 403, so they go through the agent SDK's
- * cli.js subprocess instead. All other providers keep the raw SDK path.
- */
-async function generateCompactionSummary(
-  content: string,
-  appName: string,
-  app: InstalledApp,
-  runTag: string
-): Promise<string> {
-  try {
-    const config = getConfig()
-    const credentials = app.userOverrides?.modelSourceId
-      ? await getApiCredentialsForSource(config, app.userOverrides.modelSourceId, app.userOverrides.modelId)
-      : await getApiCredentials(config)
-
-    if (providerRequiresFirstPartyClient(credentials.provider, credentials.oauthProvider, credentials.delegatedAuth)) {
-      return await generateCompactionViaAgentSdk(content, appName, app, credentials, runTag)
-    }
-    return await generateCompactionViaRawSdk(content, appName, credentials, runTag)
-  } catch (err) {
-    console.error(`[Runtime][${runTag}] LLM compaction failed, using fallback:`, err)
-    return buildFallbackCompactionSummary(content)
-  }
-}
-
-/**
- * Compaction via a one-shot agent SDK query. The resolved router credentials
- * are the same ones the run's main session uses, so the cli.js subprocess
- * path carries whatever signing the provider requires.
- *
- * No retry loop here: the prompt already mandates the H1 structure, and on
- * invalid or failed output the caller-facing semantics (fallback below)
- * keep the archived memory recoverable.
- */
-async function generateCompactionViaAgentSdk(
-  content: string,
-  appName: string,
-  app: InstalledApp,
-  credentials: Awaited<ReturnType<typeof getApiCredentials>>,
-  runTag: string
-): Promise<string> {
-  const resolved = await resolveCredentialsForSdk(credentials)
-
-  const truncatedContent = content.length > MAX_COMPACTION_INPUT_LENGTH
-    ? truncateUtf16Safe(content, MAX_COMPACTION_INPUT_LENGTH) + '\n\n... (truncated)'
-    : content
-
-  const abortController = new AbortController()
-  const timeoutId = setTimeout(() => abortController.abort(), COMPACTION_AGENT_SDK_TIMEOUT_MS)
-
-  try {
-    const queryIterator = agentSdkQuery({
-      prompt: buildCompactionPrompt(truncatedContent, appName),
-      options: {
-        model: resolved.sdkModel,
-        anthropicBaseUrl: resolved.anthropicBaseUrl,
-        cwd: getWorkingDir(app.spaceId!),
-        executable: getHeadlessElectronPath(),
-        executableArgs: ['--no-warnings'],
-        // Same env builder as regular sessions (buildBaseSdkOptions does the
-        // same): it routes delegated sources via ANTHROPIC_CUSTOM_HEADERS —
-        // never ANTHROPIC_API_KEY, which would override the CLI's own
-        // credential — and pins CLAUDE_CONFIG_DIR, where the delegated CLI
-        // looks up that credential.
-        env: buildSdkEnv({
-          anthropicApiKey: resolved.anthropicApiKey,
-          anthropicBaseUrl: resolved.anthropicBaseUrl,
-          delegatedRoutingHeader: resolved.delegatedRoutingHeader,
-          capabilities: resolved.capabilities,
-        }),
-        permissionMode: 'bypassPermissions',
-        abortController,
-        maxTurns: 1,
-      } as any,
-    })
-
-    let lastOutput = ''
-    for await (const msg of queryIterator) {
-      if (msg.type === 'assistant') {
-        const blocks = (msg as any).message?.content
-        if (Array.isArray(blocks)) {
-          lastOutput += blocks
-            .filter((block: any) => block.type === 'text')
-            .map((block: any) => block.text)
-            .join('')
-        }
-      } else if (msg.type === 'result') {
-        const resultText = (msg as any).result ?? (msg as any).message?.result ?? ''
-        if (typeof resultText === 'string' && resultText.length > lastOutput.length) {
-          lastOutput = resultText
-        }
-        break
-      }
-    }
-
-    if (lastOutput.trim().length === 0) {
-      console.warn(`[Runtime][${runTag}] Agent-SDK compaction returned no usable output, using fallback`)
-      return buildFallbackCompactionSummary(content)
-    }
-    if (!isValidCompaction(lastOutput)) {
-      console.warn(
-        `[Runtime][${runTag}] Agent-SDK compaction output missing required headings, using fallback`
-      )
-      return buildFallbackCompactionSummary(content)
-    }
-    return lastOutput
-  } finally {
-    clearTimeout(timeoutId)
-  }
-}
-
-/**
- * Compaction via the raw @anthropic-ai/sdk client (not a full SDK session)
- * for minimal overhead. The call goes through the resolved credentials so it
- * works with all non-locked provider types (Anthropic API key, OpenAI-compat).
- */
-async function generateCompactionViaRawSdk(
-  content: string,
-  appName: string,
-  credentials: Awaited<ReturnType<typeof getApiCredentials>>,
-  runTag: string
-): Promise<string> {
-  const { default: Anthropic } = await import('@anthropic-ai/sdk')
-  const resolved = await resolveCredentialsForSdk(credentials)
-
-  // Truncate input if too large
-  const truncatedContent = content.length > MAX_COMPACTION_INPUT_LENGTH
-    ? truncateUtf16Safe(content, MAX_COMPACTION_INPUT_LENGTH) + '\n\n... (truncated)'
-    : content
-
-  const client = new Anthropic({
-    apiKey: resolved.anthropicApiKey,
-    baseURL: resolved.anthropicBaseUrl,
-  })
-
-  const prompt = buildCompactionPrompt(truncatedContent, appName)
-
-  // Build conversation for multi-turn retry
-  const messages: Array<{ role: 'user' | 'assistant'; content: string }> = [
-    { role: 'user', content: prompt },
-  ]
-
-  let lastOutput = ''
-
-  // Attempt 1 + up to COMPACTION_MAX_RETRIES retries
-  for (let attempt = 0; attempt <= COMPACTION_MAX_RETRIES; attempt++) {
-    const response = await client.messages.create({
-      model: resolved.sdkModel,
-      max_tokens: COMPACTION_MAX_TOKENS,
-      messages,
-    })
-
-    const output = response.content
-      .filter((block: any) => block.type === 'text')
-      .map((block: any) => block.text)
-      .join('')
-
-    if (output.trim().length === 0) {
-      console.warn(`[Runtime][${runTag}] Compaction attempt ${attempt + 1}: LLM returned empty output`)
-      // On empty output, don't retry — go to fallback
-      break
-    }
-
-    lastOutput = output
-
-    if (isValidCompaction(output)) {
-      if (attempt > 0) {
-        console.log(`[Runtime][${runTag}] Compaction succeeded on retry ${attempt}`)
-      }
-      return output
-    }
-
-    // Validation failed — log and prepare retry
-    console.warn(
-      `[Runtime][${runTag}] Compaction attempt ${attempt + 1}: ` +
-      `output missing required headings (has # now: ${/^# now\s*$/m.test(output)}, ` +
-      `has # History: ${/^# History\s*$/m.test(output)})`
-    )
-
-    if (attempt < COMPACTION_MAX_RETRIES) {
-      // Add the failed output as assistant message, then feedback as user message
-      messages.push({ role: 'assistant', content: output })
-      messages.push({
-        role: 'user',
-        content:
-          'Your output is missing the required H1 headings. ' +
-          'The compacted memory MUST contain both `# now` and `# History` as H1 headings ' +
-          '(lines starting with exactly `# now` and `# History`). ' +
-          'Please output the corrected compacted memory.',
-      })
-    }
-  }
-
-  // All attempts exhausted: use last LLM output if we have one, otherwise fallback
-  if (lastOutput.trim().length > 0) {
-    console.warn(
-      `[Runtime][${runTag}] Compaction retries exhausted, ` +
-      `keeping last LLM output (${lastOutput.length} chars)`
-    )
-    return lastOutput
-  }
-
-  console.warn(`[Runtime][${runTag}] LLM returned no usable output, using fallback`)
-  return buildFallbackCompactionSummary(content)
-}
-
-/**
- * Fallback compaction when LLM API is completely unavailable.
- *
- * Extracts the `# now` and `# History` sections from the original content
- * and produces a valid two-tier structure. This ensures downstream functions
- * (preInsertHistoryHeading, snapshot injection) continue to work correctly.
- *
- * Strategy:
- * - `# now` block: first 50 content lines (up to `# History`)
- * - `# History` block: last 10 `## YYYY-` timestamped entry groups
- */
-function buildFallbackCompactionSummary(content: string): string {
-  const lines = content.split('\n')
-
-  // ── Extract # now section ──────────────────────────────────
-  let nowStart = -1
-  let nowEnd = lines.length
-  for (let i = 0; i < lines.length; i++) {
-    if (/^# now\s*$/.test(lines[i])) {
-      nowStart = i
-    } else if (nowStart >= 0 && /^# [^#]/.test(lines[i]) && !/^# now\s*$/.test(lines[i])) {
-      // Hit another H1 heading — end of # now
-      nowEnd = i
-      break
-    }
-  }
-
-  let nowLines: string[]
-  if (nowStart >= 0) {
-    // Take the # now section, capped at 50 content lines
-    const sectionLines = lines.slice(nowStart, nowEnd)
-    nowLines = sectionLines.slice(0, 51) // # now heading + up to 50 lines
-  } else {
-    // No # now found — create a minimal skeleton
-    nowLines = ['# now', '', '## State']
-  }
-
-  // ── Extract recent # History entries ───────────────────────
-  let historyStart = -1
-  for (let i = 0; i < lines.length; i++) {
-    if (/^# History\s*$/.test(lines[i])) {
-      historyStart = i
-      break
-    }
-  }
-
-  const historyEntries: string[][] = []
-  if (historyStart >= 0) {
-    let currentEntry: string[] = []
-    for (let i = historyStart + 1; i < lines.length; i++) {
-      if (/^## /.test(lines[i])) {
-        if (currentEntry.length > 0) {
-          historyEntries.push(currentEntry)
-        }
-        currentEntry = [lines[i]]
-      } else if (currentEntry.length > 0) {
-        currentEntry.push(lines[i])
-      }
-    }
-    if (currentEntry.length > 0) {
-      historyEntries.push(currentEntry)
-    }
-  }
-
-  // Keep last 10 entries (they are newest-first in the file)
-  const recentEntries = historyEntries.slice(0, 10)
-
-  // ── Assemble valid output ──────────────────────────────────
-  const parts = [
-    '<!-- Compacted by system (LLM unavailable) -->',
-    '',
-    ...nowLines,
-    '',
-    '# History',
-    '',
-    ...recentEntries.flatMap(entry => [...entry, '']),
-  ]
-
-  return parts.join('\n').trimEnd() + '\n'
-}
-
-// ============================================
-// History Heading Pre-insertion
-// ============================================
-
-/**
- * Format a Date as YYYY-MM-DD-HHmm (local time, no colons).
- * This format is used consistently for:
- * - # History headings in memory.md
- * - Run file names in memory/run/
- * - Compaction archive file names
- */
-function formatRunTimestamp(date: Date): string {
-  const y = date.getFullYear()
-  const m = (date.getMonth() + 1).toString().padStart(2, '0')
-  const d = date.getDate().toString().padStart(2, '0')
-  const h = date.getHours().toString().padStart(2, '0')
-  const min = date.getMinutes().toString().padStart(2, '0')
-  return `${y}-${m}-${d}-${h}${min}`
-}
-
-/**
- * Pre-insert a timestamp heading at the top of # History in memory.md.
- *
- * If the file doesn't exist, creates a skeleton with # now and # History.
- * If # History section exists, inserts ## YYYY-MM-DD-HHmm right after it.
- * If # History doesn't exist (old format), appends it at the end.
- *
- * @param memoryFilePath - Absolute path to memory.md
- * @param timestamp - Formatted run timestamp (YYYY-MM-DD-HHmm)
- * @param preReadContent - Pre-read file content from the snapshot, or null if file doesn't exist.
- *                         Avoids a redundant disk read when the caller already has the content.
- */
-async function preInsertHistoryHeading(
-  memoryFilePath: string,
-  timestamp: string,
-  preReadContent: string | null
-): Promise<void> {
-  const { readFile, writeFile, mkdir } = await import('fs/promises')
-  const { dirname } = await import('path')
-  const { existsSync } = await import('fs')
-
-  const dir = dirname(memoryFilePath)
-  if (!existsSync(dir)) {
-    await mkdir(dir, { recursive: true })
-  }
-
-  const heading = `## ${timestamp}`
-
-  if (preReadContent === null) {
-    // Create skeleton with # now and # History
-    const skeleton = `# now\n\n## State\n\n# History\n\n${heading}\n`
-    await writeFile(memoryFilePath, skeleton, 'utf-8')
-    return
-  }
-
-  const content = preReadContent
-
-  // Find # History line
-  const historyMatch = content.match(/^# History\s*$/m)
-  if (historyMatch && historyMatch.index !== undefined) {
-    // Insert the new heading right after "# History\n"
-    const insertPos = historyMatch.index + historyMatch[0].length
-    const before = content.slice(0, insertPos)
-    const after = content.slice(insertPos)
-    const newContent = before + `\n\n${heading}` + after
-    await writeFile(memoryFilePath, newContent, 'utf-8')
-  } else {
-    // No # History section found — append it
-    const appendContent = content.trimEnd() + `\n\n# History\n\n${heading}\n`
-    await writeFile(memoryFilePath, appendContent, 'utf-8')
-  }
 }

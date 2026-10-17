@@ -25,6 +25,7 @@ import { useSpaceStore } from '../../stores/space.store'
 import { useAppStore } from '../../stores/app.store'
 import { Popover, PopoverTrigger, PopoverContent } from '../ui/Popover'
 import { BookOpen, Check, Star, Pin, ArrowRight } from 'lucide-react'
+import { trackNavigate } from '../../services/home-telemetry'
 
 const NO_IDS: string[] = []
 
@@ -36,9 +37,9 @@ export function KnowledgeBaseButton() {
   const setDefaultKB = useTlonStore(s => s.setDefaultKB)
   const bindSpace = useTlonStore(s => s.bindSpace)
   const unbindSpace = useTlonStore(s => s.unbindSpace)
-  const setView = useAppStore(s => s.setView)
+  const navigate = useAppStore(s => s.navigate)
 
-  const getCurrentConversationId = useChatStore(s => s.getCurrentConversationId)
+  const getActiveConversationId = useChatStore(s => s.getActiveConversationId)
   const getCachedConversation = useChatStore(s => s.getCachedConversation)
   const createConversation = useChatStore(s => s.createConversation)
   const attachKnowledgeBase = useChatStore(s => s.attachKnowledgeBase)
@@ -51,7 +52,7 @@ export function KnowledgeBaseButton() {
   useEffect(() => { void loadKBs() }, [loadKBs])
 
   const spaceId = currentSpace?.id ?? null
-  const convId = getCurrentConversationId()
+  const convId = getActiveConversationId()
   const convIds = (convId ? cache.get(convId)?.knowledgeBaseIds : undefined) ?? NO_IDS
   const defaultKb = kbs.find(k => k.isDefault)
   // Before the conversation exists, mirror what the main process would seed:
@@ -66,7 +67,7 @@ export function KnowledgeBaseButton() {
 
   const toggleKb = async (kbId: string) => {
     if (!spaceId) return
-    let conversationId = getCurrentConversationId()
+    let conversationId = getActiveConversationId()
     if (!conversationId) {
       const conv = await createConversation(spaceId)
       conversationId = conv?.id ?? null
@@ -92,21 +93,22 @@ export function KnowledgeBaseButton() {
 
   const openKnowledgePage = () => {
     setOpen(false)
-    setView('tlon')
+    trackNavigate('tlon', 'composer', 'composer')
+    navigate('tlon')
   }
 
   return (
     <Popover open={open} onOpenChange={setOpen}>
       <PopoverTrigger
         title={t('Load knowledge bases into this conversation')}
-        className={`h-8 shrink-0 items-center gap-1.5 px-2.5 rounded-lg cursor-pointer transition-colors duration-200 ${
+        className={`h-8 shrink-0 items-center gap-[5px] px-[9px] rounded-sm cursor-pointer transition-colors ease-halo ${
           active
-            ? 'bg-primary/10 text-primary'
-            : 'text-muted-foreground/50 hover:text-muted-foreground hover:bg-muted/50'
+            ? 'bg-primary/[0.12] text-accent-on-dark'
+            : 'text-muted-foreground hover:text-foreground hover:bg-secondary'
         }`}
       >
-        <BookOpen size={15} className="flex-shrink-0" />
-        <span className="text-xs">{t('Knowledge')}</span>
+        <BookOpen size={17} className="flex-shrink-0" />
+        <span className="text-xs whitespace-nowrap">{t('Knowledge')}</span>
         {count > 0 && (
           <span className="text-[10px] leading-none min-w-[15px] h-[15px] px-1 rounded-full bg-primary/20 text-primary inline-flex items-center justify-center tabular-nums">
             {count}
@@ -167,7 +169,7 @@ export function KnowledgeBaseButton() {
                         <p className="truncate">{kb.name}</p>
                         {isPinned && (
                           <span className="text-[9px] leading-none px-1 py-0.5 rounded bg-primary/15 text-primary flex-shrink-0 uppercase tracking-wide">
-                            {t('Space')}
+                            {t('Workspace')}
                           </span>
                         )}
                         {isDefault && (
@@ -184,7 +186,7 @@ export function KnowledgeBaseButton() {
                       type="button"
                       onClick={(e) => toggleSpaceBinding(e, kb.id)}
                       className={`p-1 rounded hover:bg-muted flex-shrink-0 ${isPinned ? 'text-primary' : 'text-muted-foreground/40'}`}
-                      title={isPinned ? t('Always enabled in this space (applies to new conversations)') : t('Always enable in this space (applies to new conversations)')}
+                      title={isPinned ? t('Always enabled in this workspace (applies to new conversations)') : t('Always enable in this workspace (applies to new conversations)')}
                     >
                       <Pin className="w-3.5 h-3.5" fill={isPinned ? 'currentColor' : 'none'} />
                     </button>

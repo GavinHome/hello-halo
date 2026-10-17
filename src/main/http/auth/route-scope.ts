@@ -1,0 +1,62 @@
+/**
+ * Office-member route allowlist — the HTTP security boundary.
+ *
+ * This is the single source of truth for which `/api/*` endpoints an
+ * office-member credential may reach. It is DEFAULT DENY: only the team
+ * read-only family below is permitted. Any control-plane endpoint
+ * (`/api/agent/*`, team run/pause/members/edges, file/shell, PIN-only routes,
+ * space/config/system, etc.) falls through to `false` and the middleware
+ * answers 403.
+ *
+ * Paths are matched against the FULL request path including the `/api` prefix
+ * (e.g. `/api/teams/abc123/epochs`). `:param` segments match a single path
+ * segment (no '/').
+ */
+
+interface ScopeRoute {
+  method: 'GET' | 'POST'
+  regex: RegExp
+}
+
+/** Convert a `:param` route pattern into an anchored, segment-safe regex. */
+function patternToRegex(pattern: string): RegExp {
+  const escaped = pattern
+    .replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+    .replace(/:[^/]+/g, '[^/]+')
+  return new RegExp(`^${escaped}$`)
+}
+
+/**
+ * The office-member allowlist: the team READ-ONLY family plus the two
+ * member-dispatch endpoints (send-to-member and its stop). The POSTs are
+ * admitted here only so the credential reaches the route; each route then
+ * enforces who may dispatch to whom (canContact + canCoordinationWrite) —
+ * stopping a member is gated as dispatching to it, never more loosely.
+ * Exported so downstream slices and tests can introspect the security boundary.
+ *
+ * Deliberately absent: the team itself, its detail, a run's board and the
+ * artifact listings. Their responses carry what only the host's own client may
+ * see (members' delegated policies, every member's open questions and checks,
+ * the host's local space ids and file paths) and are not filtered for office
+ * members. Do not add them back until they are.
+ */
+export const OFFICE_READ_ROUTES: ScopeRoute[] = [
+  { method: 'GET', regex: patternToRegex('/api/teams/:teamId/chat-messages') },
+  { method: 'GET', regex: patternToRegex('/api/teams/:teamId/epochs') },
+  { method: 'POST', regex: patternToRegex('/api/teams/:teamId/members/:appId/send') },
+  { method: 'POST', regex: patternToRegex('/api/teams/:teamId/members/:appId/stop') },
+]
+
+/**
+ * Whether an office-member credential may reach (method, path). Returns true
+ * ONLY for the team read-only family above; everything else is denied.
+ */
+export function matchOfficeScope(method: string, path: string): boolean {
+  const upper = method.toUpperCase()
+  for (const route of OFFICE_READ_ROUTES) {
+    if (route.method === upper && route.regex.test(path)) {
+      return true
+    }
+  }
+  return false
+}

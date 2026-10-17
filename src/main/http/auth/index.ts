@@ -12,6 +12,8 @@
  *   audit            — JSONL audit log
  *   alert            — desktop notification on lockout
  *   middleware       — express auth gate + login handler
+ *   download-ticket  — two-minute single-file tickets that download links
+ *                      carry instead of the token
  */
 
 export {
@@ -26,6 +28,16 @@ export {
 
 export { logAuthEvent } from './audit'
 
-export { authMiddleware, handleLogin, authenticateWebSocket } from './middleware'
+export { authMiddleware, handleLogin, authenticateWebSocket, getOfficeCredential } from './middleware'
+
+export {
+  issueOfficeCredential,
+  verifyOfficeCredential,
+  revokeOfficeCredential,
+  parseCredentialType,
+} from './office-credential'
+export type { CredentialType, OfficeCredential, OfficeCredentialClaims } from './office-credential'
+
+export { matchOfficeScope, OFFICE_READ_ROUTES } from './route-scope'
 
 export { encodeForStorage, decodeFromStorage, needsKeyMigration } from '../../foundation/crypto-envelope'

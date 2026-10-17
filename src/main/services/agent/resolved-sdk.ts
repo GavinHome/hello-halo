@@ -45,6 +45,7 @@
  *   before initialization.
  */
 
+import type { z } from 'zod'
 import { getConfig } from '../../foundation/config.service'
 import { installSdkLogger } from '../../foundation/logging'
 import { getEngineAvailability, type EngineAvailability } from './engine-availability'
@@ -95,6 +96,11 @@ let _degradedFrom: EngineId | null = null
  * Order engines are tried in once the configured one is ruled out. Anthropic
  * leads because it is the default engine and the only one whose package is a
  * plain registry dependency.
+ *
+ * dsh is absent on purpose: it is opt-in and most builds do not ship its
+ * runtime, so it is only ever loaded when the config asks for it by name.
+ * Degrading an unrelated engine onto it would move a user to a runtime they
+ * never selected.
  */
 const FALLBACK_ORDER: EngineId[] = ['anthropic', 'halo', 'codex']
 
@@ -103,6 +109,7 @@ const ENGINE_LABELS: Record<EngineId, string> = {
   anthropic: 'CC SDK (@anthropic-ai/claude-agent-sdk)',
   halo: 'Halo SDK (@hello-halo/agent-sdk)',
   codex: 'Codex SDK (@openai/codex-sdk adapter)',
+  dsh: 'DeepSeek Harness (bundled runtime)',
 }
 
 // ============================================
@@ -133,7 +140,9 @@ async function doInitSdk(): Promise<void> {
   const requested = normalizeEngineId(getConfig().agent?.sdkEngine)
   console.log(`[SDK] Initializing engine: ${requested}`)
 
-  const availability = await getEngineAvailability()
+  // Only the engines this startup may load: probing one nobody selected would
+  // put its cost (dsh spawns `node --version`) on every user's launch.
+  const availability = await getEngineAvailability([...new Set([requested, ...FALLBACK_ORDER])])
   const attemptOrder = buildAttemptOrder(requested, availability)
 
   if (attemptOrder.length === 0) {
@@ -182,7 +191,7 @@ async function doInitSdk(): Promise<void> {
 
 /** Coerce an arbitrary persisted value to a known engine id. */
 function normalizeEngineId(value: unknown): EngineId {
-  if (value === 'anthropic' || value === 'halo' || value === 'codex') return value
+  if (value === 'anthropic' || value === 'halo' || value === 'codex' || value === 'dsh') return value
   if (value != null && value !== '') {
     console.warn(`[SDK] Unknown SDK engine "${String(value)}" in config; using "anthropic".`)
   }
@@ -214,6 +223,7 @@ async function loadEngine(engineId: EngineId): Promise<SdkModule> {
     return sdk
   }
   if (engineId === 'codex') return loadCodexSdk()
+  if (engineId === 'dsh') return loadDshSdk()
   return loadCcSdk()
 }
 
@@ -241,6 +251,11 @@ async function loadCodexSdk(): Promise<SdkModule> {
   // happens inside `codex/transport/connection.ts` (`resolveBundledCodexBinary`).
   const { createCodexSdkModule } = await import('./codex')
   return createCodexSdkModule() as unknown as SdkModule
+}
+
+async function loadDshSdk(): Promise<SdkModule> {
+  const { createDshSdkModule } = await import('./dsh')
+  return createDshSdkModule() as unknown as SdkModule
 }
 
 async function loadCcSdk(): Promise<SdkModule> {
@@ -276,22 +291,36 @@ function ensureInitialized(): SdkModule {
 // All functions delegate to the dynamically loaded SDK module.
 // Consumer code does not need to change — same function signatures.
 
+/** Handler input inferred from the zod shape a tool declares. */
+type ToolInput<Shape extends Record<string, z.ZodTypeAny>> = {
+  [K in keyof Shape]: z.infer<Shape[K]>
+}
+
 /**
  * Define an MCP tool with schema validation.
+ *
+ * The runtime behavior is whatever the active SDK provides; this wrapper only
+ * adds compile-time typing so handler `input` is inferred from the zod shape
+ * instead of falling to implicit `any`.
  *
  * @example
  * const myTool = tool(
  *   'my_tool',
  *   'Does something useful',
- *   z.object({ path: z.string() }),
- *   async (args) => { ... }
+ *   { path: z.string() },
+ *   async (input) => { ... }  // input: { path: string }
  * )
  */
-export function tool(...args: any[]): any {
+export function tool<Shape extends Record<string, z.ZodTypeAny>>(
+  name: string,
+  description: string,
+  inputSchema: Shape,
+  handler: (input: ToolInput<Shape>, extra?: unknown) => Promise<any>
+): any {
   if (process.env.SDK_DEBUG) {
     console.log(`[SDK] tool() called, engine=${_engine}`)
   }
-  return ensureInitialized().tool(...args)
+  return ensureInitialized().tool(name, description, inputSchema, handler)
 }
 
 /**

@@ -72,6 +72,26 @@
     "path": "/api/spaces/:spaceId"
   },
   {
+    "method": "PUT",
+    "path": "/api/spaces/:spaceId/working-dir"
+  },
+  {
+    "method": "GET",
+    "path": "/api/spaces/:spaceId/preferences"
+  },
+  {
+    "method": "PUT",
+    "path": "/api/spaces/:spaceId/preferences"
+  },
+  {
+    "method": "GET",
+    "path": "/api/spaces/:spaceId/memory"
+  },
+  {
+    "method": "POST",
+    "path": "/api/spaces/:spaceId/memory/consolidate"
+  },
+  {
     "method": "DELETE",
     "path": "/api/spaces/:spaceId"
   },
@@ -149,6 +169,10 @@
   },
   {
     "method": "GET",
+    "path": "/api/spaces/:spaceId/artifacts/query"
+  },
+  {
+    "method": "GET",
     "path": "/api/spaces/:spaceId/artifacts/tree"
   },
   {
@@ -212,6 +236,10 @@
     "path": "/api/wecom-bot/reconnect"
   },
   {
+    "method": "POST",
+    "path": "/api/feishu-bot/reachability"
+  },
+  {
     "method": "GET",
     "path": "/api/im-channels/status"
   },
@@ -257,6 +285,14 @@
   },
   {
     "method": "GET",
+    "path": "/api/im-sessions/linked"
+  },
+  {
+    "method": "POST",
+    "path": "/api/im-sessions/set-push-link"
+  },
+  {
+    "method": "GET",
     "path": "/api/auth/providers"
   },
   {
@@ -294,6 +330,22 @@
   {
     "method": "POST",
     "path": "/api/apps/:appId/clear-memory"
+  },
+  {
+    "method": "GET",
+    "path": "/api/apps/:appId/memory"
+  },
+  {
+    "method": "POST",
+    "path": "/api/apps/:appId/memory/consolidate"
+  },
+  {
+    "method": "GET",
+    "path": "/api/apps/:appId/reminders"
+  },
+  {
+    "method": "DELETE",
+    "path": "/api/apps/:appId/reminders/:reminderId"
   },
   {
     "method": "POST",
@@ -380,6 +432,14 @@
     "path": "/api/apps/:appId/chat/restart"
   },
   {
+    "method": "GET",
+    "path": "/api/apps/:appId/chats/clearable"
+  },
+  {
+    "method": "POST",
+    "path": "/api/apps/:appId/chats/clear-all"
+  },
+  {
     "method": "POST",
     "path": "/api/apps/:appId/im-chat/clear"
   },
@@ -398,6 +458,134 @@
   {
     "method": "POST",
     "path": "/api/apps/:appId/sessions/delete"
+  },
+  {
+    "method": "GET",
+    "path": "/api/teams"
+  },
+  {
+    "method": "POST",
+    "path": "/api/teams"
+  },
+  {
+    "method": "POST",
+    "path": "/api/teams/propose-members"
+  },
+  {
+    "method": "GET",
+    "path": "/api/teams/collab-for-conversation/:conversationId"
+  },
+  {
+    "method": "POST",
+    "path": "/api/teams/:teamId/save-collab"
+  },
+  {
+    "method": "GET",
+    "path": "/api/teams/:teamId"
+  },
+  {
+    "method": "GET",
+    "path": "/api/teams/:teamId/detail"
+  },
+  {
+    "method": "GET",
+    "path": "/api/teams/:teamId/chat-messages"
+  },
+  {
+    "method": "POST",
+    "path": "/api/teams/:teamId/members/:appId/send"
+  },
+  {
+    "method": "POST",
+    "path": "/api/teams/:teamId/members/:appId/stop"
+  },
+  {
+    "method": "GET",
+    "path": "/api/teams/:teamId/artifacts"
+  },
+  {
+    "method": "GET",
+    "path": "/api/teams/:teamId/conversations"
+  },
+  {
+    "method": "POST",
+    "path": "/api/teams/:teamId/conversations"
+  },
+  {
+    "method": "PATCH",
+    "path": "/api/teams/:teamId/conversations/:epochId"
+  },
+  {
+    "method": "DELETE",
+    "path": "/api/teams/:teamId/conversations/:epochId"
+  },
+  {
+    "method": "GET",
+    "path": "/api/teams/:teamId/epochs"
+  },
+  {
+    "method": "GET",
+    "path": "/api/teams/:teamId/epochs/:epochId/board"
+  },
+  {
+    "method": "GET",
+    "path": "/api/teams/:teamId/epochs/:epochId/artifacts"
+  },
+  {
+    "method": "PATCH",
+    "path": "/api/teams/:teamId"
+  },
+  {
+    "method": "DELETE",
+    "path": "/api/teams/:teamId"
+  },
+  {
+    "method": "POST",
+    "path": "/api/teams/:teamId/members"
+  },
+  {
+    "method": "PATCH",
+    "path": "/api/teams/:teamId/members/:appId"
+  },
+  {
+    "method": "DELETE",
+    "path": "/api/teams/:teamId/checks/:checkId"
+  },
+  {
+    "method": "DELETE",
+    "path": "/api/teams/:teamId/members/:appId"
+  },
+  {
+    "method": "PUT",
+    "path": "/api/teams/:teamId/edges"
+  },
+  {
+    "method": "POST",
+    "path": "/api/teams/:teamId/run"
+  },
+  {
+    "method": "POST",
+    "path": "/api/teams/:teamId/pause"
+  },
+  {
+    "method": "GET",
+    "path": "/api/teams/:teamId/triggers"
+  },
+  {
+    "method": "POST",
+    "path": "/api/teams/:teamId/triggers"
+  },
+  {
+    "method": "POST",
+    "path": "/api/teams/:teamId/leave"
+  },
+  {
+    "method": "GET",
+    "path": "/api/teams/:teamId/federation/presence"
+  },
+  {
+    "method": "DELETE",
+    "path": "/api/teams/:teamId/triggers/:triggerId"
   },
   {
     "method": "POST",
@@ -550,6 +738,10 @@
   {
     "method": "DELETE",
     "path": "/api/tlon/:kbId/linked-dirs/:linkId"
+  },
+  {
+    "method": "POST",
+    "path": "/api/tlon/:kbId/linked-dirs/:linkId/retry"
   },
   {
     "method": "POST",

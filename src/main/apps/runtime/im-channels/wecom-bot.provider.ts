@@ -44,19 +44,19 @@ import AiBot, {
   type VideoMessage,
   type MixedMessage,
   type Logger as SdkLogger,
-  type WeComMediaType,
 } from '@wecom/aibot-node-sdk'
-import { readFile } from 'fs/promises'
+import { readFile, stat } from 'fs/promises'
 import { tmpdir } from 'os'
 import { join, basename, extname } from 'path'
-import type {
-  ImChannelProvider,
-  ImChannelInstance,
-  ImFileCapability,
-  ImIdentityCapability,
-  ImChannelConfigFieldDef,
-  ImChannelType,
-  ImConnectionState,
+import {
+  imCredentialId,
+  type ImChannelProvider,
+  type ImChannelInstance,
+  type ImFileCapability,
+  type ImIdentityCapability,
+  type ImChannelConfigFieldDef,
+  type ImChannelType,
+  type ImConnectionState,
 } from '../../../../shared/types/im-channel'
 import type {
   InboundMessage,
@@ -65,18 +65,22 @@ import type {
   StreamingHandle,
   ProgressEvent,
 } from '../../../../shared/types/inbound-message'
-import type { ImageAttachment, ImageMediaType } from '../../../services/agent/types'
+import type { ImageAttachment, ImageMediaType } from '../../../../shared/types/image-attachment'
 import {
+  WECOM_MESSAGE_LIMIT,
   WecomStreamSession,
   type StreamingTransport,
   type StreamLogger,
   type StreamLogLevel,
 } from './wecom-stream-session'
 import { ensureUtf8 } from './wecom-content-utf8'
+import { sendAsMessages } from './message-parts'
 import { ConnectionArbiter } from './connection-arbiter'
 import { stageMediaFile, pruneMediaTempDir } from './media-temp-files'
 import { notifyAppEvent } from '../../../services/notification.service'
+import { resolveProxyAgent } from '../../../services/proxy-fetch'
 import { fetchWecomIdentityDirectory } from './wecom-identity-resolve'
+import { downloadWecomMedia } from './wecom-media-download'
 
 // ============================================
 // Constants
@@ -105,6 +109,47 @@ const TEMP_DIR = join(tmpdir(), 'halo-wecom')
 const IMAGE_EXTENSIONS = new Set([
   '.jpg', '.jpeg', '.png', '.gif', '.bmp', '.webp',
 ])
+
+const MIB = 1024 * 1024
+
+/**
+ * WeCom's upload limit for each media type this channel sends.
+ *
+ * The platform refuses a larger upload only after all of it has been sent.
+ * These are read as binary megabytes, the larger reading, so no file the
+ * platform accepts is refused here; its own rejection, now passed on, covers
+ * any gap.
+ */
+const UPLOAD_LIMIT_BYTES = {
+  image: 10 * MIB,
+  file: 20 * MIB,
+} as const
+
+/** An image too big to send as one still fits as a file attachment. */
+function mediaTypeFor(ext: string, bytes: number): keyof typeof UPLOAD_LIMIT_BYTES {
+  return IMAGE_EXTENSIONS.has(ext) && bytes <= UPLOAD_LIMIT_BYTES.image ? 'image' : 'file'
+}
+
+/**
+ * A readable reason from whatever a send rejected with. A failed ack rejects
+ * with the platform's raw frame rather than an Error, which String() turned
+ * into "[object Object]" and lost its errcode and errmsg.
+ */
+function describeSendFailure(err: unknown): string {
+  if (err instanceof Error) return err.message
+  if (err && typeof err === 'object') {
+    const { errcode, errmsg } = err as { errcode?: unknown; errmsg?: unknown }
+    if (errcode !== undefined) {
+      return errmsg ? `errcode ${String(errcode)}: ${String(errmsg)}` : `errcode ${String(errcode)}`
+    }
+    try {
+      return JSON.stringify(err)
+    } catch {
+      // Not serializable; fall through.
+    }
+  }
+  return String(err)
+}
 
 // ============================================
 // Structured Logging
@@ -235,6 +280,11 @@ export class WecomBotProvider implements ImChannelProvider {
    * 7-day-expiring credential gets re-pasted.
    */
   readonly hotUpdatableConfigKeys = ['nameResolveUrl']
+
+  /** Two enabled instances sharing a Bot ID would duplicate inbound traffic. */
+  credentialId(config: Record<string, unknown>): string | undefined {
+    return imCredentialId(this.type, config)
+  }
 
   createInstance(instanceId: string, config: Record<string, unknown>): ImChannelInstance {
     return new WecomBotInstance(instanceId, config as unknown as WecomBotProviderConfig)
@@ -457,7 +507,8 @@ class WecomBotInstance implements ImChannelInstance {
    * resolves on ack, but the ImChannelInstance contract is `boolean` — we
    * fire-and-forget and report whether the WS was ready to accept the send.
    * Errors after the synchronous return are logged but do not retroactively
-   * change the return value.
+   * change the return value. Text longer than one message goes out as ordered
+   * parts, each sent once the previous one is acked.
    */
   pushToChat(
     chatId: string,
@@ -476,35 +527,15 @@ class WecomBotInstance implements ImChannelInstance {
       return false
     }
 
-    const sanitized = ensureUtf8(text)
-    const bytes = Buffer.byteLength(sanitized, 'utf8')
-
-    // Fire and forget — the SDK queues + acks under the hood.
-    void this.wsClient
-      .sendMessage(chatId, {
-        msgtype: 'markdown',
-        markdown: { content: sanitized },
-      })
-      .then(() => {
-        this.counters.totalPush++
-        logEvent(this.instanceId, 'info', 'push_sent', {
-          trace,
-          chatId,
-          chatType,
-          bytes,
-        })
-      })
-      .catch((err: Error) => {
-        this.counters.totalError++
-        logEvent(this.instanceId, 'error', 'push_send_error', {
-          trace,
-          chatId,
-          chatType,
-          cat: 'network',
-          err: err.message,
-        })
-      })
+    void sendAsMessages(ensureUtf8(text), WECOM_MESSAGE_LIMIT, (part) =>
+      this.pushToChatAwaited(chatId, part, chatType, trace),
+    { chat: this.chatKey(chatId) })
     return true
+  }
+
+  /** A chat as this bot's sends name it, so parts of two replies never interleave. */
+  private chatKey(chatId: string): string {
+    return `${this.providerType}:${this.instanceId}:${chatId}`
   }
 
   /**
@@ -530,8 +561,46 @@ class WecomBotInstance implements ImChannelInstance {
 
   // ── SDK client lifecycle ──────────────────────────────────────
 
+  /**
+   * Open the WebSocket.
+   *
+   * Kicked off without awaiting because the caller is synchronous; the proxy
+   * lookup it waits on is a local Chromium call, and `currentClient` already
+   * guards against a teardown landing mid-flight.
+   */
   private openClient(): void {
+    void this.openClientWithProxy().catch((err: unknown) => {
+      logEvent(this.instanceId, 'error', 'ws_open_threw', {
+        cat: 'internal',
+        err: err instanceof Error ? err.message : String(err),
+      })
+    })
+  }
+
+  private async openClientWithProxy(): Promise<void> {
     const wsUrl = this.config.wsUrl || DEFAULT_WS_URL
+
+    // On a machine that only reaches the internet through a proxy, a WebSocket
+    // opened without an agent connects to nothing — the SDK reads neither
+    // Halo's proxy setting nor the system one. Resolving it here puts this
+    // connection on the same route as every other outbound request.
+    let agent: Awaited<ReturnType<typeof resolveProxyAgent>>
+    try {
+      agent = await resolveProxyAgent(wsUrl.replace(/^ws/, 'http'))
+    } catch (err) {
+      agent = undefined
+      logEvent(this.instanceId, 'warn', 'proxy_resolve_failed', {
+        cat: 'network',
+        err: err instanceof Error ? err.message : String(err),
+      })
+    }
+    if (!this.active) {
+      logEvent(this.instanceId, 'info', 'ws_open_abandoned', { reason: 'stopped' })
+      return
+    }
+    if (agent) {
+      logEvent(this.instanceId, 'info', 'proxy_applied', { wsUrl })
+    }
 
     const sdkLogger = this.makeSdkLogger()
     const client = new AiBot.WSClient({
@@ -543,6 +612,7 @@ class WecomBotInstance implements ImChannelInstance {
       maxReconnectAttempts: -1,
       heartbeatInterval: 30_000,
       logger: sdkLogger,
+      ...(agent ? { wsOptions: { agent } } : {}),
     })
 
     // Ignore events from a superseded client object. teardownClient() /
@@ -1027,30 +1097,48 @@ class WecomBotInstance implements ImChannelInstance {
         // with quoteReply disabled), skip it entirely and go straight to
         // aibot_send_msg (proactive push, no req_id → plain text). Fall back to
         // push in both cases when the preferred path is unavailable.
-        const sanitized = ensureUtf8(text)
-        const replied = useQuoteReply
-          ? await this.replyMarkdown(chatId, sanitized, frame, trace)
-          : false
-        if (replied) return
-        const sourceTag = useQuoteReply ? `reply:${trace}` : `reply-noquote:${trace}`
-        logEvent(this.instanceId, 'info', useQuoteReply ? 'reply_fallback_to_push' : 'reply_skip_quote', {
-          trace,
-          chatId,
-          chatType,
-          quoteReply: useQuoteReply,
+        const delivered = await this.deliverReply(chatId, chatType, trace, frame, text, {
+          quoted: useQuoteReply,
+          sourceTag: useQuoteReply ? `reply:${trace}` : `reply-noquote:${trace}`,
         })
-        const pushed = await this.queuePush(
-          chatId, sanitized, chatType, sourceTag, trace,
-        )
-        if (!pushed) {
+        if (!delivered) {
           this.counters.totalError++
           throw new Error(
-            `[WecomBot:${this.instanceId}] Both reply and push failed for chat ${chatId} (trace=${trace})`,
+            `[WecomBot:${this.instanceId}] Reply not fully delivered to chat ${chatId} (trace=${trace})`,
           )
         }
       },
       ...(streaming ? { streaming } : {}),
     }
+  }
+
+  /**
+   * Deliver a reply of any length. Its first message is the quoted reply when
+   * `quoted` (pushed instead once the reply window is gone or the reply
+   * fails); a reply longer than one message continues as ordered pushes.
+   *
+   * @returns whether every message went out
+   */
+  private async deliverReply(
+    chatId: string,
+    chatType: 'direct' | 'group',
+    trace: string,
+    frame: WsFrameHeaders,
+    text: string,
+    route: { quoted: boolean; sourceTag: string },
+  ): Promise<boolean> {
+    return sendAsMessages(ensureUtf8(text), WECOM_MESSAGE_LIMIT, async (message, index) => {
+      if (index === 0) {
+        if (route.quoted && (await this.replyMarkdown(chatId, message, frame, trace))) return true
+        logEvent(this.instanceId, 'info', route.quoted ? 'reply_fallback_to_push' : 'reply_skip_quote', {
+          trace,
+          chatId,
+          chatType,
+          quoteReply: route.quoted,
+        })
+      }
+      return this.queuePush(chatId, message, chatType, route.sourceTag, trace)
+    }, { chat: this.chatKey(chatId) })
   }
 
   private async replyMarkdown(
@@ -1112,6 +1200,7 @@ class WecomBotInstance implements ImChannelInstance {
       frame,
       streamId: `stream_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
       chatId,
+      chatKey: this.chatKey(chatId),
       chatType,
       trace,
       transport: this.makeStreamingTransport(),
@@ -1187,34 +1276,22 @@ class WecomBotInstance implements ImChannelInstance {
     frame: WsFrameHeaders,
     finalText: string,
   ): Promise<void> {
-    const sanitized = ensureUtf8(finalText)
     logEvent(this.instanceId, 'info', 'streaming_finish_fallback_begin', {
       trace,
       chatId,
-      bytes: Buffer.byteLength(sanitized, 'utf8'),
+      bytes: Buffer.byteLength(finalText, 'utf8'),
     })
-    const replied = await this.replyMarkdown(chatId, sanitized, frame, trace)
-    if (replied) {
-      logEvent(this.instanceId, 'info', 'streaming_finish_fallback_via_reply', {
-        trace,
-        chatId,
-      })
-      return
-    }
-    const pushed = await this.queuePush(
-      chatId,
-      sanitized,
-      chatType,
-      `stream-finish:${trace}`,
-      trace,
-    )
-    if (!pushed) {
+    const delivered = await this.deliverReply(chatId, chatType, trace, frame, finalText, {
+      quoted: true,
+      sourceTag: `stream-finish:${trace}`,
+    })
+    if (!delivered) {
       this.counters.totalError++
       throw new Error(
         `[WecomBot:${this.instanceId}] streaming.finish fallback failed for chat ${chatId} (trace=${trace})`,
       )
     }
-    logEvent(this.instanceId, 'info', 'streaming_finish_fallback_via_push', {
+    logEvent(this.instanceId, 'info', 'streaming_finish_fallback_sent', {
       trace,
       chatId,
     })
@@ -1366,12 +1443,31 @@ class WecomBotInstance implements ImChannelInstance {
 
   // ── File send (uploadMedia + replyMedia / sendMediaMessage) ───
 
+  /**
+   * Rejects with an Error the digital human can relay to the user — a file over
+   * the size limit, or what the platform said — and resolves false only when
+   * the connection is down.
+   */
   private async sendFileToChat(
     chatId: string,
     filePath: string,
     chatType: 'direct' | 'group',
     filename?: string,
   ): Promise<boolean> {
+    const displayName = filename || basename(filePath)
+    const { size } = await stat(filePath)
+    const mediaType = mediaTypeFor(extname(filePath).toLowerCase(), size)
+    const limit = UPLOAD_LIMIT_BYTES[mediaType]
+    if (size > limit) {
+      logEvent(this.instanceId, 'warn', 'send_file_too_large', {
+        chatId, displayName, mediaType, bytes: size, limitBytes: limit,
+      })
+      throw new Error(
+        `The file is ${(size / MIB).toFixed(1)} MB, over the ${limit / MIB} MB limit WeCom sets for ` +
+        `${mediaType === 'image' ? 'images' : 'files'}. Compress it or split it into smaller parts, then send again.`,
+      )
+    }
+
     if (!this.wsClient || !this.authenticated) {
       logEvent(this.instanceId, 'warn', 'send_file_skip_ws_not_open', {
         chatId, cat: 'network',
@@ -1379,9 +1475,6 @@ class WecomBotInstance implements ImChannelInstance {
       return false
     }
     try {
-      const displayName = filename || basename(filePath)
-      const ext = extname(filePath).toLowerCase()
-      const mediaType: WeComMediaType = IMAGE_EXTENSIONS.has(ext) ? 'image' : 'file'
       const fileBuf = await readFile(filePath)
 
       logEvent(this.instanceId, 'info', 'send_file_start', {
@@ -1421,12 +1514,15 @@ class WecomBotInstance implements ImChannelInstance {
       return true
     } catch (err) {
       this.counters.totalError++
+      const reason = describeSendFailure(err)
       logEvent(this.instanceId, 'error', 'send_file_failed', {
         chatId,
+        displayName,
+        mediaType,
         cat: 'protocol',
-        err: err instanceof Error ? err.message : String(err),
+        err: reason,
       })
-      return false
+      throw new Error(`WeCom did not deliver the file: ${reason}`)
     }
   }
 
@@ -1472,9 +1568,8 @@ class WecomBotInstance implements ImChannelInstance {
     attachments: InboundAttachment[],
     images: ImageAttachment[],
   ): Promise<void> {
-    if (!this.wsClient) return
     try {
-      const { buffer, filename } = await this.wsClient.downloadFile(url, aesKey)
+      const { buffer, filename } = await downloadWecomMedia(url, aesKey)
       const staged = await stageMediaFile(TEMP_DIR, filename || `image_${Date.now()}.jpg`, buffer)
 
       const ext = (url.split('?')[0].split('.').pop() ?? '').toLowerCase()
@@ -1519,9 +1614,8 @@ class WecomBotInstance implements ImChannelInstance {
     fallbackName: string,
     attachments: InboundAttachment[],
   ): Promise<void> {
-    if (!this.wsClient) return
     try {
-      const { buffer, filename } = await this.wsClient.downloadFile(url, aesKey)
+      const { buffer, filename } = await downloadWecomMedia(url, aesKey)
       const staged = await stageMediaFile(TEMP_DIR, filename || fallbackName, buffer)
       attachments.push({ type, filename: staged.filename, localPath: staged.localPath })
       logEvent(this.instanceId, 'info', 'media_download_done', {
@@ -1560,6 +1654,7 @@ class WecomBotInstance implements ImChannelInstance {
     const f = fragment as {
       msgtype?: string
       text?: { content?: string }
+      voice?: { content?: string }
       file?: { filename?: string }
       link?: { title?: string; url?: string }
       mixed?: { msg_item?: Array<{ msgtype?: string; text?: { content?: string } }> }
@@ -1569,8 +1664,11 @@ class WecomBotInstance implements ImChannelInstance {
         return (f.text as TextMessage['text'] | undefined)?.content ?? ''
       case 'image':
         return '(image)'
-      case 'voice':
-        return '(voice message)'
+      case 'voice': {
+        // WeCom sends its own transcript of what was said.
+        const spoken = f.voice?.content?.trim()
+        return spoken ? `(voice transcript) ${spoken}` : '(voice message)'
+      }
       case 'file':
         return `(file: ${f.file?.filename ?? 'unknown'})`
       case 'video':

@@ -24,6 +24,7 @@
  */
 
 import type { InboundMessage, ReplyHandle } from './inbound-message'
+import type { CapabilityPolicy } from '../apps/capability-policy'
 
 // ============================================
 // GuestPolicy (IM permission control)
@@ -32,54 +33,11 @@ import type { InboundMessage, ReplyHandle } from './inbound-message'
 /**
  * Permission policy for non-owner (guest) users in IM channels.
  *
- * White-list model: only explicitly listed tools are allowed.
- * When `allowedTools` is undefined, all tools are allowed (no restriction).
- * When `allowedTools` is an empty array, no tools are allowed.
- *
- * At runtime, this list is split by prefix:
- *   - Built-in tools (no prefix) → SDK `disallowedTools` (inverted whitelist)
- *   - MCP tools → the injection-control fields below
- *
+ * Structurally the shared {@link CapabilityPolicy}; the guest scenario reads it
+ * in 'strict' mode (nothing granted unless listed), so an unset flag denies.
  * Used by ImChannelInstanceConfig (persisted) and ImPermissionContext (runtime).
  */
-export interface GuestPolicy {
-  /**
-   * Built-in tool names the guest is allowed to use (white-list).
-   * All built-in tools are selectable in the UI (advanced tools like
-   * Bash, Write, Edit, NotebookEdit are in a separate group). All off by default.
-   *
-   * undefined = all tools allowed (no tool restriction)
-   * []        = no tools allowed
-   */
-  allowedTools?: string[]
-
-  // ── Halo MCP injection control ──
-  // Conservative: not configured = not injected for guests.
-
-  /** Allow guest to use AI browser */
-  allowAiBrowser?: boolean
-  /** Allow guest to send email on behalf of owner */
-  allowEmail?: boolean
-  /** Allow guest to send notifications */
-  allowNotify?: boolean
-  /** Allow guest to manage digital humans */
-  allowApps?: boolean
-  /** Allow guest to send files via IM */
-  allowFileSend?: boolean
-  /**
-   * Allow guest to use on-device OCR (ocr_image). Gated because the tool reads
-   * arbitrary local file paths — unlike web-search/halo-memory it reaches the
-   * local filesystem, so it must be host-controlled like the other capabilities
-   * above rather than always-on.
-   */
-  allowOcr?: boolean
-
-  /**
-   * User-installed MCP server names (specId) that guests are allowed to use.
-   * Only servers in this list are injected into guest sessions.
-   */
-  allowedUserMcp?: string[]
-}
+export type GuestPolicy = CapabilityPolicy
 
 // ============================================
 // ImChannelInstanceConfig (Persisted)
@@ -96,20 +54,26 @@ export type ImChannelType = typeof IM_CHANNEL_TYPES[number]
 /**
  * Origin of a digital-human external session.
  *
- *   'im'    — a bidirectional IM channel session (WeCom, Feishu, ...). Has a
- *             live channel instance, so it can be proactively pushed to
- *             (notify_bot / auto-sync).
- *   'http'  — an external session created via the HTTP API. Read/write only
- *             through HTTP; there is no IM adapter, so it is NOT pushable.
- *   'local' — a native client-side chat session the desktop user created in
- *             the digital human's own chat window (multiple named sessions per
- *             app). Fully interactive, but not pushable and never auto-evicted
- *             (unlike 'http', which a backend can mint unboundedly).
+ *   'im'     — a bidirectional IM channel session (WeCom, Feishu, ...). Has a
+ *              live channel instance, so it can be proactively pushed to
+ *              (notify_bot / auto-sync).
+ *   'http'   — an external session created via the HTTP API. Read/write only
+ *              through HTTP; there is no IM adapter, so it is NOT pushable.
+ *   'local'  — a native client-side chat session the desktop user created in
+ *              the digital human's own chat window (multiple named sessions per
+ *              app). Fully interactive, but not pushable and never auto-evicted
+ *              (unlike 'http', which a backend can mint unboundedly).
+ *   'native' — the app's single default chat session ("app-chat:{appId}"),
+ *              registered here purely so the main conversation board can read
+ *              its message-activity summary (messageCount/lastMessage/
+ *              lastActiveAt) without loading the full JSONL transcript. Not an
+ *              external session in any sense — never pushable, never evicted,
+ *              and excluded from the global IM-session management UI.
  *
  * Stored explicitly rather than inferred from key shape: HTTP, IM, and local
  * keys share the same 5-segment format, so segment count cannot tell them apart.
  */
-export type SessionSource = 'im' | 'http' | 'local'
+export type SessionSource = 'im' | 'http' | 'local' | 'native'
 
 /**
  * Channel value used for external sessions created via the HTTP API.
@@ -127,17 +91,59 @@ export const HTTP_SESSION_CHANNEL = 'http'
 export const LOCAL_SESSION_CHANNEL = 'local'
 
 /**
+ * Channel value used for the app's single native default chat session
+ * ("app-chat:{appId}", the 2-segment form that {@link parseAppChatKey}
+ * deliberately returns null for). Registered under a synthetic
+ * {chatId: NATIVE_DEFAULT_CHAT_ID} so it can carry a message-activity summary
+ * in the same registry as every other session kind.
+ */
+export const NATIVE_SESSION_CHANNEL = 'native'
+
+/** Synthetic chatId for the native default session's registry record. */
+export const NATIVE_DEFAULT_CHAT_ID = 'default'
+
+/**
  * Classify a session's source from its channel value.
  *
  * Conservative: only channels explicitly registered in {@link IM_CHANNEL_TYPES}
- * are treated as IM (pushable). The native {@link LOCAL_SESSION_CHANNEL} is its
- * own source so it is exempt from HTTP eviction bounds. Everything else — the
- * HTTP channel and any unknown/future channel — is classified as 'http', so a
- * non-IM session can never accidentally leak into IM push paths.
+ * are treated as IM (pushable). {@link LOCAL_SESSION_CHANNEL} and
+ * {@link NATIVE_SESSION_CHANNEL} are their own sources so they are exempt from
+ * HTTP eviction bounds. Everything else — the HTTP channel and any
+ * unknown/future channel — is classified as 'http', so a non-IM session can
+ * never accidentally leak into IM push paths.
  */
 export function classifySessionSource(channel: string): SessionSource {
+  if (channel === NATIVE_SESSION_CHANNEL) return 'native'
   if (channel === LOCAL_SESSION_CHANNEL) return 'local'
   return (IM_CHANNEL_TYPES as readonly string[]).includes(channel) ? 'im' : 'http'
+}
+
+/**
+ * Which config field carries a built-in provider's credential identity.
+ * Single source of truth for {@link imCredentialId}; types absent here have no
+ * form-entered credential (e.g. weixin-ilink's token comes from a QR flow),
+ * so they never participate in duplicate-credential checks.
+ */
+const IM_CREDENTIAL_FIELDS: Partial<Record<ImChannelType, string>> = {
+  'wecom-bot': 'botId',
+  'feishu-bot': 'appId',
+}
+
+/**
+ * Credential identity of an instance config — what makes two instances "the
+ * same bot". The one implementation behind ImChannelProvider.credentialId for
+ * built-in providers AND the renderer's inline duplicate warning, so the
+ * per-brand field knowledge exists exactly once. Returns undefined when the
+ * type has no form credential or the field is still empty (half-filled form).
+ */
+export function imCredentialId(
+  type: ImChannelType,
+  config: Record<string, unknown> | undefined,
+): string | undefined {
+  const field = IM_CREDENTIAL_FIELDS[type]
+  if (!field) return undefined
+  const value = String(config?.[field] ?? '').trim()
+  return value || undefined
 }
 
 /**
@@ -151,8 +157,24 @@ export interface ImChannelInstanceConfig {
   type: ImChannelType
   /** Whether this instance is enabled */
   enabled: boolean
-  /** Bound digital human (App) ID — required for routing */
+  /**
+   * The digital human (App) that serves this channel — required for routing.
+   * Without `teamId` it is a standalone digital human; with `teamId` it is the
+   * bound member of that team (its lead, or any other member).
+   */
   appId: string
+  /**
+   * Optional team binding. Together with `appId` it names ONE member of that
+   * team as this chat's front desk: inbound messages run as that member, with
+   * team coordination tools and a long-lived 'conversation' epoch, so it can
+   * pull in teammates and answer the person itself.
+   *
+   * The member must run on this machine — a federated member's app is not
+   * installed here, so it cannot be driven locally (enforced at dispatch).
+   * The binding names a member, not a role: promoting a different lead does not
+   * re-point an existing channel.
+   */
+  teamId?: string
   /** Provider-specific configuration (e.g., botId, secret, wsUrl for WeCom) */
   config: Record<string, unknown>
   /**
@@ -163,6 +185,13 @@ export interface ImChannelInstanceConfig {
    * users can opt in per-instance via the UI toggle).
    */
   streaming?: boolean
+  /**
+   * Whether a reply sent as one message (streaming off) is preceded by a
+   * "received, working on it" notice when it has not come within a few
+   * seconds. Undefined = on; only an explicit false turns it off. A stream
+   * shows the same status in the reply itself, so this does not apply to it.
+   */
+  processingNotice?: boolean
   /**
    * Reply scope — controls which chat types this instance responds to.
    *   'all'    — respond to both group and direct messages
@@ -205,6 +234,12 @@ export interface ImChannelInstanceConfig {
    * When undefined, guests have no tool or path access (deny-all default).
    */
   guestPolicy?: GuestPolicy
+
+  /**
+   * The guest policy as it was when guest access was last turned off, so
+   * turning it back on restores the owner's choices. Never enforced.
+   */
+  savedGuestPolicy?: GuestPolicy
 }
 
 // ============================================
@@ -258,6 +293,22 @@ export interface ImChannelProvider {
    * is connection-relevant (the default, safe behavior).
    */
   readonly hotUpdatableConfigKeys?: string[]
+
+  /**
+   * Identity of the credential a config points at — what makes two instances
+   * "the same bot". Used to refuse binding one bot to two digital humans, which
+   * would split or duplicate its inbound traffic.
+   *
+   * Only the provider knows which of its fields carries that identity (`botId`,
+   * `appId`, an account handle, ...), so generic code must ask rather than guess.
+   * Return undefined when the config names no credential yet (a half-filled
+   * form). Providers that omit this get the legacy `config.botId` comparison.
+   *
+   * Built-in providers delegate to {@link imCredentialId} so the renderer's
+   * inline duplicate warning reads the same knowledge without a provider
+   * instance.
+   */
+  credentialId?(config: Record<string, unknown>): string | undefined
 
   /**
    * Create a running instance from persisted config.
@@ -328,7 +379,9 @@ export interface ImChannelInstance {
   getConnectionState?(): ImConnectionState
 
   /**
-   * Push a message proactively to a specific chat.
+   * Push a message proactively to a specific chat. `text` may be of any
+   * length: a provider whose platform caps one message sends a longer text as
+   * ordered parts.
    * @returns true if sent successfully, false otherwise
    */
   pushToChat(chatId: string, text: string, chatType: 'direct' | 'group'): boolean
@@ -398,6 +451,9 @@ export interface ImFileCapability {
    * @param file - A SanctionedFile produced by FileExportGate.sanction()
    * @param chatType - Conversation type ('direct' | 'group')
    * @returns true if sent successfully, false on recoverable failure
+   * @throws An Error whose message the caller relays to the user as is, when
+   *   the adapter knows why the file cannot be sent (e.g. it is over the
+   *   platform's size limit, or the platform said why it refused it)
    */
   sendFile(
     chatId: string,
@@ -483,7 +539,7 @@ export interface ImChannelAdapter {
    * in the current request cycle.
    *
    * @param chatId - Platform-side conversation ID
-   * @param text - Message content (Markdown format)
+   * @param text - Message content (Markdown format), of any length
    * @param chatType - Conversation type
    * @returns true if sent successfully, false otherwise
    */
@@ -508,6 +564,8 @@ export interface ImChannelInstanceStatus {
   id: string
   /** Provider type */
   type: ImChannelType
+  /** One-based position among this provider's configured bots, before any UI filtering. */
+  ordinal?: number
   /** Whether enabled in config */
   enabled: boolean
   /** Whether the connection is currently active */
@@ -564,6 +622,8 @@ export interface ImChannelInstanceStatus {
  * detail page (AppNotifyChannelsSection).
  */
 export interface ImSessionRecord {
+  /** Archive address; independent of the external delivery channel. */
+  teamContext?: { teamId: string; epochId: string }
   /** Associated digital human (App) ID */
   appId: string
   /** Channel type identifier: 'wecom-bot' | 'feishu-bot' | 'dingtalk-bot' | 'http' | ... */
@@ -581,6 +641,12 @@ export interface ImSessionRecord {
   chatId: string
   /** Conversation type */
   chatType: 'direct' | 'group'
+  /**
+   * Direct chats: the person on the other side, by the platform user ID an
+   * owner list holds. Some platforms give a direct chat an ID of its own, so
+   * `chatId` cannot stand in for it there. Absent until they next write.
+   */
+  contactId?: string
   /** Human-readable name for UI display (set once on first registration, never overwritten) */
   displayName: string
   /** User-assigned custom name — highest display priority */
@@ -598,12 +664,28 @@ export interface ImSessionRecord {
   /** Most recent message preview (truncated to 50 chars) */
   lastMessage?: string
   /**
+   * Total number of messages exchanged in this session. Incremented on every
+   * {@link ImSessionRegistry.register} call (one per inbound turn); absent on
+   * records persisted before this field existed (treat as unknown, not zero).
+   * Lets conversation-list UIs show an activity count without loading the
+   * full JSONL transcript.
+   */
+  messageCount?: number
+  /**
    * When true, the run's final assistant text response is auto-pushed to
    * this contact at run completion (apps/runtime/im-auto-sync.ts). The AI
    * is informed of this state via the auto-sync awareness fragment so it
    * does not duplicate via notify_bot.
    */
   proactive: boolean
+  /**
+   * Other digital humans the user added this chat to as a push target, from
+   * their own settings — so they can push here through this session's bot
+   * without the chat ever messaging them. Each carries its own auto-sync
+   * choice; replies still go to the digital human the bot answers for. Never
+   * lists the session's own app. IM sessions only.
+   */
+  pushLinks?: ImPushLink[]
   /** Last activity timestamp (epoch ms) */
   lastActiveAt: number
 
@@ -624,6 +706,13 @@ export interface ImSessionRecord {
    * first message captures the new forked session id. Absent thereafter.
    */
   pendingResumeSessionId?: string
+}
+
+/** A digital human that may push to a chat another digital human's bot knows (see {@link ImSessionRecord.pushLinks}). */
+export interface ImPushLink {
+  appId: string
+  /** Push the digital human's final reply here after each successful run, like {@link ImSessionRecord.proactive} */
+  autoSync: boolean
 }
 
 /**

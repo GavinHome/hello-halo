@@ -78,9 +78,11 @@ interface PopoverTriggerProps {
   className?: string
   /** Tooltip text; also used as the accessible name for icon-only triggers */
   title?: string
+  /** Accessible name without a native tooltip, for triggers whose popover already explains them */
+  ariaLabel?: string
 }
 
-export function PopoverTrigger({ children, className, title }: PopoverTriggerProps) {
+export function PopoverTrigger({ children, className, title, ariaLabel }: PopoverTriggerProps) {
   const { setOpen, open, triggerRef } = usePopoverCtx()
 
   return (
@@ -89,7 +91,9 @@ export function PopoverTrigger({ children, className, title }: PopoverTriggerPro
       role="button"
       tabIndex={0}
       title={title}
-      aria-label={title}
+      aria-label={ariaLabel ?? title}
+      aria-haspopup="dialog"
+      aria-expanded={open}
       onClick={() => setOpen(!open)}
       onKeyDown={e => {
         if (e.key === 'Enter' || e.key === ' ') {
@@ -117,6 +121,11 @@ interface PopoverContentProps {
   /** Gap between trigger and content (px) */
   sideOffset?: number
   className?: string
+  /** Intercept outside input above embedded documents, whose events cannot bubble here. */
+  dismissOverlay?: boolean
+  /** The content is portalled out of the trigger's tree, so hover-driven triggers track it here. */
+  onPointerEnter?: (e: React.PointerEvent<HTMLDivElement>) => void
+  onPointerLeave?: (e: React.PointerEvent<HTMLDivElement>) => void
 }
 
 export function PopoverContent({
@@ -125,6 +134,9 @@ export function PopoverContent({
   side = 'bottom',
   sideOffset = 4,
   className,
+  dismissOverlay = false,
+  onPointerEnter,
+  onPointerLeave,
 }: PopoverContentProps) {
   const { open, setOpen, triggerRef } = usePopoverCtx()
   const contentRef = useRef<HTMLDivElement>(null!)
@@ -194,7 +206,10 @@ export function PopoverContent({
     }
 
     const handleKeyDown = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') setOpen(false)
+      if (e.key !== 'Escape') return
+      // Mark the key used, so window-level handlers (the canvas collapsing on Esc) leave it alone.
+      e.preventDefault()
+      setOpen(false)
     }
 
     document.addEventListener('mousedown', handleMouseDown)
@@ -208,18 +223,34 @@ export function PopoverContent({
   if (!open) return null
 
   return createPortal(
-    <div
-      ref={contentRef}
-      role="dialog"
-      className={cn(
-        'fixed z-50 rounded-lg border border-border bg-popover text-popover-foreground shadow-lg outline-none',
-        ready ? 'animate-scale-in' : 'opacity-0',
-        className,
+    <>
+      {dismissOverlay && (
+        <div
+          aria-hidden="true"
+          data-popover-dismiss-overlay=""
+          className="fixed inset-0 z-50 no-drag"
+          onPointerDown={event => {
+            event.preventDefault()
+            event.stopPropagation()
+            setOpen(false)
+          }}
+        />
       )}
-      style={{ top: pos.top, left: pos.left }}
-    >
-      {children}
-    </div>,
+      <div
+        ref={contentRef}
+        role="dialog"
+        className={cn(
+          'fixed z-50 rounded-lg border border-border bg-popover text-popover-foreground shadow-pop outline-none',
+          ready ? 'animate-pop-in' : 'opacity-0',
+          className,
+        )}
+        style={{ top: pos.top, left: pos.left }}
+        onPointerEnter={onPointerEnter}
+        onPointerLeave={onPointerLeave}
+      >
+        {children}
+      </div>
+    </>,
     document.body,
   )
 }

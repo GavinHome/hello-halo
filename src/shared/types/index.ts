@@ -13,6 +13,10 @@ export type {
   LoginStatus,
   ApiProvider,
   ModelOption,
+  CodexCatalogEntry,
+  ModelCatalogCache,
+  ModelRefreshSummary,
+  ModelCatalogChangedEvent,
   AISourceUser,
   AISource,
   AISourcesConfig,
@@ -51,7 +55,10 @@ export {
   setCurrentSource,
   setCurrentModel,
   getAvailableModels,
-  resolveLocalizedText
+  resolveLocalizedText,
+  isAuthRequestString,
+  toPublicOAuthStartResult,
+  toPublicOAuthCompleteResult,
 } from './ai-sources'
 
 // Health System types
@@ -63,11 +70,17 @@ export * from './artifact'
 // Notification channel types (shared between main process and renderer)
 export * from './notification-channels'
 
+// Multimodal image attachment (renderer input → transport → runtime → transcript)
+export type { ImageAttachment, ImageMediaType } from './image-attachment'
+
 // In-app toast contract (main -> renderer, incl. remote/mobile over WebSocket)
 export * from './notification'
 
 // Announcement feed contract (remote JSON -> main)
 export * from './announcement'
+
+// Updater status contract (main -> renderer)
+export * from './updater'
 
 // Inbound message types (IM channel adapter boundary types)
 export * from './inbound-message'

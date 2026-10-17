@@ -55,9 +55,9 @@ export function setPtyHostCrashHandler(handler: () => void): void {
 }
 
 function getWorkerEntryPath(): string {
-  // electron-vite puts worker output under out/main/worker/pty-host/index.mjs;
+  // electron-vite puts worker output under out/main/worker/pty-host/index.cjs;
   // __dirname at runtime is out/main/.
-  return join(__dirname, 'worker/pty-host/index.mjs')
+  return join(__dirname, 'worker/pty-host/index.cjs')
 }
 
 function forkHost(): ChildProcess {
@@ -66,7 +66,8 @@ function forkHost(): ChildProcess {
 
   const child = fork(workerPath, [], {
     stdio: ['pipe', 'pipe', 'pipe', 'ipc'],
-    env: { ...process.env }
+    env: { ...process.env },
+    windowsHide: true,
   })
 
   child.on('message', (msg: PtyHostToMainMessage) => {
@@ -159,7 +160,7 @@ export function ptyHostRequest<T extends PtyHostRequest['type']>(
       timer
     })
 
-    host.send({ ...msg, requestId } as MainToPtyHostMessage)
+    host.send({ ...msg, requestId } as unknown as MainToPtyHostMessage)
   })
 }
 

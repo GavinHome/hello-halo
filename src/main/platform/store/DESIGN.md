@@ -27,9 +27,9 @@ runtime) depends on it for SQLite access. It must be the first module completed.
 
 ### 2.1 Existing SQLite usage in the project
 
-**None.** The project has zero `better-sqlite3` or SQLite dependencies. The only
-mention of "sqlite" in source code is in file-type constants for artifact display.
-This is a greenfield module.
+The app database backs scheduler, app manager/runtime, digital teams,
+federation, task state and the store's registry cache. Consumers obtain their
+connection and namespaced migrations through this module's public index.
 
 ### 2.2 better-sqlite3 characteristics
 
@@ -37,7 +37,9 @@ This is a greenfield module.
 - Runs in-process, no IPC overhead
 - Excellent performance for read-heavy workloads
 - WAL mode supports concurrent reads with one writer
-- Native addon -- needs `electron-rebuild` or `electron-builder` native dep handling
+- `better-sqlite3` 13 uses stable N-API with native prebuilds included in its npm
+  package. Its JavaScript database/statement API and SQLite file format remain
+  the persistence boundary; an Electron upgrade does not require a schema migration.
 - The project already uses `externalizeDepsPlugin()` in electron-vite, which
   externalizes all deps from the main process bundle. This handles native modules.
 
@@ -61,10 +63,20 @@ For the store module, we use `getHaloDir()` to get the base path, then append
 ### 2.5 Electron build pipeline
 
 `electron.vite.config.ts` uses `externalizeDepsPlugin()` which externalizes
-native Node modules. `better-sqlite3` will be automatically handled. The
-`package.json` build config already has `npmRebuild: false` and a `postinstall`
-script with `electron-builder install-app-deps` which rebuilds native modules
-for the correct Electron ABI.
+native Node modules. `better-sqlite3` remains external and loads its N-API
+binary from `prebuilds/<platform>-<arch>.node`. Packaging unpacks these binaries
+and keeps the target platform only. Preparation, binary checks and the packaging
+hook share the paths and architecture validation in
+`scripts/lib/better-sqlite3-prebuilds.mjs`; there is no Electron ABI download cache.
+
+The driver uses N-API 10, which requires Node 22.14+ for build tools; the app
+runs it under Electron 43's Node 24. macOS validation also rejects deployment
+targets newer than macOS 12. Linux uses upstream's stock prebuild unchanged, so
+the Linux floor is whatever that binary requires (glibc 2.34, Ubuntu 22.04).
+
+The WAL workload in `tests/perf/sqlite-native-benchmark.cjs` takes an optional
+driver directory, so matched runtime/driver pairs can be compared before and
+after an upgrade without using live data.
 
 ## 3. Key Design Decisions
 
@@ -145,6 +157,38 @@ Strategy: log + graceful degradation, never crash the app.
 3. **Migration failure**: Transaction rollback. The database stays at the previous
    version. Log the error. The consuming module can decide how to handle.
 
+### 3.5a Data written by a newer build (schema-ahead)
+
+Migrations are forward-only. An older build opening a database that a newer
+build already migrated finds nothing pending and would run against a shape it
+does not know — silent damage, not a startup failure. This stops being
+hypothetical when two installs share one data directory (stable and preview
+share `dataFolderName` by design; see `services/updater/DESIGN.md` §8).
+
+- **Detection.** `runMigrations` compares the namespace's stored version with
+  the newest migration the build carries, and throws `SchemaAheadError`
+  (namespace, stored, supported) when the stored one is higher. The newest
+  migration *is* the supported version, so there is no separate constant to
+  drift.
+- **Refuse, never degrade.** The caller must stop the process, not continue
+  with the module disabled: every write from a build that cannot read the
+  schema compounds the damage. `isSchemaAheadError` is exported so bootstrap
+  can tell this apart from an ordinary init failure; the dialog and exit live
+  in `bootstrap/schema-refusal.ts` because this module stays free of Electron
+  and UI.
+- **Pre-migration snapshot.** Before the first pending migration of a run,
+  a file-backed database with existing data (`currentVersion > 0`) is copied
+  with `VACUUM INTO` to `<db>.<timestamp>.premigrate.bak` — consistent even
+  with WAL content outstanding. Once per database per process, however many
+  namespaces migrate. A failed snapshot is logged and does not block startup:
+  refusing to start over a precaution would turn a full disk into an unusable
+  app. The newest two snapshots are kept; older ones are pruned, since each is
+  a full copy of a database that is routinely hundreds of MB.
+- **Why the snapshot matters.** It is the way back for a user who opened
+  their data with a newer build and needs the older one again; the refusal
+  dialog points them to it. Reinstalling does not help and is the one action
+  the dialog must not suggest.
+
 ### 3.6 PRAGMA configuration
 
 Applied on every connection open:
@@ -198,8 +242,10 @@ better-sqlite3's transaction API is slightly awkward to use raw.
 
 ```
 src/main/platform/store/
-  index.ts          -- Public API: initStore(), DatabaseManager, types
+  index.ts          -- Public API: initStore(), DatabaseManager, types,
+                       SchemaAheadError / isSchemaAheadError
   database-manager.ts -- DatabaseManager implementation
+  schema-guard.ts   -- schema-ahead error + pre-migration snapshot (§3.5a)
   types.ts          -- Migration, DatabaseManager interfaces
 ```
 

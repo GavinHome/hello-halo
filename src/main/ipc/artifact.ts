@@ -10,11 +10,15 @@
 import { shell } from 'electron'
 import {
   listArtifacts,
+  queryFiles,
+  resolveArtifactPaths,
   listArtifactsTree,
   loadTreeChildren,
-  initArtifactWatcher,
+  retainArtifactSpace,
+  releaseArtifactSpace,
   reconcileArtifacts,
   readArtifactContent,
+  readArtifactBytes,
   saveArtifactContent,
   detectFileType,
   createFile,
@@ -36,6 +40,27 @@ export function registerArtifactHandlers(): void {
         return { success: true, data: artifacts }
       } catch (error) {
         console.error('[IPC] artifact:list error:', error)
+        return { success: false, error: (error as Error).message }
+      }
+    },
+
+    // Best path matches for a typed query (the @ menu); only `limit` items cross
+    queryArtifactFiles: async (spaceId: string, query: string, limit: number) => {
+      try {
+        return { success: true, data: await queryFiles(spaceId, query, limit) }
+      } catch (error) {
+        console.error('[IPC] artifact:query-files error:', error)
+        return { success: false, error: (error as Error).message }
+      }
+    },
+
+    // Which mentioned paths are existing files of the space (links in AI replies)
+    resolveArtifactPaths: async (spaceId: string, paths: string[], baseDir?: string) => {
+      try {
+        if (typeof spaceId !== 'string' || !Array.isArray(paths)) return { success: false, error: 'Invalid arguments' }
+        return { success: true, data: await resolveArtifactPaths(spaceId, paths, typeof baseDir === 'string' ? baseDir : undefined) }
+      } catch (error) {
+        console.error('[IPC] artifact:resolve-paths error:', error)
         return { success: false, error: (error as Error).message }
       }
     },
@@ -64,14 +89,22 @@ export function registerArtifactHandlers(): void {
       }
     },
 
-    // Initialize file watcher for a space
-    initArtifactWatcher: async (spaceId: string) => {
+    // A client starts / stops showing a space (keeps or frees its cache and watcher)
+    retainArtifactSpace: async (spaceId: string, clientId: string) => {
       try {
-        console.log(`[IPC] artifact:init-watcher - spaceId: ${spaceId}`)
-        await initArtifactWatcher(spaceId)
+        return { success: true, data: await retainArtifactSpace(spaceId, clientId) }
+      } catch (error) {
+        console.error('[IPC] artifact:retain-space error:', error)
+        return { success: false, error: (error as Error).message }
+      }
+    },
+
+    releaseArtifactSpace: async (spaceId: string, clientId: string) => {
+      try {
+        await releaseArtifactSpace(spaceId, clientId)
         return { success: true }
       } catch (error) {
-        console.error('[IPC] artifact:init-watcher error:', error)
+        console.error('[IPC] artifact:release-space error:', error)
         return { success: false, error: (error as Error).message }
       }
     },
@@ -124,6 +157,19 @@ export function registerArtifactHandlers(): void {
         return { success: true, data: content }
       } catch (error) {
         console.error('[IPC] artifact:read-content error:', error)
+        return { success: false, error: (error as Error).message }
+      }
+    },
+
+    // Read raw bytes for the Canvas document viewers. The Buffer crosses the
+    // bridge as a Uint8Array via structured clone — no base64 on either side.
+    readArtifactBytes: async (filePath: string) => {
+      try {
+        console.log(`[IPC] artifact:read-bytes - path: ${filePath}`)
+        const result = await readArtifactBytes(filePath)
+        return { success: true, data: result }
+      } catch (error) {
+        console.error('[IPC] artifact:read-bytes error:', error)
         return { success: false, error: (error as Error).message }
       }
     },

@@ -4,22 +4,28 @@
  * Manages all known IM channel sessions across digital humans (Apps).
  * Sessions are automatically registered when a user messages the bot.
  * The `proactive` flag is toggled per contact in the digital human
- * detail page and consumed by apps/runtime/im-auto-sync.ts.
+ * detail page and consumed by apps/runtime/im-auto-sync.ts. Another digital
+ * human can be linked to a session as an extra push target (`pushLinks`); the
+ * link lives on the session, so it goes when the session does.
  *
  * Persistence: JSON file on disk, loaded at startup, written on every mutation.
  * Data volume is small (a few to tens of sessions per app), so full-file
- * writes are acceptable.
+ * writes are acceptable. Every conversation list reads this file, so a write
+ * replaces it atomically and never overlaps another, and a file that cannot
+ * be read is set aside rather than overwritten.
  *
  * Thread safety: All mutations are synchronous (single Node.js event loop),
  * but disk writes are fire-and-forget async to avoid blocking.
  */
 
-import { readFileSync, writeFile, mkdirSync } from 'fs'
-import { dirname } from 'path'
-import type { ImSessionRecord } from '../../../shared/types/im-channel'
+import { readFileSync, renameSync } from 'fs'
+import type { ImPushLink, ImSessionRecord } from '../../../shared/types/im-channel'
 import { classifySessionSource, LOCAL_SESSION_CHANNEL } from '../../../shared/types/im-channel'
+import { buildTeamSessionKey } from '../../../shared/apps/im-keys'
 import { truncateUtf16Safe } from './text-truncate'
 import { getPendingRelayStore } from './pending-relays'
+import { getConversationReminders } from './reminders'
+import { AtomicFileWriter } from './atomic-file-writer'
 
 // ============================================
 // Types
@@ -54,6 +60,23 @@ const HTTP_SESSION_TTL_MS = 30 * 24 * 60 * 60 * 1000 // 30 days
  */
 const SOFT_PERSIST_THROTTLE_MS = 5000
 
+/** The push link `appId` holds on another digital human's IM session, if any. */
+function pushLinkOf(session: ImSessionRecord, appId: string): ImPushLink | undefined {
+  if (session.source !== 'im' || session.appId === appId) return undefined
+  return session.pushLinks?.find(link => link.appId === appId)
+}
+
+/** Links as read from disk: well-formed, one per app, never the session's own. */
+function readPushLinks(value: unknown, ownAppId: string): ImPushLink[] {
+  if (!Array.isArray(value)) return []
+  const links = new Map<string, ImPushLink>()
+  for (const entry of value as Array<Partial<ImPushLink> | null>) {
+    if (typeof entry?.appId !== 'string' || !entry.appId || entry.appId === ownAppId) continue
+    links.set(entry.appId, { appId: entry.appId, autoSync: entry.autoSync === true })
+  }
+  return [...links.values()]
+}
+
 // ============================================
 // Registry Implementation
 // ============================================
@@ -61,9 +84,12 @@ const SOFT_PERSIST_THROTTLE_MS = 5000
 export class ImSessionRegistry {
   /** In-memory session store, keyed by "{appId}:{channel}:{chatId}" */
   private sessions = new Map<SessionKey, ImSessionRecord>()
+  private sessionRevisions = new WeakMap<ImSessionRecord, object>()
 
   /** File path for JSON persistence */
   private filePath: string
+
+  private readonly writer: AtomicFileWriter
 
   /** There are in-memory changes not yet written to disk. */
   private dirty = false
@@ -76,6 +102,7 @@ export class ImSessionRegistry {
 
   constructor(filePath: string) {
     this.filePath = filePath
+    this.writer = new AtomicFileWriter(filePath, '[ImSessionRegistry]')
     this.load()
   }
 
@@ -95,33 +122,49 @@ export class ImSessionRegistry {
     chatId: string,
     chatType: 'direct' | 'group',
     instanceId: string,
-    opts?: { displayName?: string; lastSender?: string; lastMessage?: string }
+    opts?: {
+      displayName?: string
+      lastSender?: string
+      lastMessage?: string
+      teamContext?: ImSessionRecord['teamContext']
+      contactId?: string
+    }
   ): void {
     const key = this.buildKey(appId, channel, chatId)
     const existing = this.sessions.get(key)
 
     if (existing) {
+      const archiveChanged = existing.teamContext?.epochId !== opts?.teamContext?.epochId || existing.teamContext?.teamId !== opts?.teamContext?.teamId
+      const contactChanged = !!opts?.contactId && existing.contactId !== opts.contactId
+      if (existing.instanceId !== instanceId || archiveChanged || contactChanged) {
+        this.sessionRevisions.delete(existing)
+      }
       // displayName is intentionally NOT updated — stable after first registration
       existing.lastActiveAt = Date.now()
       existing.instanceId = instanceId // Always update to latest instance
+      existing.teamContext = opts?.teamContext
+      existing.messageCount = (existing.messageCount ?? 0) + 1
       if (opts?.lastSender !== undefined) existing.lastSender = opts.lastSender
       if (opts?.lastMessage !== undefined) existing.lastMessage = truncateUtf16Safe(opts.lastMessage, 50)
-      // Activity-only update → throttled persist (high-frequency, low-value).
-      this.requestPersist(false)
+      if (contactChanged) existing.contactId = opts!.contactId
+      this.requestPersist(archiveChanged || contactChanged)
     } else {
       const source = classifySessionSource(channel)
       this.sessions.set(key, {
         appId,
         channel,
+        teamContext: opts?.teamContext,
         source,
         instanceId,
         chatId,
         chatType,
+        ...(opts?.contactId ? { contactId: opts.contactId } : {}),
         displayName: opts?.displayName || chatId,
         proactive: false,
         lastActiveAt: Date.now(),
         lastSender: opts?.lastSender,
         lastMessage: opts?.lastMessage !== undefined ? truncateUtf16Safe(opts.lastMessage, 50) : undefined,
+        messageCount: 1,
       })
       // Bound HTTP-source growth before the new record is durably persisted.
       if (source === 'http') {
@@ -130,6 +173,19 @@ export class ImSessionRegistry {
       // New session is a structural change → persist promptly.
       this.requestPersist(true)
     }
+  }
+
+  /** Refresh a push destination without pretending an inbound message arrived. */
+  setTeamContext(appId: string, channel: string, chatId: string, teamContext: ImSessionRecord['teamContext']): void {
+    const session = this.sessions.get(this.buildKey(appId, channel, chatId))
+    if (!session) {
+      console.warn(`[ImSessionRegistry] Cannot refresh missing chat destination: appId=${appId}, channel=${channel}, chatId=${chatId}`)
+      return
+    }
+    if (session.teamContext?.teamId === teamContext?.teamId && session.teamContext?.epochId === teamContext?.epochId) return
+    this.sessionRevisions.delete(session)
+    session.teamContext = teamContext ? { ...teamContext } : undefined
+    this.requestPersist(true)
   }
 
   // ── Native local sessions (source === 'local') ───────
@@ -166,6 +222,7 @@ export class ImSessionRegistry {
       lastActiveAt: Date.now(),
       forkOrigin: opts?.forkOrigin,
       pendingResumeSessionId: opts?.pendingResumeSessionId,
+      messageCount: 0,
     }
     this.sessions.set(key, record)
     this.requestPersist(true)
@@ -194,6 +251,52 @@ export class ImSessionRegistry {
       delete session.pendingResumeSessionId
       this.requestPersist(true)
     }
+  }
+
+  /**
+   * Note a message the digital human pushed to a chat (chat-record): it is the
+   * chat's latest message now, so the chat moves to the top of the list. No-op
+   * for unknown sessions.
+   */
+  notePush(appId: string, channel: string, chatId: string, opts: { lastSender?: string; lastMessage: string }): void {
+    const session = this.sessions.get(this.buildKey(appId, channel, chatId))
+    if (!session) return
+    session.lastActiveAt = Date.now()
+    session.messageCount = (session.messageCount ?? 0) + 1
+    if (opts.lastSender !== undefined) session.lastSender = opts.lastSender
+    session.lastMessage = truncateUtf16Safe(opts.lastMessage, 50)
+    this.requestPersist(false)
+  }
+
+  /**
+   * Reset a session's message-activity summary after its transcript has been
+   * wiped (see app-chat.ts's clearSessionByConversationId, shared by
+   * clearAppChat/clearImSession/deleteNativeChatSession's own removal path).
+   * Identity fields (displayName/customName/proactive/forkOrigin/...) are left
+   * untouched — only lastMessage/messageCount are zeroed so a conversation-list
+   * preview matches the now-empty transcript. No-op for unknown sessions.
+   */
+  resetActivity(appId: string, channel: string, chatId: string): void {
+    const session = this.sessions.get(this.buildKey(appId, channel, chatId))
+    if (!session) return
+    this.sessionRevisions.delete(session)
+    session.lastMessage = undefined
+    session.messageCount = 0
+    this.requestPersist(true)
+  }
+
+  /**
+   * Add a record rebuilt from data kept elsewhere (a transcript older than the
+   * registry's tracking of it). Never replaces a registered session.
+   *
+   * @returns true if the record was added
+   */
+  restoreSession(record: ImSessionRecord): boolean {
+    const key = this.buildKey(record.appId, record.channel, record.chatId)
+    if (this.sessions.has(key)) return false
+    this.sessions.set(key, { ...record })
+    this.requestPersist(true)
+    return true
   }
 
   /**
@@ -252,44 +355,98 @@ export class ImSessionRegistry {
     const session = this.sessions.get(key)
     if (!session) return false
 
+    if (session.proactive !== proactive) this.sessionRevisions.delete(session)
     session.proactive = proactive
     this.requestPersist(true)
     return true
   }
 
   /**
-   * Get all sessions with proactive=true for a given app.
+   * Get all sessions with proactive=true for a given app, and the sessions it
+   * is linked to with auto-sync on.
    *
    * Consumed by apps/runtime/im-auto-sync.ts at run completion to dispatch
    * the assistant's final text response, and by apps/runtime/prompt.ts when
    * building the AI's auto-sync awareness fragment.
    */
   getProactiveSessions(appId: string): ImSessionRecord[] {
-    const result: ImSessionRecord[] = []
-    for (const session of this.sessions.values()) {
-      // Only IM sessions have a channel adapter to push through.
-      if (session.appId === appId && session.proactive && session.source === 'im') {
-        result.push({ ...session })
-      }
-    }
-    return result
+    return this.pushTargets(appId, session => session.proactive, link => link.autoSync)
   }
 
   /**
-   * Get all pushable IM sessions for a given app (source==='im').
+   * Get all pushable IM sessions for a given app (source==='im'): its own and
+   * those it is linked to.
    *
    * Used to build the notify_bot contact directory: the AI can only push to
    * sessions backed by a live channel adapter. HTTP/API sessions are excluded
    * here so they never appear as push targets.
    */
   getPushableSessions(appId: string): ImSessionRecord[] {
+    const result = this.pushTargets(appId, () => true, () => true)
+    result.sort((a, b) => b.lastActiveAt - a.lastActiveAt)
+    return result
+  }
+
+  /**
+   * Another digital human's IM sessions this app is linked to, most recently
+   * active first. Each copy is the session as its own app holds it.
+   */
+  getLinkedSessions(appId: string): ImSessionRecord[] {
     const result: ImSessionRecord[] = []
     for (const session of this.sessions.values()) {
-      if (session.appId === appId && session.source === 'im') {
-        result.push({ ...session })
-      }
+      if (pushLinkOf(session, appId)) result.push({ ...session })
     }
     result.sort((a, b) => b.lastActiveAt - a.lastActiveAt)
+    return result
+  }
+
+  /**
+   * Add, update or (`link` null) remove `appId`'s push link on another digital
+   * human's IM session, named by that session's own keys.
+   *
+   * @returns false when there is no such session, it is not an IM session, or
+   *   it is `appId`'s own
+   */
+  setPushLink(
+    appId: string,
+    target: { appId: string; channel: string; chatId: string },
+    link: { autoSync: boolean } | null
+  ): boolean {
+    const session = this.sessions.get(this.buildKey(target.appId, target.channel, target.chatId))
+    if (!session || session.source !== 'im' || session.appId === appId) return false
+    const others = (session.pushLinks ?? []).filter(existing => existing.appId !== appId)
+    const next = link ? [...others, { appId, autoSync: link.autoSync }] : others
+    if (next.length > 0) session.pushLinks = next
+    else delete session.pushLinks
+    this.requestPersist(true)
+    return true
+  }
+
+  /**
+   * The IM sessions `appId` reaches: its own that pass `own`, then those it is
+   * linked to whose link passes `linked`. A bot chat it reaches both ways is
+   * listed once, as its own.
+   */
+  private pushTargets(
+    appId: string,
+    own: (session: ImSessionRecord) => boolean,
+    linked: (link: ImPushLink) => boolean
+  ): ImSessionRecord[] {
+    const result: ImSessionRecord[] = []
+    const routes = new Set<string>()
+    for (const session of this.sessions.values()) {
+      // Only IM sessions have a channel adapter to push through.
+      if (session.appId !== appId || session.source !== 'im') continue
+      routes.add(`${session.instanceId}:${session.chatId}`)
+      if (own(session)) result.push({ ...session })
+    }
+    for (const session of this.sessions.values()) {
+      const link = pushLinkOf(session, appId)
+      const route = `${session.instanceId}:${session.chatId}`
+      if (!link || !linked(link) || routes.has(route)) continue
+      routes.add(route)
+      result.push({ ...session })
+    }
     return result
   }
 
@@ -301,6 +458,18 @@ export class ImSessionRegistry {
     const key = this.buildKey(appId, channel, chatId)
     const session = this.sessions.get(key)
     return session ? { ...session } : undefined
+  }
+
+  /** Memory-only identity invalidated by recipient changes, selection changes or chat clearing. */
+  getSessionRevision(appId: string, channel: string, chatId: string): object | undefined {
+    const session = this.sessions.get(this.buildKey(appId, channel, chatId))
+    if (!session) return undefined
+    let revision = this.sessionRevisions.get(session)
+    if (!revision) {
+      revision = {}
+      this.sessionRevisions.set(session, revision)
+    }
+    return revision
   }
 
   /**
@@ -337,14 +506,14 @@ export class ImSessionRegistry {
    */
   removeSession(appId: string, channel: string, chatId: string): boolean {
     const key = this.buildKey(appId, channel, chatId)
-    const deleted = this.sessions.delete(key)
-    if (deleted) {
-      this.requestPersist(true)
-      // Cascade: undelivered relay context is keyed by session and must not
-      // outlive it, or a chat re-registered under the same id would inherit it.
-      getPendingRelayStore()?.clearForChat(appId, channel, chatId)
-    }
-    return deleted
+    const session = this.sessions.get(key)
+    if (!session) return false
+    this.sessions.delete(key)
+    this.requestPersist(true)
+    // Re-registering the chat must not inherit its pending context or reminders.
+    this.clearPendingRelays(session)
+    getConversationReminders()?.removeForChat(appId, channel, chatId)
+    return true
   }
 
   /**
@@ -353,17 +522,37 @@ export class ImSessionRegistry {
    */
   removeAllForApp(appId: string): number {
     let count = 0
+    let unlinked = false
     for (const [key, session] of this.sessions) {
       if (session.appId === appId) {
         this.sessions.delete(key)
-        getPendingRelayStore()?.clearForChat(session.appId, session.channel, session.chatId)
+        this.clearPendingRelays(session)
+        getConversationReminders()?.removeForChat(session.appId, session.channel, session.chatId)
         count++
+      } else if (pushLinkOf(session, appId)) {
+        // Its links on other apps' sessions go with it.
+        const others = session.pushLinks!.filter(link => link.appId !== appId)
+        if (others.length > 0) session.pushLinks = others
+        else delete session.pushLinks
+        unlinked = true
       }
     }
-    if (count > 0) {
+    if (count > 0 || unlinked) {
       this.requestPersist(true)
     }
     return count
+  }
+
+  private clearPendingRelays(session: ImSessionRecord): void {
+    const spool = getPendingRelayStore()
+    if (!spool) {
+      console.warn(`[ImSessionRegistry] Pending relay cleanup unavailable: appId=${session.appId}, channel=${session.channel}, chatId=${session.chatId}, reason=relay spool unavailable`)
+      return
+    }
+    spool.clearForChat(session.appId, session.channel, session.chatId)
+    if (session.teamContext) {
+      spool.clear(buildTeamSessionKey(session.appId, session.teamContext.teamId, session.teamContext.epochId))
+    }
   }
 
   // ── Bounds enforcement (HTTP sessions) ───────────────
@@ -392,7 +581,7 @@ export class ImSessionRegistry {
     const survivors: { key: SessionKey; rec: ImSessionRecord }[] = []
     for (const entry of httpForApp) {
       if (!entry.rec.customName && now - entry.rec.lastActiveAt > HTTP_SESSION_TTL_MS) {
-        this.sessions.delete(entry.key)
+        this.evictHttpSession(entry.key, entry.rec)
         evicted++
       } else {
         survivors.push(entry)
@@ -406,7 +595,7 @@ export class ImSessionRegistry {
         .filter(e => !e.rec.customName)
         .sort((a, b) => a.rec.lastActiveAt - b.rec.lastActiveAt) // oldest first
       for (let i = 0; i < overflow && i < evictable.length; i++) {
-        this.sessions.delete(evictable[i].key)
+        this.evictHttpSession(evictable[i].key, evictable[i].rec)
         evicted++
       }
     }
@@ -419,38 +608,67 @@ export class ImSessionRegistry {
     }
   }
 
+  /** An evicted session's reminders go with it, as they do on removal. */
+  private evictHttpSession(key: SessionKey, rec: ImSessionRecord): void {
+    this.sessions.delete(key)
+    getConversationReminders()?.removeForChat(rec.appId, rec.channel, rec.chatId)
+  }
+
   // ── Persistence ──────────────────────────────────────
 
   private buildKey(appId: string, channel: string, chatId: string): SessionKey {
     return `${appId}:${channel}:${chatId}`
   }
 
-  /** Load sessions from disk. Silent on missing/corrupt file. */
+  /** Load sessions from disk; a missing file starts empty, an unreadable one is set aside first. */
   private load(): void {
+    let records: ImSessionRecord[]
     try {
-      const raw = readFileSync(this.filePath, 'utf8')
-      const records: ImSessionRecord[] = JSON.parse(raw)
-      if (!Array.isArray(records)) return
-
-      for (const r of records) {
-        if (r.appId && r.channel && r.chatId) {
-          // Backward compat: old sessions may lack instanceId
-          if (!r.instanceId) {
-            r.instanceId = ''
-          }
-          // Backward compat: records persisted before `source` existed were
-          // all IM sessions; derive from the channel value for correctness.
-          if (!r.source) {
-            r.source = classifySessionSource(r.channel)
-          }
-          const key = this.buildKey(r.appId, r.channel, r.chatId)
-          this.sessions.set(key, r)
-        }
+      records = JSON.parse(readFileSync(this.filePath, 'utf8'))
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+        console.log('[ImSessionRegistry] No existing sessions file, starting fresh')
+      } else {
+        this.setAside(error)
       }
-      console.log(`[ImSessionRegistry] Loaded ${this.sessions.size} sessions from disk`)
-    } catch {
-      // File doesn't exist or is corrupt — start fresh
-      console.log('[ImSessionRegistry] No existing sessions file, starting fresh')
+      return
+    }
+    if (!Array.isArray(records)) {
+      this.setAside(new Error('not a session list'))
+      return
+    }
+
+    for (const r of records) {
+      if (r.appId && r.channel && r.chatId) {
+        // Backward compat: old sessions may lack instanceId
+        if (!r.instanceId) {
+          r.instanceId = ''
+        }
+        // Backward compat: records persisted before `source` existed were
+        // all IM sessions; derive from the channel value for correctness.
+        if (!r.source) {
+          r.source = classifySessionSource(r.channel)
+        }
+        if (r.pushLinks !== undefined) {
+          const links = r.source === 'im' ? readPushLinks(r.pushLinks, r.appId) : []
+          if (links.length > 0) r.pushLinks = links
+          else delete r.pushLinks
+        }
+        const key = this.buildKey(r.appId, r.channel, r.chatId)
+        this.sessions.set(key, r)
+      }
+    }
+    console.log(`[ImSessionRegistry] Loaded ${this.sessions.size} sessions from disk`)
+  }
+
+  /** Move an unreadable file out of the way, so starting empty never overwrites it. */
+  private setAside(reason: unknown): void {
+    const asidePath = `${this.filePath}.unreadable-${Date.now()}`
+    try {
+      renameSync(this.filePath, asidePath)
+      console.error(`[ImSessionRegistry] Sessions file unreadable, kept as ${asidePath}; starting empty:`, reason)
+    } catch (error) {
+      console.error(`[ImSessionRegistry] Sessions file unreadable and could not be set aside (${String(error)}); starting empty:`, reason)
     }
   }
 
@@ -499,20 +717,7 @@ export class ImSessionRegistry {
 
   /** Write all sessions to disk (fire-and-forget). */
   private persist(): void {
-    const records = Array.from(this.sessions.values())
-    const json = JSON.stringify(records, null, 2)
-
-    try {
-      mkdirSync(dirname(this.filePath), { recursive: true })
-    } catch {
-      // Directory likely already exists
-    }
-
-    writeFile(this.filePath, json, 'utf8', (err) => {
-      if (err) {
-        console.error('[ImSessionRegistry] Failed to persist sessions:', err)
-      }
-    })
+    this.writer.write(JSON.stringify(Array.from(this.sessions.values()), null, 2))
   }
 }
 
