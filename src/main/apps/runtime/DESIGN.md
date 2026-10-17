@@ -1106,6 +1106,24 @@ second message within 30 minutes of an IM chat found the session's tools bound
 to a dead context and every browser call failed until the session idled out —
 which a chat answering every few minutes never let happen (IM patrol chat, 2026-10-16).
 
+**A reset under a message on its way closes the session that message acquires.**
+The three resets (clear — the IM clear command included —, manual "Restart
+agent", a team session closed) stop a starting message
+(`abortAppChatTurn(id, 'internal')` marks its start `reset`), close the chat's
+session and destroy its browser context. The message's turn does not stop at
+once: it may be inside `acquireV2Session`, a cold engine start of seconds to a
+minute, and `closeV2Session` cannot reach a session still being created. The
+session it then holds was built on what the reset removed — its browser tools
+close over the destroyed context, its consumer keeps the dropped sink (a reused
+session never takes a new one) — and, left registered, the next message would
+reuse it: the browser failing with "Browser context was released", replies
+published nowhere, until the session idled out. So at the turn's stopped exits
+(`endStoppedOnTheWay`) a turn whose start was `reset` closes the session it
+still holds (`sessionLease.close()`); a session the reset itself closed is no
+longer current there, and a person's stop sets no `reset`, so its warm session
+stays. The one cost falls in the race: the next message pays a cold start —
+what every message after a reset pays.
+
 Only a native chat's context is created with
 `createScopedBrowserContext({ liveView: { conversationId, spaceId } })`, which is
 what makes `services/ai-browser` host its pages in the main window and announce
@@ -1132,9 +1150,10 @@ sessions are unbounded (`MAX_RESIDENT_BROWSER_CONTEXTS`, `RESIDENT_BROWSER_IDLE_
   over the cap rather than kill a live turn.
 - a per-turn chat idle past `TURN_TRUST_MS` has its pages closed by the same
   sweep (its turn never reported back); its context stays for its session.
-- every one of these, like a turn's end, closes pages only when a session holds
-  the context (`closePagesOrDispose`); a context no session bound is disposed
-  outright.
+- the sweep's closes, like a turn's end, close pages only when a session holds
+  the context (`closePagesOrDispose`) and dispose a context no session bound;
+  the cap only ever closes pages (`evictOverCap` → `closePages`) — an unbound
+  context it empties is disposed by the idle sweep.
 
 **Teardown paths** (each one goes through `destroyChatBrowserContext`, which logs
 the reason and closes the pages; a native chat's page destruction announces
@@ -1505,7 +1524,11 @@ member here or from another machine, a run's Stop or Close) stops everything:
   put the rest back, and no turn-end report is made for a turn that never ran.
 The system (`'internal'`: an escalation cut, clear, restart, closing a task,
 shutdown) keeps the earlier behavior: unread input runs after the stop, and a
-clear still keeps waiting reminders and teammates' messages.
+clear still keeps waiting reminders and teammates' messages. A system stop of a
+message still on its way also marks its start `reset` (whoever stopped it
+first): the conversation's session, browser context and sink were replaced
+under it, so the turn closes the session it acquired instead of leaving it for
+the next message (§2.19).
 
 `app-chat-delivery` handles direct API and UI messages. IM supplements, team mail
 and cross-conversation sources use the same gate contract with their own original

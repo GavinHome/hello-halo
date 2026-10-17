@@ -1289,6 +1289,15 @@ async function runAppChatTurn(
     stoppedOnTheWay = true
     imStreamHandle?.dispose?.()
     emitAgentEvent('agent:complete', spaceId, conversationId, { type: 'complete', duration: 0 })
+    // A reset that stopped this message replaced the chat's session, browser
+    // context and sink under it. A session acquired after that rests on what
+    // the reset removed and, left registered, would serve the next message
+    // with a destroyed browser context and a dropped sink until it idled out.
+    // One the reset itself closed is no longer current here.
+    if (turnContext.start.reset && sessionLease?.isCurrent) {
+      console.warn(`[AppChat][${appId}] Closing a session built while the chat was being reset: ${conversationId}`)
+      sessionLease.close()
+    }
   }
   let dispatchAttempted = false
   let dispatchAccepted = false
