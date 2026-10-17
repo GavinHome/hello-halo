@@ -38,8 +38,7 @@ import { getTaskStateService } from '../../platform/task-state'
 import { resolveMemoryLayout, type MemoryCallerScope, type TopicsTree } from '../../platform/memory'
 import { getConfig } from '../../foundation/config.service'
 import {
-  getApiCredentials,
-  getApiCredentialsForSource,
+  getApiCredentialsForSelection,
   getWorkingDir,
   getHeadlessElectronPath,
   getDbMcpServers
@@ -648,9 +647,9 @@ async function runAppChatTurn(
   if (!memory) throw new Error('Memory service not initialized')
 
   const config = getConfig()
-  const credentials = app.userOverrides?.modelSourceId
-    ? await getApiCredentialsForSource(app.userOverrides.modelSourceId, app.userOverrides.modelId)
-    : await getApiCredentials()
+  // Its own account and model, or the global selection when it has none or
+  // its account was removed.
+  const credentials = await getApiCredentialsForSelection(app.userOverrides)
   // The digital human's own level, on every entry (its Halo chat, IM, HTTP,
   // team turns, reminders), wins over one the send carries.
   const pickedEffort = pickReasoningEffort(app.userOverrides?.chatReasoningEffort, reasoningEffort)

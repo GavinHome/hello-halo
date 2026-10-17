@@ -117,30 +117,36 @@ async function settings() {
   return { runner, render, setConfig }
 }
 
-describe('deleted account model recovery', () => {
-  it.each([false, true])('keeps a missing pin visible and unchanged with empty sources=%s', empty => {
+describe('digital human model override whose account was removed', () => {
+  const otherAccount = { id: 'b', name: 'Other account', model: 'b-model', availableModels: [{ id: 'b-model', name: 'B model' }] }
+
+  it('shows that it follows the global selection now, without changing the stored override by itself', () => {
     vi.stubGlobal('document', { addEventListener: vi.fn(), removeEventListener: vi.fn() })
-    env.app.config.aiSources = { version: 2, currentId: empty ? null : 'b', sources: empty ? [] : [{ id: 'b', name: 'Other account', model: 'b-model', availableModels: [{ id: 'b-model', name: 'B model' }] }] }
-    env.app.navigate = vi.fn()
+    env.app.config.aiSources = { version: 2, currentId: 'b', sources: [otherAccount] }
     const onChange = vi.fn()
     const runner = new ComponentRunner()
     const render = () => runner.render(() => AppModelSelector({ modelSourceId: 'removed', modelId: 'old-model', onChange }))
     const tree = render()
-    expect(text(tree)).toContain('Account removed. Choose another account.')
-    expect(text(tree)).not.toContain('B model')
+    expect(text(tree)).toContain('Follow global (B model)')
+    expect(text(tree)).toContain('The account it was set to use was removed, so it follows the global selection.')
+    expect(text(tree)).not.toContain('old-model')
+    expect(nodes(tree).some(node => node.type === 'button' && node.props['aria-label'] === 'Reset to global')).toBe(false)
     expect(onChange).not.toHaveBeenCalled()
-    expect(nodes(tree).filter(node => node.type === 'button').every(node => !nodes(node.props.children).some(child => child.type === 'button'))).toBe(true)
-    button(tree, 'Account removed').props.onClick()
+    button(tree, 'Follow global').props.onClick()
     const options = render()
-    if (empty) {
-      button(options, 'Configure AI Source').props.onClick()
-      expect(env.app.navigate).toHaveBeenCalledWith('settings')
-      expect(onChange).not.toHaveBeenCalled()
-    }
-    nodes(render()).find(node => node.type === 'button' && node.props['aria-label'] === 'Reset to global').props.onClick()
+    const followGlobal = nodes(options).filter(node => node.type === 'button' && text(node).includes('Follow global')).at(-1)
+    expect(nodes(followGlobal).some(node => node.type?.displayName === 'Check')).toBe(true)
+    followGlobal.props.onClick()
     expect(onChange).toHaveBeenCalledWith(undefined, undefined)
     runner.unmount()
     vi.unstubAllGlobals()
+  })
+
+  it('renders nothing once no account is left, like any other digital human', () => {
+    env.app.config.aiSources = { version: 2, currentId: null, sources: [] }
+    const runner = new ComponentRunner()
+    expect(runner.render(() => AppModelSelector({ modelSourceId: 'removed', modelId: 'old-model', onChange: vi.fn() }))).toBeNull()
+    runner.unmount()
   })
 })
 

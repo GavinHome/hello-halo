@@ -37,8 +37,9 @@ digital-human chat in `app-chat.ts`) rather than routing through the space chat'
 `sendMessage()` — but it builds on the same engine layer, not a copy of it.
 
 **What is shared** (from `services/agent`):
-- Credentials: `getApiCredentials` / `getApiCredentialsForSource` (helpers),
-  `resolveCredentialsForSdk`.
+- Credentials: `getApiCredentialsForSelection` (helpers) over the app's
+  `userOverrides` — its own account, or the global one when it has none or its
+  account was removed — then `resolveCredentialsForSdk`.
 - Options: `buildUserSessionSdkOptions` (sdk-config). It reads the user's global AI
   settings (`maxTurns`, `disabledTools`, `promptProfile`, digital-humans switch) and
   the config directory itself, so a run or a chat turn follows them without passing
@@ -1813,7 +1814,7 @@ apps/runtime depends on:
 ├── services/memory-consolidation  requestConsolidation() after runs and chat turns; consolidateNow()/status for settings (memory-control.ts)
 ├── platform/background   registerKeepAliveReason()
 ├── platform/store        DatabaseManager (for migrations + activity store)
-├── services/agent        getApiCredentials (helpers), resolveCredentialsForSdk,
+├── services/agent        getApiCredentialsForSelection (helpers), resolveCredentialsForSdk,
 │                         buildUserSessionSdkOptions, getHeadlessElectronPath (sdk-config),
 │                         buildBaseToolset (toolsets/base)
 ├── services/conversation-interop   ConversationSource type (registered from bootstrap), createConversationInteropMcpServer (lazy, when collaboration is on)

@@ -32,7 +32,7 @@ import type {
 import {
   getHeadlessElectronPath,
   getWorkingDir,
-  getApiCredentialsForConversation,
+  getApiCredentialsForSelection,
   getDbMcpServers
 } from './helpers'
 import { emitAgentEvent } from './events'
@@ -207,8 +207,9 @@ export async function sendMessage(
     const conversation = getConversation(spaceId, conversationId)
     const sessionId = resumeSessionId || conversation?.sessionId
 
-    // The conversation's pinned account, or the global selection when it has no pin.
-    const credentials = await getApiCredentialsForConversation(conversation)
+    // The conversation's pinned account, or the global selection when it has
+    // no pin or the pinned account was removed.
+    const credentials = await getApiCredentialsForSelection(conversation)
     console.log(`[Agent] sendMessage using: ${credentials.provider}, model: ${credentials.model}, prompt: ${config.agent?.promptProfile ?? 'halo'}`)
     console.log(`[Agent] turn_start conv=${conversationId} model=${credentials.model} ts=${Date.now()}`)
 

@@ -576,24 +576,44 @@ export function getCurrentModelName(config: AISourcesConfig): string {
   return modelOption?.name || source.model
 }
 
+/** A stored model selection: a conversation's pin or a digital human's override. */
+export interface StoredModelSelection {
+  modelSourceId?: string
+  modelId?: string
+}
+
+/** The account and model a stored selection runs on; `own` when they are the selection's. */
+export type ResolvedModelSelection =
+  | { source: AISource; modelId: string; own: boolean }
+  | { source: null; modelId: undefined; own: false }
+
 /**
- * Only an absent source pin follows global selection. A pin whose account was
- * removed has no name — never another account's; callers show their own
- * translated missing-account notice.
+ * What a stored selection runs on. A selection naming an account that no
+ * longer exists is the same as no selection: the current global account and
+ * its model — the rule the main process resolves credentials by
+ * (services/agent helpers `getApiCredentialsForSelection`).
  */
+export function resolveModelSelection(
+  config: AISourcesConfig,
+  selection: StoredModelSelection | null | undefined
+): ResolvedModelSelection {
+  const pinned = selection?.modelSourceId ? getSourceById(config, selection.modelSourceId) : null
+  if (pinned) return { source: pinned, modelId: selection?.modelId || pinned.model, own: true }
+  const source = getCurrentSource(config)
+  return source ? { source, modelId: source.model, own: false } : { source: null, modelId: undefined, own: false }
+}
+
+/** The name of the model a stored selection runs on (see resolveModelSelection). */
 export function getModelDisplayName(
   config: AISourcesConfig,
   sourceId?: string,
   modelId?: string
 ): string {
-  if (!sourceId) return getCurrentModelName(config)
+  const selected = resolveModelSelection(config, { modelSourceId: sourceId, modelId })
+  if (!selected.source) return 'No model'
 
-  const source = getSourceById(config, sourceId)
-  if (!source) return ''
-
-  const effectiveModelId = modelId || source.model
-  const modelOption = source.availableModels.find(m => m.id === effectiveModelId)
-  return modelOption?.name || effectiveModelId
+  const modelOption = selected.source.availableModels.find(m => m.id === selected.modelId)
+  return modelOption?.name || selected.modelId
 }
 
 /**

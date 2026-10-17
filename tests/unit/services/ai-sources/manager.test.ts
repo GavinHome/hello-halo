@@ -56,7 +56,7 @@ vi.mock('../../../../src/main/services/analytics/analytics.service', () => ({
 }))
 
 import { AISourceManager } from '../../../../src/main/services/ai-sources/manager'
-import type { AISource, AISourcesConfig, OAuthSourceConfig } from '../../../../src/shared/types'
+import type { AISource, AISourcesConfig, OAuthSourceConfig, OAuthStartResult } from '../../../../src/shared/types'
 import type { ProviderResult } from '../../../../src/shared/interfaces'
 
 function seed(config: Partial<AISourcesConfig>): void {
@@ -469,9 +469,40 @@ describe('independent OAuth account lifecycle', () => {
     expect(current.success).toBe(true)
     expect(stub.startLogin).toHaveBeenCalledTimes(2)
     // The superseded start cleaned its own late slot before the new one opened.
+    expect(stub.cancelLogin).toHaveBeenCalledTimes(2)
     expect(stub.cancelLogin.mock.invocationCallOrder.at(-1)).toBeLessThan(stub.startLogin.mock.invocationCallOrder[1])
     expect(mgr.getOAuthLoginContext('test-oauth', current.data!.loginId)).not.toBeNull()
     await mgr.cancelOAuthLogin('test-oauth', current.data!.loginId)
+  })
+
+  it('a start that fails after the drain gave up on it leaves the login that superseded it intact', async () => {
+    vi.useFakeTimers()
+    try {
+      seed({ sources: [] })
+      const mgr = new AISourceManager()
+      const stub = provider(mgr)
+      const stuck = deferred<ProviderResult<OAuthStartResult>>()
+      stub.startLogin.mockReturnValueOnce(stuck.promise as never)
+      const first = mgr.startOAuthLogin('test-oauth')
+      await vi.advanceTimersByTimeAsync(0)
+      expect(stub.startLogin).toHaveBeenCalledTimes(1)
+      const second = mgr.startOAuthLogin('test-oauth')
+      // The drain waits 15 s for the stuck start, then lets the new login go ahead.
+      await vi.advanceTimersByTimeAsync(16_000)
+      const current = await second
+      expect(current.success).toBe(true)
+      expect(stub.startLogin).toHaveBeenCalledTimes(2)
+      expect(stub.cancelLogin).toHaveBeenCalledTimes(1)
+
+      stuck.resolve({ success: false, error: 'request timed out' })
+      expect((await first).success).toBe(false)
+      // Nothing of the failed start exists in the provider, so its late return must not clear the slot the new login holds.
+      expect(stub.cancelLogin).toHaveBeenCalledTimes(1)
+      expect(mgr.getOAuthLoginContext('test-oauth', current.data!.loginId)).not.toBeNull()
+      expect((await mgr.completeOAuthLogin('test-oauth', 'state', current.data!.loginId)).success).toBe(true)
+    } finally {
+      vi.useRealTimers()
+    }
   })
 
   it('joins a repeated completion of the same login and returns only public fields', async () => {

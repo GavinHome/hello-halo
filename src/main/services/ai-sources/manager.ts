@@ -129,7 +129,7 @@ interface ManagedOAuthLogin {
 const OAUTH_LOGIN_TIMEOUT_MS = 10 * 60 * 1000
 /** Providers renew a token minutes before it expires, so a minute-old answer is still current. */
 const REQUEST_CREDENTIAL_RECHECK_MS = 60_000
-const ACCOUNT_REMOVED_ERROR = 'This account was removed. Choose another account for this conversation.'
+const ACCOUNT_REMOVED_ERROR = 'This account was removed. The next message runs on the current account.'
 /** Upper bound on waiting for a superseded login whose provider work cannot be interrupted. */
 const OAUTH_SUPERSEDE_DRAIN_MS = 15_000
 
@@ -852,12 +852,18 @@ class AISourceManager {
       const result = await provider.startLogin()
       if (login.cancelled || Date.now() >= login.expiresAt) {
         console.warn(`[AISourceManager] Discarded OAuth start: provider=${providerType} source=${login.sourceId ?? 'new'} authorization cancelled`)
-        // The cancellation ran before this authorization existed; clear what the start created.
         await login.cancellation
-        try {
-          await provider.cancelLogin?.()
-        } catch (error) {
-          console.warn(`[AISourceManager] OAuth cancellation cleanup failed: provider=${providerType}`, error)
+        // The cancellation ran before this authorization existed; clear what
+        // the start created — only when it created something. A start that
+        // failed late (a request stuck past the drain) left nothing in the
+        // provider, and its single pending slot may now hold the login that
+        // superseded this one.
+        if (result.success) {
+          try {
+            await provider.cancelLogin?.()
+          } catch (error) {
+            console.warn(`[AISourceManager] OAuth cancellation cleanup failed: provider=${providerType}`, error)
+          }
         }
         return { success: false, error: 'Login cancelled or expired' }
       }

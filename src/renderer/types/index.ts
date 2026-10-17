@@ -49,6 +49,8 @@ export type {
   OAuthCompleteResult,
   PresetApiConfig,
   AuthProviderConfig,
+  StoredModelSelection,
+  ResolvedModelSelection,
   // Legacy types for backward compatibility
   LegacyAISourcesConfig,
   OAuthSourceConfig,
@@ -61,6 +63,7 @@ export {
   createEmptyAISourcesConfig,
   getCurrentSource,
   getModelDisplayName,
+  resolveModelSelection,
   getSourceById,
   getSourceAccountName,
   isSourceConfigured,

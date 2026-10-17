@@ -164,7 +164,7 @@ const { prepareNonVisionImageFallback } = vi.hoisted(() => ({ prepareNonVisionIm
 vi.mock('../../../../src/main/services/agent/image-attachments', () => ({ prepareNonVisionImageFallback }))
 vi.mock('../../../../src/main/services/agent/helpers', () => ({
   getApiCredentials: vi.fn(async () => ({ provider: 'anthropic' })),
-  getApiCredentialsForSource: vi.fn(),
+  getApiCredentialsForSelection: vi.fn(async () => ({ provider: 'anthropic' })),
   getWorkingDir: vi.fn(),
   getHeadlessElectronPath: vi.fn(() => '/electron'),
   getDbMcpServers: vi.fn(() => null),
@@ -332,7 +332,7 @@ import { sendAppChatMessage } from '../../../../src/main/apps/runtime/app-chat'
 import { hasChatBrowserContext, destroyAllChatBrowserContexts } from '../../../../src/main/apps/runtime/app-chat-browser'
 import { createScopedBrowserContext } from '../../../../src/main/services/ai-browser'
 import { acquireV2Session, updateConsumerDisplayModel } from '../../../../src/main/services/agent/session-manager'
-import { getApiCredentials } from '../../../../src/main/services/agent/helpers'
+import { getApiCredentialsForSelection } from '../../../../src/main/services/agent/helpers'
 import { resolveCredentialsForSdk } from '../../../../src/main/services/agent/sdk-config'
 import { requestAppMemoryConsolidation, prepareMemoryForTurn, appMemorySettings, loadSpaceTopicsForTurn } from '../../../../src/main/apps/runtime/turn/memory-lifecycle'
 import { generatePromptInstructions } from '../../../../src/main/platform/memory'
@@ -803,7 +803,7 @@ describe('live messages keep the current turn envelope', () => {
 
   it('prepares live images with the captured model and preserves the original image for recording', async () => {
     const credentials = { provider: 'openai' as const, model: 'captured-nonvision', baseUrl: 'https://example.invalid', apiKey: '' }
-    vi.mocked(getApiCredentials).mockResolvedValueOnce(credentials)
+    vi.mocked(getApiCredentialsForSelection).mockResolvedValueOnce(credentials)
     await sendAppChatMessage({ appId: app.id, spaceId: 'space-1', conversationId: 'app-chat:app-member:local:direct:image-snapshot', message: 'start' })
     prepareNonVisionImageFallback.mockReturnValue({ contextBlock: '<halo_attachments>saved image</halo_attachments>\n', filePaths: ['/tmp/image.png'] })
     const prepare = sink.setTurnIdentity.mock.calls.at(-1)![2] as (text: string, images: unknown[]) => unknown

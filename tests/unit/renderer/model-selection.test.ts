@@ -59,54 +59,61 @@ function child(tree: any, name: string) {
   return new Runner().render(() => element.type(element.props))
 }
 
-describe('model selector account ownership', () => {
-  it.each([false, true])('does not present global account facts for a removed conversation pin (mobile=%s)', mobile => {
+/** The checked model row of a rendered ModelList. */
+const checkedRow = (list: any) => nodes(list).find(node => node.type === 'button' && nodes(node).some(child => child.type?.displayName === 'Check'))
+
+describe('model selector for a conversation whose pinned account was removed', () => {
+  it.each([false, true])('shows the global account and model the conversation now runs on (mobile=%s)', mobile => {
     env.mobile = mobile
     const { render } = selector()
     let tree = render()
-    expect(nodes(tree).find(node => node.type === 'button')?.props['aria-label']).toBe('Account removed. Choose another account.')
+    expect(nodes(tree).find(node => node.type === 'button')?.props['aria-label']).toBe('Global model B')
     nodes(tree).find(node => node.type === 'button').props.onClick()
     tree = render()
-    const content = mobile ? child(child(tree, 'ModelSelectSheet'), 'ModelList') : child(tree, 'CurrentModelCard')
-    expect(text(content)).toContain('Account removed. Choose another account.')
     if (mobile) {
-      expect(nodes(content).some(node => node.type?.displayName === 'Check')).toBe(false)
+      const sheet = child(tree, 'ModelSelectSheet')
+      expect(text(sheet)).toContain('Global model B')
+      expect(text(checkedRow(child(sheet, 'ModelList')))).toContain('Global model B')
     } else {
-      expect(text(content)).not.toContain('Global model B')
-      expect(text(content)).not.toContain('Global account B')
+      const card = child(tree, 'CurrentModelCard')
+      expect(text(card)).toContain('Global model B')
+      expect(text(card)).toContain('Global account B')
+      expect(text(card)).toContain('Context window')
     }
-    expect(text(content)).not.toContain('Context window')
+    expect(text(tree)).not.toContain('Account removed')
+    expect(text(tree)).not.toContain('old-model')
     expect(env.chat.setConversationModel).not.toHaveBeenCalled()
   })
 
-  it('makes an explicit selection the only operation that replaces the removed pin', async () => {
+  it('checks the global model in the list and pins a chosen model to the conversation', async () => {
     const { render } = selector()
     nodes(render()).find(node => node.type === 'button').props.onClick()
-    button(child(render(), 'CurrentModelCard'), 'Choose another account').props.onClick()
+    button(child(render(), 'CurrentModelCard'), 'Global model B').props.onClick()
     const list = child(render(), 'ModelList')
-    expect(text(list)).toContain('Account removed. Choose another account.')
+    expect(text(checkedRow(list))).toContain('Global model B')
     await button(list, 'Global model B').props.onClick()
     expect(env.chat.setConversationModel).toHaveBeenCalledWith('s', 'c', 'b', 'b-model')
   })
 
-  it('keeps recovery visible after the last source is removed', () => {
+  it('offers configuration after the last source is removed', () => {
     env.app.config.aiSources = { version: 2, currentId: null, sources: [] }
     const { render } = selector()
     nodes(render()).find(node => node.type === 'button').props.onClick()
     const card = child(render(), 'CurrentModelCard')
+    expect(text(card)).toContain('No AI sources configured')
     button(card, 'Configure AI Source').props.onClick()
     expect(env.app.navigate).toHaveBeenCalledWith('settings')
     const sheet = new Runner().render(() => ModelSelectSheet({ onClose: vi.fn() }))
-    expect(text(child(sheet, 'ModelList'))).toContain('Account removed. Choose another account.')
+    expect(text(child(sheet, 'ModelList'))).toContain('Configure AI Source')
   })
 
-  it('directs a digital human to its own settings without showing the global account as its model', () => {
+  it('shows a digital human the global model it now runs on and directs changes to its settings', () => {
     env.target = { kind: 'digital-human', appId: 'person', appName: 'Person', modelSourceId: 'removed', modelId: 'old-model' }
     const { render } = selector()
     nodes(render()).find(node => node.type === 'button').props.onClick()
     const tree = render()
-    expect(text(tree)).toContain('Account removed. Choose another account.')
-    expect(text(tree)).not.toContain('Global model B')
+    expect(text(tree)).toContain('Global model B')
+    expect(text(tree)).not.toContain('Account removed')
     button(tree, 'Change in its settings').props.onClick()
     expect(openPersonModelSettings).toHaveBeenCalledWith('person')
   })
