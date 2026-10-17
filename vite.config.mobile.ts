@@ -62,6 +62,13 @@ export default defineConfig({
     chunkSizeWarningLimit: 1000
   },
 
+  // As in the desktop renderer: workers are created with `type: 'module'`, and
+  // only ES output lets them code-split (the code-highlight worker loads
+  // grammars on demand); the default IIFE output fails the build.
+  worker: {
+    format: 'es'
+  },
+
   // CSS processing uses the same postcss/tailwind config
   css: {
     postcss: resolve(__dirname, 'postcss.config.cjs')
