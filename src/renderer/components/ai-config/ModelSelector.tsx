@@ -31,6 +31,7 @@ import { useTranslation } from '../../i18n'
 import { useIsMobile } from '../../hooks/useIsMobile'
 import { trackHome } from '../../services/home-telemetry'
 import { isAnthropicProvider } from '../../types'
+import { validateModelCapabilityOverride } from '../../../shared/model-capability-overrides'
 
 /** Read v2 aiSources config with empty fallback */
 function useAiSources(): AISourcesConfig {
@@ -481,6 +482,16 @@ function useConversationModel() {
   return { aiSources, source, modelId, model, name, isMissingSource, configuredEffort }
 }
 
+/** The user's per-model settings win over the catalog, as they do at runtime; a malformed one is ignored there too. */
+function resolveCardFacts(source: AISource | null | undefined, modelId: string | undefined, model: ModelOption | undefined) {
+  const validation = validateModelCapabilityOverride(modelId ? source?.modelOverrides?.[modelId] : undefined)
+  const override = validation.valid ? validation.value : undefined
+  return {
+    contextWindow: override?.contextWindow ?? model?.capabilities?.contextWindow,
+    vision: override?.vision ?? model?.supportsVision
+  }
+}
+
 /**
  * First step of the dropdown: what this conversation runs on, with switching
  * one click further. Facts the catalog doesn't report are left out.
@@ -488,8 +499,8 @@ function useConversationModel() {
 function CurrentModelCard({ onSwitch }: { onSwitch: () => void }) {
   const { t } = useTranslation()
   const navigate = useAppStore(state => state.navigate)
-  const { aiSources, source, model, name, isMissingSource } = useConversationModel()
-  const contextWindow = model?.capabilities?.contextWindow
+  const { aiSources, source, modelId, model, name, isMissingSource } = useConversationModel()
+  const { contextWindow, vision } = resolveCardFacts(source, modelId, model)
 
   if (isMissingSource) {
     const hasSources = aiSources.sources.length > 0
@@ -533,10 +544,10 @@ function CurrentModelCard({ onSwitch }: { onSwitch: () => void }) {
             <dd className="tabular-nums text-foreground">{formatContextWindow(contextWindow)}</dd>
           </div>
         ) : null}
-        {model?.supportsVision !== undefined && (
+        {vision !== undefined && (
           <div className="flex justify-between gap-3">
             <dt className="text-muted-foreground">{t('Image input')}</dt>
-            <dd className="text-foreground">{model.supportsVision ? t('Supported') : t('Not supported')}</dd>
+            <dd className="text-foreground">{vision ? t('Supported') : t('Not supported')}</dd>
           </div>
         )}
       </dl>

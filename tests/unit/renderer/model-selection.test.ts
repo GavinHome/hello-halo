@@ -100,6 +100,20 @@ describe('model selector account ownership', () => {
     expect(text(child(sheet, 'ModelList'))).toContain('Account removed. Choose another account.')
   })
 
+  it('shows the user\'s per-model settings over the catalog, and ignores a malformed one', () => {
+    env.target = { kind: 'conversation', conversationId: 'c', conversation: { id: 'c' } }
+    env.app.config.aiSources.sources = [{ ...source, modelOverrides: { 'b-model': { contextWindow: 870000, vision: false } } }]
+    const { render } = selector()
+    nodes(render()).find(node => node.type === 'button').props.onClick()
+    let card = text(child(render(), 'CurrentModelCard'))
+    expect(card).toContain('870K')
+    expect(card).toContain('Not supported')
+    env.app.config.aiSources.sources = [{ ...source, modelOverrides: { 'b-model': { contextWindow: -1 } } }]
+    card = text(child(render(), 'CurrentModelCard'))
+    expect(card).toContain('1M')
+    expect(card).toContain('Supported')
+  })
+
   it('directs a digital human to its own settings without showing the global account as its model', () => {
     env.target = { kind: 'digital-human', appId: 'person', appName: 'Person', modelSourceId: 'removed', modelId: 'old-model' }
     const { render } = selector()
