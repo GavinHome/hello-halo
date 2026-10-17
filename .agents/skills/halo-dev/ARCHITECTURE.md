@@ -322,8 +322,10 @@ Key types:
 
 **Managed OAuth accounts** are independent `AISource` records, not one record per
 provider. Login without a target adds an account (a verified stable account id may
-match an existing record); targeted reauthentication preserves the source id and
-rejects a known account mismatch. An optional provider `getAccountId` verifies a
+match an existing record, which is how Settings re-signs an account); targeted
+reauthentication — main process only, used by the store identity sign-in — preserves
+the source id and rejects a known account mismatch. Settings edits an OAuth account's
+name and `modelOverrides` only (`OAuthAccountEditor`). An optional provider `getAccountId` verifies a
 legacy identity from that source's credential before an id migration; labels never
 prove identity. ChatGPT separates user/workspace identity from the provider-owned
 `accountId` used by inference and catalog routing; workspace membership alone is
