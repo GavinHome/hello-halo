@@ -17,10 +17,11 @@ import * as path from 'path'
 import * as fs from 'fs'
 import { nativeImage, app } from 'electron'
 import { AsyncLocalStorage } from 'node:async_hooks'
+import { randomUUID } from 'node:crypto'
 import { browserViewManager } from '../browser-view.service'
-import { captureBrowserPage, withBrowserFrames } from '../browser-host'
+import { browserHostManager, captureBrowserPage, MainHostAttachError, withBrowserFrames } from '../browser-host'
 import { BROWSER_INPUT_METHODS, BrowserInputOperation, type BrowserInputCommandSender } from '../browser-input'
-import type { BrowserViewState } from '../browser-view.service'
+import type { BrowserViewState, DeviceMode } from '../browser-view.service'
 import {
   createAccessibilitySnapshot,
   getElementBoundingBox,
@@ -74,6 +75,13 @@ const automationOwnedViewIds = new Set<string>()
 const liveContexts = new Set<BrowserContext>()
 
 /**
+ * Pages a context with a UI had to open in the hidden host because the main
+ * window could not attach them. Nothing can ever display them, so no context
+ * announces them, whichever holds or selects them.
+ */
+const backgroundOnlyViewIds = new Set<string>()
+
+/**
  * A view is gone: reconcile EVERY context, then announce it once.
  *
  * Announcing per context would tell the renderer to drop the same live session
@@ -83,10 +91,11 @@ const liveContexts = new Set<BrowserContext>()
 export function notifyViewDestroyed(viewId: string, webContentsId?: number): void {
   if (webContentsId !== undefined) unregisterWebContentsForDownload(webContentsId)
   automationOwnedViewIds.delete(viewId)
+  const wasAnnounced = !backgroundOnlyViewIds.delete(viewId)
   let announce = false
   for (const ctx of liveContexts) {
     const held = ctx.handleViewDestroyed(viewId)
-    if (held && ctx.hasUi) announce = true
+    if (held && ctx.hasUi && wasAnnounced) announce = true
   }
   if (announce) {
     emitBrowserViewGone({ viewId })
@@ -122,7 +131,7 @@ export function listLivePages(): AIBrowserLivePage[] {
 export function stopLivePage(viewId: string, conversationId: string): AIBrowserStopResult {
   let owner: BrowserContext | null = null
   for (const ctx of liveContexts) {
-    if (ctx.hasUi && ctx.conversationId === conversationId && ctx.ownsView(viewId)) owner = ctx
+    if (ctx.isWatchable(viewId) && ctx.conversationId === conversationId && ctx.ownsView(viewId)) owner = ctx
   }
   if (!owner) {
     console.warn(`[BrowserContext] Stop refused: ${viewId} is not a page ${conversationId} opened`)
@@ -264,12 +273,15 @@ export class BrowserContext implements BrowserContextInterface {
   private ownedViewIds: Set<string> = new Set()
 
   // Whether this is a scoped context (used for automation isolation).
-  // Watchable contexts use the permanent main host; unattended runs use the hidden host.
   private _isScoped: boolean = false
+  // See `hasUi`. Also picks the page host: watchable pages use the permanent
+  // main host, unattended ones the hidden host.
+  private _hasUi: boolean = true
 
   /**
    * The conversation this context serves. Lets the renderer tell whose page an
-   * active-view event describes; automation runs have none.
+   * active-view event describes; a scoped context has one only when created
+   * with a live view.
    */
   readonly conversationId: string | null
   /** Space of that conversation, so a client can list pages per space. */
@@ -290,11 +302,16 @@ export class BrowserContext implements BrowserContextInterface {
 
   /**
    * Whether anything in the renderer can show this context's pages: the user's
-   * singleton and every conversation-bound context. An automation run cannot be
-   * watched, so it stays silent.
+   * singleton, every interactive context and a scoped context created with a
+   * live view. Any other scoped context runs unattended and stays silent.
    */
   get hasUi(): boolean {
-    return !this._isScoped || this.conversationId !== null
+    return this._hasUi
+  }
+
+  /** Whether the renderer may hear of this page through this context (see `openPage` for the exception). */
+  isWatchable(viewId: string): boolean {
+    return this._hasUi && !backgroundOnlyViewIds.has(viewId)
   }
 
   /** How many tabs this context currently owns (diagnostics). */
@@ -315,7 +332,7 @@ export class BrowserContext implements BrowserContextInterface {
     return false
   }
 
-  /** The pages this context holds (owned plus active), or none when no UI could reveal them. */
+  /** The pages this context holds (owned plus active) that a UI could reveal. */
   describeLivePages(): AIBrowserLivePage[] {
     if (!this.hasUi) return []
     const ids = new Set(this.ownedViewIds)
@@ -323,7 +340,7 @@ export class BrowserContext implements BrowserContextInterface {
     const pages: AIBrowserLivePage[] = []
     for (const viewId of ids) {
       const state = browserViewManager.getState(viewId)
-      if (!state) continue
+      if (!state || !this.isWatchable(viewId)) continue
       pages.push({
         conversationId: this.conversationId,
         spaceId: this.spaceId,
@@ -365,9 +382,44 @@ export class BrowserContext implements BrowserContextInterface {
     return !automationOwnedViewIds.has(viewId)
   }
 
-  /** Mark this context as scoped. Called by createScopedBrowserContext(). */
-  markAsScoped(): void {
+  /** Mark this context as scoped, watchable or not. Called by createScopedBrowserContext(). */
+  markAsScoped(watchable: boolean): void {
     this._isScoped = true
+    this._hasUi = watchable
+  }
+
+  /**
+   * Open a new page and act on it from now on.
+   *
+   * A page someone could watch opens in the main window. When that window
+   * cannot attach it in time, or is restarting, the page opens in the hidden
+   * host instead: it works, but nothing can ever show it, so it is announced
+   * nowhere (`isWatchable`). While the main window has not recovered from such
+   * a timeout it is skipped outright, so the wait is paid once, not per page.
+   * Resolves `fellBack` when a page that could have been watched cannot be.
+   */
+  async openPage(url: string, deviceMode: DeviceMode): Promise<{ viewId: string; fellBack: boolean }> {
+    if (this.released) throw new Error('Browser context was released')
+    const viewId = `ai-browser-${randomUUID()}`
+    let fellBack = this._hasUi && browserHostManager.isMainHostStalled()
+    if (fellBack) console.log('[BrowserContext] Main host stalled; opening a watchable page in the hidden host', { viewId, conversationId: this.conversationId })
+    try {
+      await browserViewManager.create(viewId, url, { offscreen: !this._hasUi || fellBack, deviceMode })
+    } catch (error) {
+      if (fellBack || !this._hasUi || this.released || !(error instanceof MainHostAttachError)) throw error
+      fellBack = true
+      console.warn('[BrowserContext] Main host could not attach a watchable page; opening it in the hidden host', { viewId, conversationId: this.conversationId, reason: error.message })
+      await browserViewManager.create(viewId, url, { offscreen: true, deviceMode })
+    }
+    if (fellBack) backgroundOnlyViewIds.add(viewId)
+    // A context released while its page was being created would never close it.
+    if (this.released) {
+      browserViewManager.destroy(viewId)
+      throw new Error('Browser context was released')
+    }
+    this.trackView(viewId)
+    this.setActiveViewId(viewId)
+    return { viewId, fellBack }
   }
 
   /**
@@ -401,10 +453,10 @@ export class BrowserContext implements BrowserContextInterface {
   /**
    * Broadcast the active view change to the global event bus so the transport
    * layer can reach the renderer and remote clients. Contexts without a UI
-   * (automation runs) stay silent.
+   * (automation runs) stay silent, and so does a page nothing can display.
    */
   private notifyActiveViewChange(viewId: string): void {
-    if (!this.hasUi) return
+    if (!this.isWatchable(viewId)) return
     const state = browserViewManager.getState(viewId)
     emitBrowserActiveView({
       conversationId: this.conversationId,
@@ -1091,11 +1143,10 @@ export class BrowserContext implements BrowserContextInterface {
   // ============================================
 
   private cancelPageOperations(): void {
-    this.released = true
     this.operationVersion++
     for (const controller of this.operationCancellations.keys()) controller.abort(new Error('Browser context was released during operation'))
     this.operationCancellations.clear()
-    if (!this.pageOperations) this.pageTarget.disable()
+    if (!this.pageOperations && this.released) this.pageTarget.disable()
   }
 
   private async withPageFrames<T>(operation: () => Promise<T>, timeoutMs = CDP_TIMEOUT): Promise<T> {
@@ -2035,11 +2086,11 @@ export class BrowserContext implements BrowserContextInterface {
 
   /**
    * Register a view as owned by this context (for scoped cleanup).
-   * Only applies to scoped (automation) contexts — the global singleton
-   * used for interactive browsing is intentionally excluded so that
-   * normal user browsing is unaffected.
+   * Only applies to scoped (automation) contexts and to pages the hidden host
+   * had to take (see `openPage`) — the interactive browser is otherwise
+   * excluded so that normal user browsing is unaffected.
    *
-   * Automation views are muted, have autoplay blocked, and report
+   * Such views are muted, have autoplay blocked, and report
    * visibilityState='visible' regardless of the parent window's actual
    * visibility. This prevents sites like Xiaohongshu from detecting the
    * Electron window is in the background and auto-closing UI overlays
@@ -2065,10 +2116,10 @@ export class BrowserContext implements BrowserContextInterface {
     // to the correct BrowserContext for silent saving.
     registerWebContentsForDownload(wc.id, this)
 
-    // Guard: media suppression is only for automation (scoped) contexts.
-    // The global singleton serves the user's interactive browser and must
-    // not interfere with normal autoplay behaviour.
-    if (!this._isScoped) return
+    // Media suppression is for automation (scoped) contexts, and for a page the
+    // hidden host had to take, which nothing can show or stop. The interactive
+    // browser otherwise keeps normal autoplay.
+    if (!this._isScoped && !backgroundOnlyViewIds.has(viewId)) return
 
     // Layer 2: mute audio output
     wc.setAudioMuted(true)
@@ -2130,6 +2181,7 @@ export class BrowserContext implements BrowserContextInterface {
    * silent and destroys the user's work.
    */
   release(): void {
+    this.released = true
     this.cancelPageOperations()
     this.disableMonitoring()
 
@@ -2143,6 +2195,9 @@ export class BrowserContext implements BrowserContextInterface {
         unregisterWebContentsForDownload(wc.id)
       }
     }
+    // A page only the hidden host could open is not one the user can keep:
+    // nothing can show it, so it would outlive the conversation unseen.
+    const unseen = [...this.ownedViewIds].filter(viewId => backgroundOnlyViewIds.has(viewId))
 
     for (const waiter of this.pendingDownloadResolvers) {
       clearTimeout(waiter.timer)
@@ -2156,6 +2211,7 @@ export class BrowserContext implements BrowserContextInterface {
     this.snapshotContents = null
     this.workDir = undefined
     liveContexts.delete(this)
+    for (const viewId of unseen) browserViewManager.destroy(viewId)
     this.announceReleased()
   }
 
@@ -2171,13 +2227,26 @@ export class BrowserContext implements BrowserContextInterface {
   }
 
   /**
-   * Cleanup when context is destroyed.
-   * Also destroys pages owned by this context.
+   * Close every page this context opened and forget where it was, and stay
+   * usable: the next page opens fresh.
+   *
+   * This is the end of a turn, not of the context. The tools an engine session
+   * holds were built around this very object and serve every later turn of
+   * that session, so the pages can go while the context cannot — a context
+   * ended for good (`destroy`) under a live session leaves that session's
+   * browser refusing every call until the session itself is gone.
    */
-  destroy(): void {
+  closePages(): void {
     this.cancelPageOperations()
     this.disableMonitoring()
+    this.forgetOwnedPages('Browser pages closed')
+  }
 
+  /**
+   * Unregister, close and drop the pages this context opened. Download waiters
+   * are rejected with `reason`.
+   */
+  private forgetOwnedPages(reason: string): void {
     // Unregister webContents from download routing before destroying views
     for (const viewId of this.ownedViewIds) {
       const wc = browserViewManager.getWebContents(viewId)
@@ -2189,7 +2258,7 @@ export class BrowserContext implements BrowserContextInterface {
     // Reject any pending download waiters
     for (const waiter of this.pendingDownloadResolvers) {
       clearTimeout(waiter.timer)
-      waiter.reject(new Error('Context destroyed'))
+      waiter.reject(new Error(reason))
     }
     this.pendingDownloadResolvers = []
     this.downloads.clear()
@@ -2208,6 +2277,18 @@ export class BrowserContext implements BrowserContextInterface {
     this.activeViewId = null
     this.lastSnapshot = null
     this.snapshotContents = null
+  }
+
+  /**
+   * End this context for good: close the pages it opened and refuse every
+   * later call. Only for a context no engine session can still reach through
+   * its tools; see `closePages` for the end of a turn.
+   */
+  destroy(): void {
+    this.released = true
+    this.cancelPageOperations()
+    this.disableMonitoring()
+    this.forgetOwnedPages('Context destroyed')
     this.workDir = undefined
     liveContexts.delete(this)
     this.announceReleased()
@@ -2277,8 +2358,17 @@ function parseKey(key: string): {
   }
 }
 
+export interface ScopedBrowserContextOptions {
+  /**
+   * The chat or desktop run whose live view shows these pages, and its space.
+   * Only with it do the pages open in the main window and reach the renderer;
+   * without it they stay in the hidden host and nothing about them is announced.
+   */
+  liveView?: { conversationId: string; spaceId: string }
+}
+
 /**
- * Create a scoped BrowserContext for automation runs.
+ * Create a scoped BrowserContext for an automation run or a digital-human chat.
  *
  * A scoped context has its own activeViewId tracking (isolated from the global
  * singleton and other scoped contexts) but shares the same browserViewManager
@@ -2287,12 +2377,13 @@ function parseKey(key: string): {
  * Lifecycle: create before the run, call `destroy()` after the run.
  * `destroy()` also cleans up pages created during the scope.
  *
- * Pass `conversationId` when the tabs belong to a chat the user can open: the
- * context then announces its active tab so the renderer can offer a live view.
+ * Give it a `liveView` only when someone can open the pages while they run:
+ * whether anyone can watch is what decides the host, never whether the caller
+ * happens to have a conversation id.
  */
-export function createScopedBrowserContext(options?: { conversationId?: string; spaceId?: string }): BrowserContext {
-  const scoped = new BrowserContext(options)
-  scoped.markAsScoped()
+export function createScopedBrowserContext(options: ScopedBrowserContextOptions = {}): BrowserContext {
+  const scoped = new BrowserContext(options.liveView)
+  scoped.markAsScoped(options.liveView !== undefined)
   return scoped
 }
 

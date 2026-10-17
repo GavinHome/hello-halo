@@ -336,8 +336,10 @@ writes are single-flight per source and discard obsolete results. Model-bound
 credentials are prepared for the same captured effective model used to resolve the
 backend descriptor. Every engine receives the same captured account snapshot;
 alternate engines never re-read global selection during creation. Source changes
-rebuild only sessions using that source, at the existing safe boundaries; an unavailable explicit source must fail rather than
-silently use another account. CLI-delegated credentials remain a single external
+rebuild only sessions using that source, at the existing safe boundaries. A stored
+selection (a conversation's pin, a digital human's override) whose account was removed
+follows the global selection — the same as no selection; an account that still exists
+but cannot be used must fail rather than silently use another account. CLI-delegated credentials remain a single external
 slot. Generic client config snapshots preserve live managed source metadata,
 credentials and selection; account edits and lifecycle operations use targeted
 source APIs, so stale snapshots cannot delete/revive accounts or roll back edits. OAuth tokens are masked at IPC/HTTP
@@ -388,6 +390,13 @@ relays it as a retained milestone. It never triggers a whole-transcript reload.
 Renderer live placement uses the existing source styles and a bounded transient
 overlay; normal transcript reads reconcile temporary app record IDs. See the
 chat-store and app-runtime DESIGN documents for arrival and storage contracts.
+
+Model lists (each AI source's catalog) are kept fresh by main, not by the
+renderer: startup, window focus, wake from sleep and a model picker opening
+(`ai-sources:refresh-stale-catalogs`) ask `AISourceManager.refreshStaleCatalogs`,
+and `services/ai-sources/catalog-schedule.ts` decides which sources are due. A
+refresh that changed a stored list emits `ai-sources:catalog-changed` (IPC + WS)
+and every client re-reads its AI sources. Do not add renderer-driven refresh loops.
 
 Two types:
 - **Request/Response** (renderer → main): registered via `ipcMain.handle()`

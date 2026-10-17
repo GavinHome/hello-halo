@@ -23,7 +23,7 @@ import type {
 import {
   getHeadlessElectronPath,
   getWorkingDir,
-  getApiCredentialsForConversation,
+  getApiCredentialsForSelection,
   getDbMcpServers
 } from './helpers'
 import { isImSessionKey } from '../../../shared/apps/im-keys'
@@ -1459,10 +1459,11 @@ export async function ensureSessionWarm(
   const sessionId = conversation?.sessionId
   const electronPath = getHeadlessElectronPath()
 
-  // The conversation's pinned account, or the global selection when it has no pin.
-  // Must match sendMessage's resolution exactly so the warmed session isn't
-  // immediately rebuilt on the first message (fingerprint mismatch).
-  const credentials = await getApiCredentialsForConversation(conversation)
+  // The conversation's pinned account, or the global selection when it has no
+  // pin or the pinned account was removed. Must match sendMessage's resolution
+  // exactly so the warmed session isn't immediately rebuilt on the first
+  // message (fingerprint mismatch).
+  const credentials = await getApiCredentialsForSelection(conversation)
   console.log(`[Agent] Session warm using: ${credentials.provider}, model: ${credentials.model}`)
 
   // Resolve credentials for SDK (handles OpenAI compat router for non-Anthropic providers).

@@ -147,8 +147,7 @@ vi.mock('../../../../src/main/services/agent/image-attachments', () => ({
 }))
 vi.mock('../../../../src/main/services/agent/helpers', () => ({
   getApiCredentials: vi.fn(async () => ({ provider: 'anthropic', model: 'm' })),
-  getApiCredentialsForSource: vi.fn(),
-  getApiCredentialsForConversation: vi.fn(async () => ({ provider: 'anthropic', model: 'm' })),
+  getApiCredentialsForSelection: vi.fn(async () => ({ provider: 'anthropic', model: 'm' })),
   getWorkingDir: vi.fn(() => state.workDir),
   getHeadlessElectronPath: vi.fn(() => '/electron'),
   getDbMcpServers: vi.fn(() => null),
@@ -512,7 +511,7 @@ const ROW_DRIVERS = {
       imSession: { channel: 'wecom-bot', chatType: 'group', displayName: 'Ops', sessionId: 'inst:ops' },
       teamContext: {
         teamId: 'team-1', epochId: 'epoch-im', kind: 'human_message', fromAppId: null, wait: false,
-        correlationId: 'c-im', external: true,
+        correlationId: 'c-im', origin: 'guest',
       },
     })).finally(() => clearImPermissionContext(FRONTED_KEY()))
   }),

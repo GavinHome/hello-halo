@@ -56,7 +56,7 @@ vi.mock('../../../../src/main/services/analytics/analytics.service', () => ({
 }))
 
 import { AISourceManager } from '../../../../src/main/services/ai-sources/manager'
-import type { AISource, AISourcesConfig, OAuthSourceConfig } from '../../../../src/shared/types'
+import type { AISource, AISourcesConfig, OAuthSourceConfig, OAuthStartResult } from '../../../../src/shared/types'
 import type { ProviderResult } from '../../../../src/shared/interfaces'
 
 function seed(config: Partial<AISourcesConfig>): void {
@@ -469,9 +469,40 @@ describe('independent OAuth account lifecycle', () => {
     expect(current.success).toBe(true)
     expect(stub.startLogin).toHaveBeenCalledTimes(2)
     // The superseded start cleaned its own late slot before the new one opened.
+    expect(stub.cancelLogin).toHaveBeenCalledTimes(2)
     expect(stub.cancelLogin.mock.invocationCallOrder.at(-1)).toBeLessThan(stub.startLogin.mock.invocationCallOrder[1])
     expect(mgr.getOAuthLoginContext('test-oauth', current.data!.loginId)).not.toBeNull()
     await mgr.cancelOAuthLogin('test-oauth', current.data!.loginId)
+  })
+
+  it('a start that fails after the drain gave up on it leaves the login that superseded it intact', async () => {
+    vi.useFakeTimers()
+    try {
+      seed({ sources: [] })
+      const mgr = new AISourceManager()
+      const stub = provider(mgr)
+      const stuck = deferred<ProviderResult<OAuthStartResult>>()
+      stub.startLogin.mockReturnValueOnce(stuck.promise as never)
+      const first = mgr.startOAuthLogin('test-oauth')
+      await vi.advanceTimersByTimeAsync(0)
+      expect(stub.startLogin).toHaveBeenCalledTimes(1)
+      const second = mgr.startOAuthLogin('test-oauth')
+      // The drain waits 15 s for the stuck start, then lets the new login go ahead.
+      await vi.advanceTimersByTimeAsync(16_000)
+      const current = await second
+      expect(current.success).toBe(true)
+      expect(stub.startLogin).toHaveBeenCalledTimes(2)
+      expect(stub.cancelLogin).toHaveBeenCalledTimes(1)
+
+      stuck.resolve({ success: false, error: 'request timed out' })
+      expect((await first).success).toBe(false)
+      // Nothing of the failed start exists in the provider, so its late return must not clear the slot the new login holds.
+      expect(stub.cancelLogin).toHaveBeenCalledTimes(1)
+      expect(mgr.getOAuthLoginContext('test-oauth', current.data!.loginId)).not.toBeNull()
+      expect((await mgr.completeOAuthLogin('test-oauth', 'state', current.data!.loginId)).success).toBe(true)
+    } finally {
+      vi.useRealTimers()
+    }
   })
 
   it('joins a repeated completion of the same login and returns only public fields', async () => {
@@ -1371,6 +1402,88 @@ describe('refreshSourceConfig — token freshness and degraded catalogs', () => 
     const saved = store.value.aiSources as AISourcesConfig
     expect(saved.sources[0].availableModels.map(m => m.id)).toEqual(['fetched'])
     expect(saved.sources[0].modelOverrides).toEqual({ fetched: { contextWindow: 128000 } })
+  })
+
+  it('announces a changed catalog and stays silent, without writing, when nothing changed', async () => {
+    seedCatalogSource()
+    const mgr = new AISourceManager()
+    registerProvider(mgr, { refreshConfig: vi.fn().mockResolvedValue({
+      success: true, data: { 'catalog-prov': { availableModels: ['fetched'], modelNames: { fetched: 'Fetched' } } }
+    }) })
+    const changes: string[][] = []
+    mgr.onModelCatalogChanged(event => changes.push(event.sourceIds))
+
+    await mgr.refreshSourceConfig('o1')
+    expect(changes).toEqual([['o1']])
+    expect(saveConfig).toHaveBeenCalledTimes(1)
+
+    await mgr.refreshSourceConfig('o1')
+    expect(changes).toEqual([['o1']])
+    expect(saveConfig).toHaveBeenCalledTimes(1)
+  })
+
+  it('does not announce a fallback catalog that kept the stored list', async () => {
+    seedCatalogSource()
+    const mgr = new AISourceManager()
+    registerProvider(mgr, { refreshConfig: vi.fn().mockResolvedValue({
+      success: true, data: { 'catalog-prov': { availableModels: ['hardcoded'], degraded: true } }
+    }) })
+    const changed = vi.fn()
+    mgr.onModelCatalogChanged(changed)
+    await mgr.refreshSourceConfig('o1')
+    expect(changed).not.toHaveBeenCalled()
+    expect(saveConfig).not.toHaveBeenCalled()
+  })
+
+  describe('refreshStaleCatalogs', () => {
+    it('fetches each source once until it goes stale, whatever asks', async () => {
+      seedCatalogSource()
+      const mgr = new AISourceManager()
+      const provider = registerProvider(mgr, {})
+      await mgr.refreshStaleCatalogs('startup')
+      await mgr.refreshStaleCatalogs('focus')
+      await mgr.refreshStaleCatalogs('picker')
+      expect(provider.refreshConfig).toHaveBeenCalledTimes(1)
+    })
+
+    it('retries a failed or fallback read at the next signal after the retry delay, not at once', async () => {
+      vi.useFakeTimers()
+      try {
+        seedCatalogSource()
+        const mgr = new AISourceManager()
+        const provider = registerProvider(mgr, { refreshConfig: vi.fn().mockResolvedValue({
+          success: true, data: { 'catalog-prov': { availableModels: ['hardcoded'], degraded: true } }
+        }) })
+        await mgr.refreshStaleCatalogs('startup')
+        await mgr.refreshStaleCatalogs('focus')
+        expect(provider.refreshConfig).toHaveBeenCalledTimes(1)
+        vi.advanceTimersByTime(2 * 60_000)
+        await mgr.refreshStaleCatalogs('focus')
+        expect(provider.refreshConfig).toHaveBeenCalledTimes(2)
+      } finally {
+        vi.useRealTimers()
+      }
+    })
+
+    it('a forced refresh also counts, so the next signal does not repeat it', async () => {
+      seedCatalogSource()
+      const mgr = new AISourceManager()
+      const provider = registerProvider(mgr, {})
+      await mgr.refreshAllConfigs()
+      await mgr.refreshStaleCatalogs('focus')
+      expect(provider.refreshConfig).toHaveBeenCalledTimes(1)
+    })
+
+    it('refreshes sources in parallel and never rejects when one throws', async () => {
+      seedCatalogSource()
+      ;(store.value.aiSources as AISourcesConfig).sources.push(oauthSource({ id: 'other', provider: 'catalog-prov' as never }))
+      const mgr = new AISourceManager()
+      const provider = registerProvider(mgr, { refreshConfig: vi.fn()
+        .mockRejectedValueOnce(new Error('boom'))
+        .mockResolvedValue({ success: true, data: { 'catalog-prov': { availableModels: ['m1'] } } }) })
+      await expect(mgr.refreshStaleCatalogs('startup')).resolves.toBeUndefined()
+      expect(provider.refreshConfig).toHaveBeenCalledTimes(2)
+    })
   })
 })
 

@@ -90,12 +90,13 @@ vi.mock('../../../../src/main/services/agent/control', () => ({
 
 vi.mock('../../../../src/main/services/agent/helpers', () => ({
   getApiCredentials: vi.fn(),
-  getApiCredentialsForSource: vi.fn(),
+  getApiCredentialsForSelection: vi.fn(),
   getWorkingDir: vi.fn(),
   getHeadlessElectronPath: vi.fn(),
   getDbMcpServers: vi.fn(),
 }))
 vi.mock('../../../../src/main/services/agent/sdk-config', () => ({
+  markMcpServerSettings: (server: unknown) => server,
   resolveCredentialsForSdk: vi.fn(),
   buildUserSessionSdkOptions: vi.fn(),
 }))

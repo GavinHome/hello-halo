@@ -6,23 +6,43 @@
  */
 
 import { describe, it, expect } from 'vitest'
-import { resolveLocalizedText, getModelDisplayName, getSourceAccountName, type AISource, type AISourcesConfig } from '../../../src/shared/types/ai-sources'
+import {
+  resolveLocalizedText, getModelDisplayName, resolveModelSelection, getSourceAccountName,
+  type AISource, type AISourcesConfig,
+} from '../../../src/shared/types/ai-sources'
 
-describe('strict model selection display', () => {
+describe('stored model selection display', () => {
   const source = (id: string): AISource => ({
     id, name: id, provider: 'custom', authType: 'api-key', apiUrl: '', model: `${id}-model`,
     availableModels: [{ id: `${id}-model`, name: `${id} model` }], createdAt: '', updatedAt: '',
   })
   const config: AISourcesConfig = { version: 2, currentId: 'b', sources: [source('a'), source('b')] }
-  it('follows global only without a source pin', () => {
-    expect(getModelDisplayName(config)).toBe('b model')
+  const empty: AISourcesConfig = { version: 2, currentId: null, sources: [] }
+
+  it('shows the pinned account and model when the account exists', () => {
     expect(getModelDisplayName(config, 'a')).toBe('a model')
     expect(getModelDisplayName(config, 'a', 'custom-model')).toBe('custom-model')
+    expect(resolveModelSelection(config, { modelSourceId: 'a', modelId: 'custom-model' }))
+      .toEqual({ source: config.sources[0], modelId: 'custom-model', own: true })
   })
-  it('never labels a deleted pin as a different account, including when every account was deleted', () => {
-    expect(getModelDisplayName(config, 'removed', 'old-model')).toBe('')
-    expect(getModelDisplayName({ version: 2, currentId: null, sources: [] }, 'a')).toBe('')
+
+  it('shows the global selection without a pin', () => {
+    expect(getModelDisplayName(config)).toBe('b model')
+    expect(resolveModelSelection(config, null)).toEqual({ source: config.sources[1], modelId: 'b-model', own: false })
+    expect(resolveModelSelection(config, {}).own).toBe(false)
+  })
+
+  it('shows the global selection and its own model for a pin whose account was removed', () => {
+    expect(getModelDisplayName(config, 'removed', 'old-model')).toBe('b model')
+    expect(resolveModelSelection(config, { modelSourceId: 'removed', modelId: 'old-model' }))
+      .toEqual({ source: config.sources[1], modelId: 'b-model', own: false })
     expect(config.currentId).toBe('b')
+  })
+
+  it('shows no model when there is no account to run on', () => {
+    expect(getModelDisplayName(empty, 'a')).toBe('No model')
+    expect(getModelDisplayName(empty)).toBe('No model')
+    expect(resolveModelSelection(empty, { modelSourceId: 'a' })).toEqual({ source: null, modelId: undefined, own: false })
   })
 })
 

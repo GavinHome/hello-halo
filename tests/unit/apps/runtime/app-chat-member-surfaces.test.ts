@@ -132,6 +132,7 @@ vi.mock('../../../../src/main/services/agent/resolved-sdk', async (importOrigina
 }))
 
 vi.mock('../../../../src/main/services/agent/sdk-config', () => ({
+  markMcpServerSettings: (server: unknown) => server,
   resolveCredentialsForSdk: vi.fn(async () => ({
     displayModel: 'test-model',
     sdkModel: 'test-model',
@@ -163,20 +164,21 @@ const { prepareNonVisionImageFallback } = vi.hoisted(() => ({ prepareNonVisionIm
 vi.mock('../../../../src/main/services/agent/image-attachments', () => ({ prepareNonVisionImageFallback }))
 vi.mock('../../../../src/main/services/agent/helpers', () => ({
   getApiCredentials: vi.fn(async () => ({ provider: 'anthropic' })),
-  getApiCredentialsForSource: vi.fn(),
+  getApiCredentialsForSelection: vi.fn(async () => ({ provider: 'anthropic' })),
   getWorkingDir: vi.fn(),
   getHeadlessElectronPath: vi.fn(() => '/electron'),
   getDbMcpServers: vi.fn(() => null),
 }))
 vi.mock('../../../../src/main/services/agent/events', () => ({ onAgentEvent: () => ({ dispose: () => {} }), emitAgentEvent: vi.fn() }))
 // A borrowed turn lists the skills it could load; none here.
-vi.mock('../../../../src/main/apps/skill-discovery', () => ({ listLoadableSkillCopies: () => [] }))
+const { listLoadableSkillCopies } = vi.hoisted(() => ({ listLoadableSkillCopies: vi.fn((_spaceId: string): unknown[] => []) }))
+vi.mock('../../../../src/main/apps/skill-discovery', () => ({ listLoadableSkillCopies }))
 vi.mock('../../../../src/main/services/analytics/analytics.service', () => ({
   analytics: { track: vi.fn(), trackErrorSurface: vi.fn() },
 }))
 vi.mock('../../../../src/main/services/ai-browser', () => ({
   createAIBrowserMcpServer: vi.fn(),
-  createScopedBrowserContext: vi.fn(() => ({ destroy: vi.fn(), ownedViewCount: 0, hasRevealedView: () => false })),
+  createScopedBrowserContext: vi.fn(() => ({ destroy: vi.fn(), closePages: vi.fn(), ownedViewCount: 0, hasRevealedView: () => false })),
   AI_BROWSER_SYSTEM_PROMPT: 'AI browser instructions',
 }))
 vi.mock('../../../../src/main/services/ai-terminal', () => ({
@@ -327,10 +329,10 @@ vi.mock('../../../../src/main/services/memory-consolidation', () => ({
 // ============================================
 
 import { sendAppChatMessage } from '../../../../src/main/apps/runtime/app-chat'
-import { hasChatBrowserContext } from '../../../../src/main/apps/runtime/app-chat-browser'
+import { hasChatBrowserContext, destroyAllChatBrowserContexts } from '../../../../src/main/apps/runtime/app-chat-browser'
 import { createScopedBrowserContext } from '../../../../src/main/services/ai-browser'
 import { acquireV2Session, updateConsumerDisplayModel } from '../../../../src/main/services/agent/session-manager'
-import { getApiCredentials } from '../../../../src/main/services/agent/helpers'
+import { getApiCredentialsForSelection } from '../../../../src/main/services/agent/helpers'
 import { resolveCredentialsForSdk } from '../../../../src/main/services/agent/sdk-config'
 import { requestAppMemoryConsolidation, prepareMemoryForTurn, appMemorySettings, loadSpaceTopicsForTurn } from '../../../../src/main/apps/runtime/turn/memory-lifecycle'
 import { generatePromptInstructions } from '../../../../src/main/platform/memory'
@@ -338,11 +340,16 @@ import { describeSelfInstance, formatInstanceTag } from '../../../../src/main/ap
 import { setImPermissionContext, clearImPermissionContext } from '../../../../src/main/apps/runtime/im-permission-registry'
 import { setActiveImChannelManager } from '../../../../src/main/apps/runtime/im-channels'
 import { buildTeamSessionKey } from '../../../../src/shared/apps/team-types'
+import { fullCapabilityPolicy } from '../../../../src/shared/apps/capability-policy'
 
 beforeEach(() => {
   getPromptInstructions.mockImplementation(generatePromptInstructions)
   send.mockClear()
   loadChatSessionId.mockReset()
+  // A chat's browser context lives with its engine session, and the mocked
+  // session above never retires; without this, a context from an earlier
+  // test would be found held by a live session.
+  destroyAllChatBrowserContexts('test-reset')
   getEngineCapabilities.mockReturnValue({ features: { permissionRules: true, hooks: true } })
   sessionRegistry.current = null
   vi.mocked(prepareMemoryForTurn).mockClear()
@@ -355,7 +362,7 @@ const EPOCH_ID = 'epoch-1'
 const CONVERSATION = buildTeamSessionKey(app.id, TEAM_ID, EPOCH_ID)
 
 /** The turn as the runtime dispatches it: a teammate's message to this member. */
-function memberTurn(opts: { external?: boolean } = {}): Parameters<typeof sendAppChatMessage>[0] {
+function memberTurn(opts: { origin?: 'colleague' | 'guest' } = {}): Parameters<typeof sendAppChatMessage>[0] {
   return {
     appId: app.id,
     spaceId: 'space-1',
@@ -369,7 +376,7 @@ function memberTurn(opts: { external?: boolean } = {}): Parameters<typeof sendAp
       fromAppId: 'app-coordinator',
       wait: false,
       correlationId: 'corr-1',
-      ...(opts.external ? { external: true } : {}),
+      ...(opts.origin ? { origin: opts.origin } : {}),
     },
   }
 }
@@ -599,35 +606,75 @@ describe('a restricted borrowed turn keeps every tool-call watcher', () => {
   it('on an engine that cannot enforce a policy (Codex), a restricted turn does not start at all', async () => {
     getEngineCapabilities.mockReturnValue({ features: { permissionRules: false, hooks: false } })
     vi.mocked(acquireV2Session).mockClear()
-    await expect(sendAppChatMessage(memberTurn())).rejects.toThrow(/cannot hold/)
+    await expect(sendAppChatMessage(memberTurn({ origin: 'colleague' }))).rejects.toThrow(/cannot hold/)
     expect(acquireV2Session).not.toHaveBeenCalled()
+  })
+
+  it('on an engine that runs no hooks (Codex, dsh), a colleague turn with full reach does not start: nothing would record it', async () => {
+    getDelegatedPolicy.mockReturnValue(null as never)
+    getEngineCapabilities.mockReturnValue({ displayName: 'Codex', features: { permissionRules: false, hooks: false } })
+    vi.mocked(acquireV2Session).mockClear()
+    await expect(sendAppChatMessage(memberTurn({ origin: 'colleague' }))).rejects.toThrow(/running on Codex, which cannot keep a record/)
+    expect(acquireV2Session).not.toHaveBeenCalled()
+    expect(hasChatBrowserContext(CONVERSATION)).toBe(false)
   })
 
   it('a turn refused while being set up gives back the browser context it took', async () => {
     getEngineCapabilities.mockReturnValue({ features: { permissionRules: false, hooks: false } })
     vi.mocked(createScopedBrowserContext).mockClear()
 
-    await expect(sendAppChatMessage(memberTurn())).rejects.toThrow(/cannot hold/)
+    await expect(sendAppChatMessage(memberTurn({ origin: 'colleague' }))).rejects.toThrow(/cannot hold/)
 
-    // A team session's context lives for the turn: released, it is gone.
+    // No session took the context (the turn never reached one), so nothing
+    // can hold it: it goes with the turn.
     expect(createScopedBrowserContext).toHaveBeenCalledTimes(1)
     expect(hasChatBrowserContext(CONVERSATION)).toBe(false)
   })
 
   const fileBoundaryMatchers = ['Read', 'Glob', 'Grep', 'Edit', 'MultiEdit', 'NotebookEdit']
 
-  it('a teammate from this machine gets the audit, the skill gate and the memory guard, but no path boundary', async () => {
+  it('a teammate from this machine runs as the owner: no gate, no record, only the memory guard', async () => {
     await sendAppChatMessage(memberTurn())
     const options = buildUserSessionSdkOptions.mock.results.at(-1)!.value as {
       hooks: Record<string, Array<{ matcher?: string }>>
+      disallowedTools?: string[]
     }
-    expect(options.hooks.PreToolUse).toEqual([guardSentinel, expect.objectContaining({ matcher: 'Skill' })])
+    expect(options.hooks.PreToolUse).toEqual([guardSentinel])
+    expect(options.hooks.PostToolUse).toBeUndefined()
+    expect(options.disallowedTools ?? []).not.toContain('Bash')
+  })
+
+  it('a colleague whose member grants everything keeps the owner\u2019s options, and the record', async () => {
+    getDelegatedPolicy.mockReturnValue(null as never)
+    vi.mocked(acquireV2Session).mockClear()
+    await sendAppChatMessage(memberTurn({ origin: 'colleague' }))
+    const options = buildUserSessionSdkOptions.mock.results.at(-1)!.value as {
+      hooks: Record<string, Array<{ matcher?: string }>>
+      disallowedTools?: string[]
+      permissionMode?: string
+    }
+    expect(options.hooks.PreToolUse).toEqual([guardSentinel])
     expect(options.hooks.PostToolUse).toHaveLength(1)
     expect(options.hooks.PostToolUse[0].matcher).toBeUndefined()
+    expect(options.disallowedTools ?? []).not.toContain('Bash')
+    expect(options.permissionMode).toBeUndefined()
+    // A session records calls only if it was built to.
+    expect(vi.mocked(acquireV2Session).mock.calls.at(-1)?.[9]).toEqual({ requireFreshInputs: true, creationContext: 'delegation-audit' })
+  })
+
+  it('reads what is installed only when the switches leave the answer to it', async () => {
+    // Listing skills opens every skill's file on the main thread.
+    listLoadableSkillCopies.mockClear()
+    await sendAppChatMessage(memberTurn({ origin: 'colleague' }))
+    expect(listLoadableSkillCopies).not.toHaveBeenCalled()
+
+    getDelegatedPolicy.mockReturnValue({ ...fullCapabilityPolicy(), allowedSkills: ['weekly-report'] } as never)
+    await sendAppChatMessage(memberTurn({ origin: 'colleague' }))
+    expect(listLoadableSkillCopies).toHaveBeenCalledTimes(1)
   })
 
   it('a request from another machine adds the audit and the file boundary without dropping the memory guard', async () => {
-    await sendAppChatMessage(memberTurn({ external: true }))
+    await sendAppChatMessage(memberTurn({ origin: 'colleague' }))
     const call = buildUserSessionSdkOptions.mock.calls.at(-1) as unknown as [{ memoryGuard?: unknown }]
     expect(call[0].memoryGuard).toBeDefined()
     const options = buildUserSessionSdkOptions.mock.results.at(-1)!.value as {
@@ -713,7 +760,7 @@ describe('live messages keep the current turn envelope', () => {
   })
 
   it('invalidates a borrowed live turn when its governing team policy changes', async () => {
-    const turn = memberTurn({ external: true })
+    const turn = memberTurn({ origin: 'colleague' })
     getDelegatedPolicy.mockReturnValue({ allowedTools: ['Read'] } as never)
     await sendAppChatMessage({ ...turn, conversationId: buildTeamSessionKey(app.id, TEAM_ID, 'policy-snapshot'), teamContext: { ...turn.teamContext!, epochId: 'policy-snapshot' } })
     const isCurrent = sink.setTurnIdentity.mock.calls.at(-1)![1] as () => boolean
@@ -756,7 +803,7 @@ describe('live messages keep the current turn envelope', () => {
 
   it('prepares live images with the captured model and preserves the original image for recording', async () => {
     const credentials = { provider: 'openai' as const, model: 'captured-nonvision', baseUrl: 'https://example.invalid', apiKey: '' }
-    vi.mocked(getApiCredentials).mockResolvedValueOnce(credentials)
+    vi.mocked(getApiCredentialsForSelection).mockResolvedValueOnce(credentials)
     await sendAppChatMessage({ appId: app.id, spaceId: 'space-1', conversationId: 'app-chat:app-member:local:direct:image-snapshot', message: 'start' })
     prepareNonVisionImageFallback.mockReturnValue({ contextBlock: '<halo_attachments>saved image</halo_attachments>\n', filePaths: ['/tmp/image.png'] })
     const prepare = sink.setTurnIdentity.mock.calls.at(-1)![2] as (text: string, images: unknown[]) => unknown
@@ -767,7 +814,7 @@ describe('live messages keep the current turn envelope', () => {
   })
 
   it('keeps slash commands inert and defers new attachment grants in a restricted turn', async () => {
-    const turn = memberTurn({ external: true })
+    const turn = memberTurn({ origin: 'guest' })
     await sendAppChatMessage({ ...turn, conversationId: buildTeamSessionKey(app.id, TEAM_ID, 'restricted-live-input'), teamContext: { ...turn.teamContext!, epochId: 'restricted-live-input' } })
     const prepare = sink.setTurnIdentity.mock.calls.at(-1)![2] as (text: string, images?: unknown[]) => any
     const result = prepare('/dangerous-command')
@@ -779,18 +826,18 @@ describe('live messages keep the current turn envelope', () => {
 })
 
 
-describe('external team authority', () => {
+describe('a request from outside never operates Halo', () => {
   beforeEach(() => {
     keptMemberContext()
     buildUserSessionSdkOptions.mockClear()
     createPersonContextMcpServer.mockClear()
   })
 
-  it.each([undefined, 'message'] as const)('withholds self-API credentials and owner surfaces for external kind %s', async kind => {
+  it.each([undefined, 'message'] as const)('withholds self-API credentials and owner surfaces from a colleague with full reach, kind %s', async kind => {
     const prior = app.permissions
     app.permissions = { granted: ['halo-api-ref'], denied: [] } as any
     try {
-      const turn = memberTurn({ external: true })
+      const turn = memberTurn({ origin: 'colleague' })
       const epochId = `external-authority-${kind ?? 'missing'}`
       await sendAppChatMessage({ ...turn, conversationId: buildTeamSessionKey(app.id, TEAM_ID, epochId), teamContext: { ...turn.teamContext!, epochId, kind } })
       const options = buildUserSessionSdkOptions.mock.calls.at(-1)![0] as any

@@ -37,8 +37,9 @@ digital-human chat in `app-chat.ts`) rather than routing through the space chat'
 `sendMessage()` — but it builds on the same engine layer, not a copy of it.
 
 **What is shared** (from `services/agent`):
-- Credentials: `getApiCredentials` / `getApiCredentialsForSource` (helpers),
-  `resolveCredentialsForSdk`.
+- Credentials: `getApiCredentialsForSelection` (helpers) over the app's
+  `userOverrides` — its own account, or the global one when it has none or its
+  account was removed — then `resolveCredentialsForSdk`.
 - Options: `buildUserSessionSdkOptions` (sdk-config). It reads the user's global AI
   settings (`maxTurns`, `disabledTools`, `promptProfile`, digital-humans switch) and
   the config directory itself, so a run or a chat turn follows them without passing
@@ -1076,45 +1077,100 @@ JSONL storage is unchanged (append-only, written by `session-store`).
 ### 2.19 Chat Browser Contexts (Resident vs Per-Turn, Live View)
 
 **Decision**: each chat's AI browser context lives in `app-chat-browser.ts`, not
-in a map inside `app-chat.ts`, and its lifetime depends on who is chatting:
+in a map inside `app-chat.ts`, and who is chatting decides both who can watch
+its pages and how long they live:
 
-| Session | Context lifetime |
-|---|---|
-| default (`app-chat:{appId}`) and local (`…:local:direct:{uuid}`) | **resident** — survives the turn, so the next message continues on the same page and the user can open the live view between turns |
-| IM, HTTP, team | **per-turn** — destroyed in `runAppChatTurn`'s `finally`; nobody can watch them and they can be minted without limit |
+| Session | Live view | Page lifetime |
+|---|---|---|
+| default (`app-chat:{appId}`) and local (`…:local:direct:{uuid}`) | **yes** — pages in the main window, announced under the chat's key | **resident** — survive the turn, so the next message continues on the same page and the user can open the live view between turns |
+| IM, HTTP, team | **no** — pages in the hidden host, nothing announced, like an automation run | **per-turn** — closed in `runAppChatTurn`'s `finally`; they can be minted without limit |
 
-Every context is created with `createScopedBrowserContext({ conversationId })`,
-which is what makes `services/ai-browser` announce its active page under that
-conversation (see that module's DESIGN, "Live view"). The renderer's "view live
-feed" button for a digital-human chat depends on this and on nothing else here.
+**The context outlives its pages: it lives with the engine session.** A chat's
+V2 session (one engine process, reused between messages for up to 30 minutes)
+is built with an `ai-browser` tool server that closes over the `BrowserContext`
+of the turn that built it, and every later turn on that session reaches that
+same object — the `mcpServers` a reusing turn assembles are never applied.
+So `runAppChatTurn` binds the context to the session it acquired
+(`bindChatBrowserSession`, right after `acquireV2Session`), the turn's end
+only closes pages (`ctx.closePages()`, which keeps the context usable), and the
+context is disposed (`ctx.destroy()`, after which every call fails with
+"Browser context was released") only when that session is retired — any
+`cleanupSession` reason: idle timeout, rebuild, config change, process death —
+unless a turn is in flight (it re-binds or ends it) or a native chat still
+holds pages (left for the user, as after any session restart; the next session
+is built around the same context). A per-turn context no session took — the
+turn was refused while being set up, or its session was retired under it — is
+disposed when that turn ends, since nothing can reach it; one whose turn never
+reported back is reclaimed by the sweep. Before this, a per-turn context was
+destroyed with its turn: the
+second message within 30 minutes of an IM chat found the session's tools bound
+to a dead context and every browser call failed until the session idled out —
+which a chat answering every few minutes never let happen (IM patrol chat, 2026-10-16).
+
+**A reset under a message on its way closes the session that message acquires.**
+The three resets (clear — the IM clear command included —, manual "Restart
+agent", a team session closed) stop a starting message
+(`abortAppChatTurn(id, 'internal')` marks its start `reset`), close the chat's
+session and destroy its browser context. The message's turn does not stop at
+once: it may be inside `acquireV2Session`, a cold engine start of seconds to a
+minute, and `closeV2Session` cannot reach a session still being created. The
+session it then holds was built on what the reset removed — its browser tools
+close over the destroyed context, its consumer keeps the dropped sink (a reused
+session never takes a new one) — and, left registered, the next message would
+reuse it: the browser failing with "Browser context was released", replies
+published nowhere, until the session idled out. So at the turn's stopped exits
+(`endStoppedOnTheWay`) a turn whose start was `reset` closes the session it
+still holds (`sessionLease.close()`); a session the reset itself closed is no
+longer current there, and a person's stop sets no `reset`, so its warm session
+stays. The one cost falls in the race: the next message pays a cold start —
+what every message after a reset pays.
+
+Only a native chat's context is created with
+`createScopedBrowserContext({ liveView: { conversationId, spaceId } })`, which is
+what makes `services/ai-browser` host its pages in the main window and announce
+them under that conversation (see that module's DESIGN, "Context Model"). The
+renderer's "view live feed" button and tray rows for a digital-human chat depend
+on this and on nothing else here. IM, HTTP and team turns mostly run while
+nobody is at the computer, when the main window has been seen to fail every new
+page; their surfaces never offered a live view anyway. A native chat woken then
+(a reminder, a patrol) is covered by `services/ai-browser`: a page the main
+window cannot attach in time opens in the hidden host, unwatchable, rather than
+failing the step.
 
 **Resident is bounded**, because every page is a Chromium renderer and local
 sessions are unbounded (`MAX_RESIDENT_BROWSER_CONTEXTS`, `RESIDENT_BROWSER_IDLE_MS`):
-- a context idle for 30 minutes is destroyed; cookies live in the shared
+- pages idle for 30 minutes are closed; cookies live in the shared
   `persist:browser` session, so only tabs and scroll state are lost;
-- at most 6 contexts may hold pages; a new one evicts the least recently used
-  idle one;
+- at most 6 chats may hold pages; a new one closes the pages of the least
+  recently used idle one;
 - never mid-turn (asked of `isAppChatConversationGenerating`) nor while a turn is
   starting — acquired and not yet ended, trusted for `TURN_TRUST_MS` (5 minutes)
   so a slow engine start is covered, after which only the live-turn answer
-  counts, so a turn that died before reporting back cannot pin a context — and
+  counts, so a turn that died before reporting back cannot pin pages — and
   never while the user is watching one of its tabs (`ctx.hasRevealedView()`);
   over the cap rather than kill a live turn.
-- a per-turn context still present after `TURN_TRUST_MS` lost its cleanup and is
-  reclaimed by the same sweep.
+- a per-turn chat idle past `TURN_TRUST_MS` has its pages closed by the same
+  sweep (its turn never reported back); its context stays for its session.
+- the sweep's closes, like a turn's end, close pages only when a session holds
+  the context (`closePagesOrDispose`) and dispose a context no session bound;
+  the cap only ever closes pages (`evictOverCap` → `closePages`) — an unbound
+  context it empties is disposed by the idle sweep.
 
 **Teardown paths** (each one goes through `destroyChatBrowserContext`, which logs
-the reason and closes the pages, and the pages' destruction announces `view-gone`):
-session cleared/deleted (`clearSessionByConversationId`), team session closed,
-manual "Restart agent" (`restartAppChat` with `interruptActive`; automatic
-config-change restarts deliberately leave the pages), app uninstalled
-(`onAppUninstalled` in `service.ts`), runtime shutdown, the AI-browser permission
-revoked (next turn), and the sweep's `app-removed` check — deleting a space
-hard-deletes its apps without an uninstall event, so a context of an app that no
-longer exists is noticed on the next sweep (≤ 60 s) instead of being leaked.
+the reason and closes the pages; a native chat's page destruction announces
+`view-gone`, a per-turn chat's says nothing):
+its session retired (`bindChatBrowserSession`, above), session cleared/deleted
+(`clearSessionByConversationId`), team session closed, manual "Restart agent"
+(`restartAppChat` with `interruptActive`; automatic config-change restarts
+deliberately leave a native chat's pages), app uninstalled (`onAppUninstalled`
+in `service.ts`), runtime shutdown, the AI-browser permission revoked (next
+turn), and the sweep's `app-removed` check — deleting a space hard-deletes its
+apps without an uninstall event, so a context of an app that no longer exists
+is noticed on the next sweep (≤ 60 s) instead of being leaked.
 
-Logging: one line per create/destroy (`reason`, view count) and a state line
-every 5 minutes while any context exists (`[AppChatBrowser] State: contexts=…`).
+Logging: one line per create/destroy and per page close (`reason`, view
+count) and a state line every 5 minutes while any context exists
+(`[AppChatBrowser] State: contexts=…`).
 
 ### 2.20 Digital-Human Chats as Cross-Conversation Sources
 
@@ -1469,7 +1525,11 @@ member here or from another machine, a run's Stop or Close) stops everything:
   put the rest back, and no turn-end report is made for a turn that never ran.
 The system (`'internal'`: an escalation cut, clear, restart, closing a task,
 shutdown) keeps the earlier behavior: unread input runs after the stop, and a
-clear still keeps waiting reminders and teammates' messages.
+clear still keeps waiting reminders and teammates' messages. A system stop of a
+message still on its way also marks its start `reset` (whoever stopped it
+first): the conversation's session, browser context and sink were replaced
+under it, so the turn closes the session it acquired instead of leaving it for
+the next message (§2.19).
 
 `app-chat-delivery` handles direct API and UI messages. IM supplements, team mail
 and cross-conversation sources use the same gate contract with their own original
@@ -1754,7 +1814,7 @@ apps/runtime depends on:
 ├── services/memory-consolidation  requestConsolidation() after runs and chat turns; consolidateNow()/status for settings (memory-control.ts)
 ├── platform/background   registerKeepAliveReason()
 ├── platform/store        DatabaseManager (for migrations + activity store)
-├── services/agent        getApiCredentials (helpers), resolveCredentialsForSdk,
+├── services/agent        getApiCredentialsForSelection (helpers), resolveCredentialsForSdk,
 │                         buildUserSessionSdkOptions, getHeadlessElectronPath (sdk-config),
 │                         buildBaseToolset (toolsets/base)
 ├── services/conversation-interop   ConversationSource type (registered from bootstrap), createConversationInteropMcpServer (lazy, when collaboration is on)
@@ -1928,11 +1988,12 @@ Remote, tool-started and scheduled runs keep their pages in the hidden host.
   (`userOverrides.memory`).
 - Its space's topics: offered read-only when `spaceMemoryAccess` is on and the
   space has memory on. Writes are refused by the write guard.
-- A strict turn (an IM guest — of the digital human's own chat or of a chat it
-  fronts for a team — or a teammate's turn on work that entered from outside) is
-  held to `turn-file-access.ts`, enforced by a pre-tool hook and the delegation
-  gate alike. A teammate from this machine is the owner's own: held to the tool
-  switches only, with no path boundary, as before.
+- A restricted turn (an IM guest — of the digital human's own chat or of a chat
+  it fronts for a team — or a team turn serving a request from outside that its
+  delegated policy restricts) is held to `turn-file-access.ts`, enforced by a
+  pre-tool hook and the delegation gate alike. The owner's own digital humans
+  working for each other are not restricted at all (team DESIGN "Where a request
+  came from").
   - memory content (memory.md + topics; the space's topics per the rule above)
     and the files handed to the turn (IM attachments, persisted images) — always,
     even for a chat-only guest (`keepFileTools` keeps the file tools in the pool);
@@ -2002,8 +2063,8 @@ Remote, tool-started and scheduled runs keep their pages in the hidden host.
 ## Skills on a borrowed turn
 
 An owner allows skills one by one (`CapabilityPolicy.allowedSkills`, folder
-names): an IM guest gets none until listed, a teammate keeps all until a list
-is written. The panel offers one switch per skill the digital human can load
+names): a restricted caller gets none until listed; a colleague whose member
+grants everything — or was never configured — is not restricted at all. The panel offers one switch per skill the digital human can load
 (`skill-discovery`, global + space), next to the tool switches. The skill tool
 itself has no switch: it exists for a caller exactly when some skill does.
 
@@ -2013,8 +2074,8 @@ itself has no switch: it exists for a caller exactly when some skill does.
   no pre-approvals of its own without asking the gate. A name resolves as the
   engine resolves it — folder or frontmatter name, a leading "/" ignored — and
   every skill it could mean must be allowed. A skill Halo does not list (built
-  into the engine, from a plugin) has no switch, so only a teammate whose skills
-  were never listed may load one.
+  into the engine, from a plugin) has no switch, so no restricted caller may load
+  one.
 - **A skill grants nothing beyond itself.** Each tool call it makes is judged by
   the policy like any other. What the engine lets a loaded skill do without
   asking — run the tools its `allowed-tools` pre-approve for the rest of the

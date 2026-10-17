@@ -121,6 +121,7 @@ vi.mock('../../../../src/main/services/agent/resolved-sdk', async (importOrigina
   getEngineCapabilities,
 }))
 vi.mock('../../../../src/main/services/agent/sdk-config', () => ({
+  markMcpServerSettings: (server: unknown) => server,
   resolveCredentialsForSdk: vi.fn(async () => ({
     displayModel: 'test-model',
     sdkModel: 'test-model',
@@ -151,7 +152,7 @@ vi.mock('../../../../src/main/services/agent/image-attachments', () => ({
 }))
 vi.mock('../../../../src/main/services/agent/helpers', () => ({
   getApiCredentials: vi.fn(async () => ({ provider: 'anthropic' })),
-  getApiCredentialsForSource: vi.fn(),
+  getApiCredentialsForSelection: vi.fn(async () => ({ provider: 'anthropic' })),
   getWorkingDir: vi.fn(),
   getHeadlessElectronPath: vi.fn(() => '/electron'),
   getDbMcpServers: vi.fn(() => null),

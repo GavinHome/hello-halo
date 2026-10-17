@@ -17,8 +17,7 @@ import { openPersonModelSettings } from '../../utils/people-navigation'
 import { api } from '../../api'
 import {
   getModelDisplayName,
-  getCurrentSource,
-  getSourceById,
+  resolveModelSelection,
   getSourceAccountName,
   AVAILABLE_MODELS,
   type AISourcesConfig,
@@ -29,6 +28,7 @@ import {
 import { ThinkingLevelControl } from './ThinkingLevelControl'
 import { useTranslation } from '../../i18n'
 import { useIsMobile } from '../../hooks/useIsMobile'
+import { useFreshModelCatalogs } from '../../hooks/useFreshModelCatalogs'
 import { trackHome } from '../../services/home-telemetry'
 import { isAnthropicProvider } from '../../types'
 import { validateModelCapabilityOverride } from '../../../shared/model-capability-overrides'
@@ -62,23 +62,19 @@ function ModelList({ onDone }: { onDone: () => void }) {
   const { config, setConfig, navigate } = useAppStore()
   const [isRefreshing, setIsRefreshing] = useState(false)
   const [refreshStatus, setRefreshStatus] = useState<'success' | 'cached' | 'failed' | null>(null)
+  useFreshModelCatalogs(true)
 
   const aiSources = useAiSources()
-  const currentSource = getCurrentSource(aiSources)
 
-  // Current conversation's model pin drives the checkmark; falls back to the
-  // global selection for legacy conversations without a pin.
+  // The checkmark follows what the conversation runs on: its own pin, or the
+  // global selection when it has none or the pinned account was removed.
   const target = useActiveModelTarget()
   const conversationId = target.kind === 'conversation' ? target.conversationId : null
   const currentConversation = target.kind === 'conversation' ? target.conversation : null
-  const pinSourceId = currentConversation?.modelSourceId
-  const pinModelId = currentConversation?.modelId
-  const isMissingSource = !!pinSourceId && !getSourceById(aiSources, pinSourceId)
+  const selected = resolveModelSelection(aiSources, currentConversation)
 
   // State for expanded sections (accordion)
-  const [expandedSection, setExpandedSection] = useState<string | null>(
-    pinSourceId && !isMissingSource ? pinSourceId : currentSource?.id ?? null
-  )
+  const [expandedSection, setExpandedSection] = useState<string | null>(selected.source?.id ?? null)
 
   const toggleSection = (sourceId: string, e: React.MouseEvent) => {
     e.stopPropagation()
@@ -180,11 +176,6 @@ function ModelList({ onDone }: { onDone: () => void }) {
 
   return (
     <>
-      {isMissingSource && (
-        <p role="alert" className="px-3 py-2 text-sm text-foreground break-words">
-          {t('Account removed. Choose another account.')}
-        </p>
-      )}
       {/* Iterate all configured sources */}
       {aiSources.sources.map(source => {
         const isExpanded = expandedSection === source.id
@@ -218,11 +209,7 @@ function ModelList({ onDone }: { onDone: () => void }) {
             {isExpanded && models.map((model) => {
               const modelId = typeof model === 'string' ? model : model.id
               const modelName = typeof model === 'string' ? model : (model.name || model.id)
-              // When the conversation has a pin, the checkmark follows it;
-              // otherwise fall back to the global active source + model.
-              const isSelected = pinSourceId
-                ? (pinSourceId === source.id && (pinModelId || source.model) === modelId)
-                : (isActiveSource && source.model === modelId)
+              const isSelected = selected.source?.id === source.id && selected.modelId === modelId
 
               return (
                 <button
@@ -291,8 +278,7 @@ export function ModelSelectSheet({ onClose }: { onClose: () => void }) {
   const { t } = useTranslation()
   const [isAnimatingOut, setIsAnimatingOut] = useState(false)
 
-  const { name, isMissingSource } = useConversationModel()
-  const currentModelName = isMissingSource ? t('Account removed. Choose another account.') : name
+  const { name: currentModelName } = useConversationModel()
 
   const handleClose = () => {
     setIsAnimatingOut(true)
@@ -336,7 +322,7 @@ export function ModelSelectSheet({ onClose }: { onClose: () => void }) {
             <Sparkles className="w-5 h-5 shrink-0 text-primary" />
             <div className="min-w-0">
               <h3 className="text-base font-semibold text-foreground">{t('Select Model')}</h3>
-              {!isMissingSource && <p className="text-xs text-muted-foreground break-words">{currentModelName}</p>}
+              <p className="text-xs text-muted-foreground break-words">{currentModelName}</p>
             </div>
           </div>
           <button
@@ -394,12 +380,10 @@ function DigitalHumanModelButton({ target }: { target: Extract<ActiveModelTarget
   const aiSources = useAiSources()
   const [isOpen, setIsOpen] = useState(false)
   const ref = useRef<HTMLDivElement>(null)
-  const source = target.modelSourceId ? getSourceById(aiSources, target.modelSourceId) : getCurrentSource(aiSources)
-  const isMissingSource = !!target.modelSourceId && !source
-  const modelName = isMissingSource
-    ? t('Account removed. Choose another account.')
-    : getModelDisplayName(aiSources, target.modelSourceId, target.modelId)
-  const modelId = target.modelId ?? source?.model
+  // Its own account and model, or the global selection when it has none or
+  // its account was removed — what its turns actually run on.
+  const { source, modelId } = resolveModelSelection(aiSources, target)
+  const modelName = getModelDisplayName(aiSources, target.modelSourceId, target.modelId)
   const app = useAppsStore(state => state.apps.find(a => a.id === target.appId))
 
   useDismiss(ref, isOpen, () => setIsOpen(false))
@@ -416,13 +400,13 @@ function DigitalHumanModelButton({ target }: { target: Extract<ActiveModelTarget
         aria-label={modelName}
       >
         <Sparkles className="w-4 h-4 sm:hidden" />
-        <span className={`hidden sm:inline ${isMissingSource ? 'max-w-[200px] whitespace-normal text-left' : 'truncate max-w-[140px]'}`}>{modelName}</span>
+        <span className="hidden sm:inline truncate max-w-[140px]">{modelName}</span>
         <ChevronDown className={`w-3.5 h-3.5 transition-transform ${isOpen ? 'rotate-180' : ''}`} />
       </button>
       {isOpen && (
         <div className="absolute right-0 bottom-full mb-1 w-64 bg-card border border-border rounded-xl shadow-pop z-50 p-3">
-          {!isMissingSource && <div className="text-center text-xs text-muted-foreground">{t('{{name}} uses', { name: target.appName })}</div>}
-          <div role={isMissingSource ? 'alert' : undefined} className="mt-0.5 text-center text-[15px] font-semibold text-foreground break-words">{modelName}</div>
+          <div className="text-center text-xs text-muted-foreground">{t('{{name}} uses', { name: target.appName })}</div>
+          <div className="mt-0.5 text-center text-[15px] font-semibold text-foreground break-words">{modelName}</div>
           <div className="mt-3">
             {/* One level for the whole digital human, on every entry. */}
             <ThinkingLevelControl
@@ -468,18 +452,18 @@ function formatContextWindow(tokens: number): string {
   return `${Math.round(tokens / 1000)}K`
 }
 
-/** The source and model the open conversation runs on (its pin, else the global selection). */
+/**
+ * The source and model the open conversation runs on: its pin, else the
+ * global selection — also when the pinned account was removed.
+ */
 function useConversationModel() {
   const aiSources = useAiSources()
   const conversation = useCurrentConversation()
-  const sourceId = conversation?.modelSourceId
-  const source = sourceId ? getSourceById(aiSources, sourceId) : getCurrentSource(aiSources)
-  const isMissingSource = !!sourceId && !source
-  const modelId = source ? (sourceId ? conversation?.modelId || source.model : source.model) : undefined
+  const { source, modelId } = resolveModelSelection(aiSources, conversation)
   const model = source?.availableModels.find(m => m.id === modelId)
-  const name = getModelDisplayName(aiSources, sourceId, conversation?.modelId)
+  const name = getModelDisplayName(aiSources, conversation?.modelSourceId, conversation?.modelId)
   const configuredEffort = modelId ? source?.modelOverrides?.[modelId]?.reasoningEffort : undefined
-  return { aiSources, source, modelId, model, name, isMissingSource, configuredEffort }
+  return { aiSources, source, modelId, model, name, configuredEffort }
 }
 
 /** The user's per-model settings win over the catalog, as they do at runtime; a malformed one is ignored there too. */
@@ -499,22 +483,23 @@ function resolveCardFacts(source: AISource | null | undefined, modelId: string |
 function CurrentModelCard({ onSwitch }: { onSwitch: () => void }) {
   const { t } = useTranslation()
   const navigate = useAppStore(state => state.navigate)
-  const { aiSources, source, modelId, model, name, isMissingSource } = useConversationModel()
+  const { aiSources, source, modelId, model, name } = useConversationModel()
   const { contextWindow, vision } = resolveCardFacts(source, modelId, model)
 
-  if (isMissingSource) {
+  // Nothing to run on: no account at all, or none selected.
+  if (!source) {
     const hasSources = aiSources.sources.length > 0
     return (
       <div className="p-3">
-        <p role="alert" className="text-sm text-foreground break-words">
-          {t('Account removed. Choose another account.')}
+        <p className="text-sm text-foreground break-words">
+          {hasSources ? t('No model selected') : t('No AI sources configured')}
         </p>
         <button
           type="button"
           onClick={hasSources ? onSwitch : () => navigate('settings')}
           className="mt-3 flex w-full items-center justify-center gap-1 rounded-lg bg-secondary/60 px-3 py-2 text-sm text-foreground hover:bg-secondary transition-colors ease-halo"
         >
-          {hasSources ? t('Choose another account') : t('Configure AI Source')}
+          {hasSources ? t('Select Model') : t('Configure AI Source')}
           <ChevronRight className="w-4 h-4 shrink-0" />
         </button>
       </div>
@@ -533,7 +518,7 @@ function CurrentModelCard({ onSwitch }: { onSwitch: () => void }) {
       >
         <span className="flex min-w-0 flex-1 flex-col">
           <span className="truncate text-[15px] font-semibold text-foreground">{name}</span>
-          {source && <span className="mt-0.5 truncate text-xs text-muted-foreground">{source.name}</span>}
+          <span className="mt-0.5 truncate text-xs text-muted-foreground">{source.name}</span>
         </span>
         <ChevronRight className="w-4 h-4 shrink-0 text-subtle-foreground group-hover:text-foreground transition-colors ease-halo" />
       </button>
@@ -590,8 +575,7 @@ function ConversationModelSelector() {
   const [maxHeight, setMaxHeight] = useState<number>()
   const dropdownRef = useRef<HTMLDivElement>(null)
 
-  const { name, isMissingSource } = useConversationModel()
-  const currentModelName = isMissingSource ? t('Account removed. Choose another account.') : name
+  const { name: currentModelName } = useConversationModel()
 
   // The mobile sheet handles its own dismissal.
   useDismiss(dropdownRef, isOpen && !isMobile, () => setIsOpen(false))
@@ -623,7 +607,7 @@ function ConversationModelSelector() {
         <Sparkles className="w-4 h-4 sm:hidden" />
         {/* Desktop: model name */}
         <div className="hidden sm:flex items-center gap-1.5 min-w-0">
-          <span className={isMissingSource ? 'max-w-[200px] whitespace-normal text-left' : 'truncate max-w-[140px]'}>{currentModelName}</span>
+          <span className="truncate max-w-[140px]">{currentModelName}</span>
         </div>
         <ChevronDown className={`w-3.5 h-3.5 transition-transform ${isOpen ? 'rotate-180' : ''}`} />
       </button>
