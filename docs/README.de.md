@@ -11,7 +11,7 @@
 [![Platform](https://img.shields.io/badge/platform-macOS%20%7C%20Windows%20%7C%20Linux%20%7C%20Web-lightgrey.svg)](#installation)
 [![Downloads](https://img.shields.io/github/downloads/openkursar/hello-halo/total.svg)](https://github.com/openkursar/hello-halo/releases)
 
-[**Download**](#installation) · [**Website & Doku**](https://haloxe.com/) · [**Mitwirken**](#mitwirken)
+[**Download**](#installation) · [**Website & Doku**](https://hello-halo.cc/) · [**Mitwirken**](#mitwirken)
 
 **[English](../README.md)** | **[简体中文](./README.zh-CN.md)** | **[繁體中文](./README.zh-TW.md)** | **[Español](./README.es.md)** | **[Français](./README.fr.md)** | **[日本語](./README.ja.md)**
 
@@ -97,7 +97,7 @@ Eine einzige KI, die alles macht, hat nur begrenzte Aufmerksamkeit; eine KI, die
 ### Store, Browser Actions und Ökosystem
 
 - **Digitalmensch-Store**: Such dir einen aus, fülle ein paar Einstellungen aus, und er legt los – ohne Prompts zu schreiben. Organisationen können einen privaten Store hosten und ihn in den Einstellungen hinzufügen.
-- **Browser Action – KI entscheidet, Skripte führen aus**: Schreibe einen konkreten Vorgang auf einer Plattform als wiederverwendbares `.js`-Skript; die KI entscheidet nur, was wann zu tun ist, und das Skript führt es präzise aus. Fertige Actions gibt es für Xiaohongshu, Bilibili, Zhihu, X und mehr, und für interne Systeme kannst du private Actions schreiben. [Selbst eine bauen →](https://haloxe.com/docs/digital-humans/guide-02-build.html)
+- **Browser Action – KI entscheidet, Skripte führen aus**: Schreibe einen konkreten Vorgang auf einer Plattform als wiederverwendbares `.js`-Skript; die KI entscheidet nur, was wann zu tun ist, und das Skript führt es präzise aus. Fertige Actions gibt es für Xiaohongshu, Bilibili, Zhihu, X und mehr, und für interne Systeme kannst du private Actions schreiben. [Selbst eine bauen →](https://hello-halo.cc/docs/en/developers/digital-humans/build.html)
 - **Veröffentliche deinen Digitalmenschen**: Schreibe eine `spec.yaml` und öffne einen PR beim [Digital Human Protocol (DHP)](https://github.com/openkursar/digital-human-protocol); nach dem Merge kann jeder Halo-Nutzer ihn installieren.
 
 <p align="center">

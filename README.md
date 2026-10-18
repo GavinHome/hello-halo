@@ -11,7 +11,7 @@
 [![Platform](https://img.shields.io/badge/platform-macOS%20%7C%20Windows%20%7C%20Linux%20%7C%20Web-lightgrey.svg)](#installation)
 [![Downloads](https://img.shields.io/github/downloads/openkursar/hello-halo/total.svg)](https://github.com/openkursar/hello-halo/releases)
 
-[**Download**](#installation) · [**Website & Docs**](https://haloxe.com/) · [**Contributing**](#contributing)
+[**Download**](#installation) · [**Website & Docs**](https://hello-halo.cc/) · [**Contributing**](#contributing)
 
 **[简体中文](./docs/README.zh-CN.md)** | **[繁體中文](./docs/README.zh-TW.md)** | **[Español](./docs/README.es.md)** | **[Deutsch](./docs/README.de.md)** | **[Français](./docs/README.fr.md)** | **[日本語](./docs/README.ja.md)**
 
@@ -97,7 +97,7 @@ One AI doing everything has limited attention; an AI that only knows you cannot 
 ### Store, Browser Actions and ecosystem
 
 - **Digital Human Store**: pick one, fill in a few settings, and it starts running — no prompts to write. Organizations can host a private store and add it in Settings.
-- **Browser Action — AI decides, scripts execute**: write one concrete operation on one platform as a reusable `.js` script; the AI only decides what to do and when, and the script carries it out precisely. Ready-made Actions exist for Xiaohongshu, Bilibili, Zhihu, X and more, and you can write private Actions for internal systems. [Build one →](https://haloxe.com/docs/digital-humans/guide-02-build.html)
+- **Browser Action — AI decides, scripts execute**: write one concrete operation on one platform as a reusable `.js` script; the AI only decides what to do and when, and the script carries it out precisely. Ready-made Actions exist for Xiaohongshu, Bilibili, Zhihu, X and more, and you can write private Actions for internal systems. [Build one →](https://hello-halo.cc/docs/en/developers/digital-humans/build.html)
 - **Publish your Digital Human**: write a `spec.yaml` and open a PR against the [Digital Human Protocol (DHP)](https://github.com/openkursar/digital-human-protocol); once merged, every Halo user can install it.
 
 <p align="center">

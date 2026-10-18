@@ -11,7 +11,7 @@
 [![Platform](https://img.shields.io/badge/platform-macOS%20%7C%20Windows%20%7C%20Linux%20%7C%20Web-lightgrey.svg)](#installation)
 [![Downloads](https://img.shields.io/github/downloads/openkursar/hello-halo/total.svg)](https://github.com/openkursar/hello-halo/releases)
 
-[**Télécharger**](#installation) · [**Site et documentation**](https://haloxe.com/) · [**Contribuer**](#contribuer)
+[**Télécharger**](#installation) · [**Site et documentation**](https://hello-halo.cc/) · [**Contribuer**](#contribuer)
 
 **[English](../README.md)** | **[简体中文](./README.zh-CN.md)** | **[繁體中文](./README.zh-TW.md)** | **[Español](./README.es.md)** | **[Deutsch](./README.de.md)** | **[日本語](./README.ja.md)**
 
@@ -97,7 +97,7 @@ Une seule IA qui fait tout a une attention limitée ; une IA qui ne connaît que
 ### Magasin, Browser Actions et écosystème
 
 - **Magasin d'Humains Numériques** : choisissez-en un, renseignez quelques paramètres et il se met au travail — aucun prompt à écrire. Les organisations peuvent héberger un magasin privé et l'ajouter dans les Paramètres.
-- **Browser Action — l'IA décide, les scripts exécutent** : écrivez une opération concrète sur une plateforme sous forme de script `.js` réutilisable ; l'IA décide seulement quoi faire et quand, et le script l'exécute avec précision. Des Actions prêtes à l'emploi existent pour Xiaohongshu, Bilibili, Zhihu, X et d'autres, et vous pouvez écrire des Actions privées pour vos systèmes internes. [En créer une →](https://haloxe.com/docs/digital-humans/guide-02-build.html)
+- **Browser Action — l'IA décide, les scripts exécutent** : écrivez une opération concrète sur une plateforme sous forme de script `.js` réutilisable ; l'IA décide seulement quoi faire et quand, et le script l'exécute avec précision. Des Actions prêtes à l'emploi existent pour Xiaohongshu, Bilibili, Zhihu, X et d'autres, et vous pouvez écrire des Actions privées pour vos systèmes internes. [En créer une →](https://hello-halo.cc/docs/en/developers/digital-humans/build.html)
 - **Publiez votre Humain Numérique** : écrivez un `spec.yaml` et ouvrez une PR sur le [Digital Human Protocol (DHP)](https://github.com/openkursar/digital-human-protocol) ; une fois fusionné, tous les utilisateurs de Halo pourront l'installer.
 
 <p align="center">

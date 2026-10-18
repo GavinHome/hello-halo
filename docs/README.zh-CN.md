@@ -11,7 +11,7 @@
 [![Platform](https://img.shields.io/badge/platform-macOS%20%7C%20Windows%20%7C%20Linux%20%7C%20Web-lightgrey.svg)](#下载安装)
 [![Downloads](https://img.shields.io/github/downloads/openkursar/hello-halo/total.svg)](https://github.com/openkursar/hello-halo/releases)
 
-[**下载**](#下载安装) · [**官网与文档**](https://haloxe.com/) · [**参与贡献**](#参与贡献)
+[**下载**](#下载安装) · [**官网与文档**](https://hello-halo.cc/) · [**参与贡献**](#参与贡献)
 
 **[English](../README.md)** | **[繁體中文](./README.zh-TW.md)** | **[Español](./README.es.md)** | **[Deutsch](./README.de.md)** | **[Français](./README.fr.md)** | **[日本語](./README.ja.md)**
 
@@ -97,7 +97,7 @@ Halo 让 AI 之间直接分工、交接、积累记忆、持续值守，人只�
 ### 商店、Browser Action 与生态
 
 - **数字人商店**：挑一个，填几项配置就开始运行，不用写提示词。企业可以部署私有商店，在设置里添加即可。
-- **Browser Action：AI 决策，脚本执行**：把某个平台上的一个具体操作写成可复用的 `.js` 脚本，AI 只决定做什么、什么时候做，脚本负责精确执行。小红书、B 站、知乎、X 等平台已有现成的 Action，内部系统也可以写私有 Action。[动手做一个 →](https://haloxe.com/docs/digital-humans/guide-02-build.html)
+- **Browser Action：AI 决策，脚本执行**：把某个平台上的一个具体操作写成可复用的 `.js` 脚本，AI 只决定做什么、什么时候做，脚本负责精确执行。小红书、B 站、知乎、X 等平台已有现成的 Action，内部系统也可以写私有 Action。[动手做一个 →](https://hello-halo.cc/docs/developers/digital-humans/build.html)
 - **发布你的数字人**：写一份 `spec.yaml`，向[数字人协议（DHP）](https://github.com/openkursar/digital-human-protocol)提交 PR，合并后所有 Halo 用户都能安装。
 
 <p align="center">

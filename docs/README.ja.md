@@ -11,7 +11,7 @@
 [![Platform](https://img.shields.io/badge/platform-macOS%20%7C%20Windows%20%7C%20Linux%20%7C%20Web-lightgrey.svg)](#ダウンロードとインストール)
 [![Downloads](https://img.shields.io/github/downloads/openkursar/hello-halo/total.svg)](https://github.com/openkursar/hello-halo/releases)
 
-[**ダウンロード**](#ダウンロードとインストール) · [**公式サイトとドキュメント**](https://haloxe.com/) · [**コントリビュート**](#コントリビュート)
+[**ダウンロード**](#ダウンロードとインストール) · [**公式サイトとドキュメント**](https://hello-halo.cc/) · [**コントリビュート**](#コントリビュート)
 
 **[English](../README.md)** | **[简体中文](./README.zh-CN.md)** | **[繁體中文](./README.zh-TW.md)** | **[Español](./README.es.md)** | **[Deutsch](./README.de.md)** | **[Français](./README.fr.md)**
 
@@ -97,7 +97,7 @@ Halo では、AI 同士が直接分担し、引き継ぎ、記憶を積み重ね
 ### ストア、Browser Action とエコシステム
 
 - **デジタルヒューマンストア**：一つ選んで設定をいくつか入力すれば、すぐに動き始めます。プロンプトを書く必要はありません。企業はプライベートストアをデプロイし、設定から追加するだけで使えます。
-- **Browser Action：AI が判断し、スクリプトが実行**：あるプラットフォーム上の一つの具体的な操作を再利用可能な `.js` スクリプトとして書いておけば、AI は何をいつやるかだけを判断し、スクリプトが正確に実行します。Xiaohongshu、Bilibili、Zhihu、X などのプラットフォーム向けには既製の Action があり、社内システム向けにプライベートな Action を書くこともできます。[作ってみる →](https://haloxe.com/docs/digital-humans/guide-02-build.html)
+- **Browser Action：AI が判断し、スクリプトが実行**：あるプラットフォーム上の一つの具体的な操作を再利用可能な `.js` スクリプトとして書いておけば、AI は何をいつやるかだけを判断し、スクリプトが正確に実行します。Xiaohongshu、Bilibili、Zhihu、X などのプラットフォーム向けには既製の Action があり、社内システム向けにプライベートな Action を書くこともできます。[作ってみる →](https://hello-halo.cc/docs/en/developers/digital-humans/build.html)
 - **デジタルヒューマンを公開**：`spec.yaml` を書いて [Digital Human Protocol（DHP）](https://github.com/openkursar/digital-human-protocol)に PR を提出すれば、マージ後すべての Halo ユーザーがインストールできるようになります。
 
 <p align="center">

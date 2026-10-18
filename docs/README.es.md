@@ -11,7 +11,7 @@
 [![Platform](https://img.shields.io/badge/platform-macOS%20%7C%20Windows%20%7C%20Linux%20%7C%20Web-lightgrey.svg)](#instalación)
 [![Downloads](https://img.shields.io/github/downloads/openkursar/hello-halo/total.svg)](https://github.com/openkursar/hello-halo/releases)
 
-[**Descargar**](#instalación) · [**Web y documentación**](https://haloxe.com/) · [**Contribuir**](#contribuir)
+[**Descargar**](#instalación) · [**Web y documentación**](https://hello-halo.cc/) · [**Contribuir**](#contribuir)
 
 **[English](../README.md)** | **[简体中文](./README.zh-CN.md)** | **[繁體中文](./README.zh-TW.md)** | **[Deutsch](./README.de.md)** | **[Français](./README.fr.md)** | **[日本語](./README.ja.md)**
 
@@ -97,7 +97,7 @@ Una sola IA que lo hace todo tiene la atención limitada; una IA que solo te con
 ### Tienda, Browser Actions y ecosistema
 
 - **Tienda de Humanos Digitales**: elige uno, rellena algunos ajustes y empieza a funcionar, sin escribir prompts. Las organizaciones pueden alojar una tienda privada y añadirla en Ajustes.
-- **Browser Action: la IA decide, los scripts ejecutan**: escribe una operación concreta en una plataforma como un script `.js` reutilizable; la IA solo decide qué hacer y cuándo, y el script lo ejecuta con precisión. Hay Actions listas para usar en Xiaohongshu, Bilibili, Zhihu, X y más, y puedes escribir Actions privadas para sistemas internos. [Crea una →](https://haloxe.com/docs/digital-humans/guide-02-build.html)
+- **Browser Action: la IA decide, los scripts ejecutan**: escribe una operación concreta en una plataforma como un script `.js` reutilizable; la IA solo decide qué hacer y cuándo, y el script lo ejecuta con precisión. Hay Actions listas para usar en Xiaohongshu, Bilibili, Zhihu, X y más, y puedes escribir Actions privadas para sistemas internos. [Crea una →](https://hello-halo.cc/docs/en/developers/digital-humans/build.html)
 - **Publica tu Humano Digital**: escribe un `spec.yaml` y abre un PR en el [Digital Human Protocol (DHP)](https://github.com/openkursar/digital-human-protocol); una vez fusionado, todos los usuarios de Halo podrán instalarlo.
 
 <p align="center">
