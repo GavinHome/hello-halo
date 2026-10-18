@@ -33,7 +33,7 @@ Halo lets AIs divide the work, hand it over, build up memory and stay on duty by
 
 - **Who it's for**: heavy AI users, developers, researchers and operators, and small teams bringing AI into their daily workflow.
 - **Three things**: [Your everyday AI workbench](#1-your-everyday-ai-workbench) · [Digital Humans and Digital Human teams](#2-digital-humans-and-digital-human-teams) · [Hand off work from anywhere](#3-hand-off-work-from-anywhere)
-- **Written by AI**: over 500,000 lines of code and more than 1,000,000 lines changed, almost all of it written by Halo itself.
+- **Written by Halo**: a large AI workstation that keeps improving itself with AI — over 500,000 lines of code, running stably in enterprise financial environments.
 
 ---
 

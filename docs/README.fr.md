@@ -33,7 +33,7 @@ Halo permet aux IA de se répartir le travail, de se le transmettre, d'accumuler
 
 - **Pour qui** : utilisateurs intensifs de l'IA, développeurs, chercheurs et équipes opérationnelles, ainsi que les petites équipes qui intègrent l'IA à leur travail quotidien.
 - **Trois piliers** : [Votre atelier IA au quotidien](#1-votre-atelier-ia-au-quotidien) · [Humains Numériques et leurs équipes](#2-humains-numériques-et-leurs-équipes) · [Confiez le travail où que vous soyez](#3-confiez-le-travail-où-que-vous-soyez)
-- **Écrit par l'IA** : plus de 500 000 lignes de code et plus de 1 000 000 de lignes modifiées, presque entièrement écrites par Halo lui-même.
+- **Écrit par Halo** : une grande station de travail IA qui s'améliore elle-même grâce à l'IA — plus de 500 000 lignes de code, en production stable dans des environnements d'entreprise du secteur financier.
 
 ---
 

@@ -33,7 +33,7 @@ Mit Halo teilen KIs die Arbeit selbst auf, übergeben sie, bauen ein Gedächtnis
 
 - **Für wen**: intensive KI-Nutzer, Entwickler, Forschende und Operations-Teams sowie kleine Teams, die KI in ihren Arbeitsalltag bringen.
 - **Drei Dinge**: [Deine KI-Werkbank für jeden Tag](#1-deine-ki-werkbank-für-jeden-tag) · [Digitalmenschen und Digitalmenschen-Teams](#2-digitalmenschen-und-digitalmenschen-teams) · [Arbeit von überall übergeben](#3-arbeit-von-überall-übergeben)
-- **Von KI geschrieben**: über 500.000 Zeilen Code und mehr als 1.000.000 geänderte Zeilen, fast alles von Halo selbst geschrieben.
+- **Von Halo geschrieben**: eine große KI-Arbeitsstation, die sich mit KI selbst weiterentwickelt — über 500.000 Zeilen Code, stabil im Einsatz in Unternehmensumgebungen der Finanzbranche.
 
 ---
 
